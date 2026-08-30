@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+/* 可爱柔和主题：把整套 stone 中性色重映射为奶茶粉棕暖色系，
+   所有页面的既有类名自动获得柔和暖色调 */
+@theme {
+  --color-stone-50: #fdf7f3;
+  --color-stone-100: #f9ece5;
+  --color-stone-200: #f2d9cf;
+  --color-stone-300: #e6bfb1;
+  --color-stone-400: #d69c8b;
+  --color-stone-500: #bd7d6c;
+  --color-stone-600: #a2624f;
+  --color-stone-700: #874d40;
+  --color-stone-800: #6e4036;
+  --color-stone-900: #57332c;
+
+  /* 柔光着色阴影：阴影带粉棕色相，替代通用黑阴影 */
+  --shadow-sm: 0 2px 10px -2px rgb(214 156 139 / 0.22);
+  --shadow-md: 0 6px 20px -6px rgb(189 125 108 / 0.28);
+  --shadow-lg: 0 12px 32px -10px rgb(189 125 108 / 0.32);
+
+  /* 更软糯的圆角 */
+  --radius-xl: 1rem;
+  --radius-2xl: 1.4rem;
+}
+
+html {
+  -webkit-tap-highlight-color: transparent;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif;
+  letter-spacing: 0.01em;
+  /* 奶油底 + 两抹淡淡的腮红渐变 */
+  background-color: #fdf7f3;
+  background-image:
+    radial-gradient(48rem 28rem at 12% -6%, rgb(249 205 198 / 0.35), transparent 60%),
+    radial-gradient(44rem 26rem at 96% 12%, rgb(250 220 196 / 0.4), transparent 55%);
+  background-attachment: fixed;
+}
+
+/* 全局交互反馈：柔和过渡 + 按下时轻微回弹，聚焦时粉色描边 */
+button,
+input,
+textarea,
+a {
+  transition: background-color 0.2s ease, color 0.2s ease, transform 0.15s ease,
+    box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+button:active:not(:disabled) {
+  transform: translateY(0) scale(0.96);
+}
+
+:focus-visible {
+  outline: 2px solid #e6a5b4;
+  outline-offset: 2px;
+}
+
+/* 小说正文区域使用衬线字体，更接近阅读体验 */
+.novel-text {
+  font-family: "Songti SC", "Noto Serif SC", serif;
+  line-height: 1.9;
+}
+
+/* 细滚动条，弱化工具感 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-thumb {
+  background: #e6bfb1;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
