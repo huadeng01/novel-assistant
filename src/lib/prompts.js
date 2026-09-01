@@ -4,10 +4,11 @@
 // 只提炼作者的写作习惯；"去除 AI 味"是 AI 自身的固有行为（见 NO_AI_FLAVOR_RULE），
 // 不需要也不应该从用户自己的文章里检查 AI 味词汇。
 const STYLE_SYSTEM = `你是一位资深小说编辑，擅长拆解作者的写作风格。
-你将收到某本小说的多段采样文本，请提炼作者的写作习惯：常用句式、叙事视角与节奏、对话风格、描写偏好、用词特点。
+你将收到某本小说的多段采样文本（已覆盖全书的开头、中间与结尾），请深入、详尽地提炼作者的写作习惯：
+常用句式与语法特征、叙事视角与人称、叙事节奏与分段习惯、对话风格（含提示语用法）、环境与心理描写偏好、用词与口语化程度、修辞与标点习惯。
 
 严格按以下 JSON 格式输出，不要输出任何其他内容：
-{"style_profile": "对作者写作习惯的完整描述（300字以内）", "habits": ["习惯1", "习惯2", "习惯3"]}`
+{"style_profile": "对作者写作习惯的完整描述，600~800 字，逐维度展开并给出采样片段中的具体依据", "habits": ["习惯1", "习惯2", "习惯3", "习惯4", "习惯5", "习惯6", "习惯7", "习惯8"]}`
 
 export function styleAnalyzeMessages(samples) {
   const body = samples.map((s, i) => `【片段${i + 1}】\n${s}`).join('\n\n')
@@ -25,10 +26,10 @@ export const NO_AI_FLAVOR_RULE = `【去除 AI 味】请像一位真实的作者
 2. 禁止形容词堆砌、"XX 的 XX"式排比、每句都叠加修饰语；
 3. 用具体的动作、对话、细节和场景推进叙事，让读者自己感受情绪，而不是替读者总结感受。`
 
-// 文风档案 + 用户自定义禁用词，拼进成文类提示词
+// 文风档案 + 用户自定义禁用词，拼进成文类提示词（两者可独立生效）
 function styleBlockOf({ style, forbidden }) {
-  if (!style) return ''
-  let block = `\n\n【作者文风档案，行文必须贴合】\n${style}`
+  let block = ''
+  if (style) block += `\n\n【作者文风档案，行文必须贴合】\n${style}`
   if (forbidden && forbidden.length) block += `\n\n【自定义禁用词，严禁出现】\n${forbidden.join('、')}`
   return block
 }
@@ -106,28 +107,73 @@ export function outlineMessages({ synopsis, world, count }) {
   return [
     {
       role: 'system',
-      content: `你是一位小说大纲师。基于梗概与设定，生成前 ${count} 章的逐章细纲。每章包含四项：章节标题、本章事件、冲突点、章末钩子（让读者想继续看的悬念）。直接输出细纲，不要输出解释性文字。`,
+      content: `你是一位小说大纲师。基于梗概与设定，生成前 ${count} 章的逐章细纲。每章包含四项：章节标题、本章事件、冲突点、章末钩子（让读者想继续看的悬念）。
+【节奏要求】章节事件密度要克制：每章只安排 1~2 个关键事件；伏笔要有充分发酵期，回收时机一般不早于埋设后 5 章，切忌抢收。直接输出细纲，不要输出解释性文字。`,
     },
     { role: 'user', content: `故事梗概：\n${synopsis}\n\n世界观与人物设定：\n${world}` },
   ]
 }
 
-export function draftMessages({ synopsis, world, outline, chapter, style, forbidden }) {
+// 细纲续写：已有细纲即将写完/已耗尽时，基于当前进展紧接规划下一批章节（保证百万字不断地图）
+export function outlineExtendMessages({ fromChapter, count, synopsis, rollingSummary, storylines, outlineTail }) {
+  const lines = (storylines || []).map((s) => `- ${s.name}（${s.type}）：${s.progress}`).join('\n') || '（暂无）'
+  return [
+    {
+      role: 'system',
+      content: `你是一位连载小说的细纲规划师。故事已写到当前进度，请紧接现有细纲规划第 ${fromChapter} 章到第 ${fromChapter + count - 1} 章的逐章细纲。
+【规则】
+1. 每章以「第N章」开头（从第 ${fromChapter} 章严格连续编号，不许重复已有章号），每章 60~120 字，含：章节标题、本章事件、章末钩子；
+2. 必须基于【当前进展】紧接发展，不得与已发生的既成事实矛盾，不得重复已写过的剧情；
+3. 节奏克制：每章只安排 1~2 个关键事件；未回收的伏笔要继续发酵而不是急于收束；
+4. 直接输出细纲正文，不要输出任何解释性文字。`,
+    },
+    {
+      role: 'user',
+      content: `【故事梗概】\n${synopsis || '（暂无）'}\n\n【当前进展（全书滚动摘要）】\n${rollingSummary || '（暂无）'}\n\n【现有故事线】\n${lines}\n\n【现有细纲结尾部分（紧接其后规划，编号从第 ${fromChapter} 章开始）】\n${outlineTail || '（暂无）'}`,
+    },
+  ]
+}
+
+export function draftMessages({ synopsis, world, outline, chapter, style, forbidden, prevChapters, prevTail }) {
+  let prevBlock = ''
+  if (prevChapters && prevChapters.length) {
+    prevBlock += `\n\n【前文各章摘要（新章必须自然衔接，禁止与既有情节矛盾或重复已经发生过的事）】\n`
+    prevBlock += prevChapters.map((c) => `第${c.no}章：${c.summary || '（无摘要）'}`).join('\n')
+  }
   return [
     {
       role: 'system',
       content:
-        `你是一位职业小说作者。请根据章节细纲撰写第 ${chapter} 章的正文，要求：2000 字左右；多用具象描写与对话推进剧情，少用形容词堆砌；章节结尾落在细纲给定的钩子上。直接输出正文，第一行为"第${chapter}章 章节标题"，不要输出解释性文字。` +
+        `你是一位职业小说作者。请根据章节细纲撰写第 ${chapter} 章的正文，要求：2000 字左右；多用具象描写与对话推进剧情，少用形容词堆砌；` +
+        (prevTail
+          ? '必须严格紧接上一章结尾的场景与时间点继续，人物位置、状态、情绪要承接上一章，不要重复或复述上一章内容；'
+          : '') +
+        `控制叙事节奏，本章只推进 1~2 个关键事件，不要压缩过程、跳过应展开的场景；细纲中尚未轮到回收的伏笔，本章只能铺垫渲染，绝不能提前揭示答案；章节结尾落在细纲给定的钩子上。直接输出正文，第一行为"第${chapter}章 章节标题"，不要输出解释性文字。` +
         NO_AI_FLAVOR_RULE +
         styleBlockOf({ style, forbidden }),
     },
-    { role: 'user', content: `故事梗概：\n${synopsis}\n\n世界观与人物设定：\n${world}\n\n章节细纲：\n${outline}\n\n请撰写第 ${chapter} 章正文。` },
+    {
+      role: 'user',
+      content: `故事梗概：\n${synopsis}\n\n世界观与人物设定：\n${world}\n\n章节细纲：\n${outline}${prevBlock}${prevTail ? `\n\n【上一章正文结尾（请直接紧接其后继续写）】\n${prevTail}` : ''}\n\n请撰写第 ${chapter} 章正文。`,
+    },
+  ]
+}
+
+// 根据章节内容自动起标题（长篇写作生成初稿后调用）
+export function chapterTitleMessages({ text }) {
+  return [
+    {
+      role: 'system',
+      content:
+        '你是一位小说编辑。请为给定章节内容起一个章节标题。要求：10 字以内，概括本章核心事件或悬念，不带"第X章"前缀，不加引号。\n【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容：\n{"title": "章节标题"}',
+    },
+    { role: 'user', content: `章节内容：\n${(text || '').slice(0, 4000)}` },
   ]
 }
 
 // ---------- 小说采样 ----------
-// 全文太长会超出上下文且浪费 token，按段切块后均匀采样
-export function sampleNovel(content, segments = 5, perLength = 2000) {
+// 全文太长会超出上下文且浪费 token，按段切块后均匀采样，并强制包含首尾两块（覆盖开头与结尾）
+export function sampleNovel(content, segments = 7, perLength = 2500) {
   const paras = content
     .split(/\n+/)
     .map((p) => p.trim())
@@ -143,8 +189,10 @@ export function sampleNovel(content, segments = 5, perLength = 2000) {
   }
   if (cur) chunks.push(cur)
   if (chunks.length <= segments) return chunks
-  const step = chunks.length / segments
-  return Array.from({ length: segments }, (_, i) => chunks[Math.floor(i * step)])
+  const idx = new Set([0, chunks.length - 1])
+  const step = (chunks.length - 1) / (segments - 1)
+  for (let i = 0; i < segments; i++) idx.add(Math.round(i * step))
+  return [...idx].sort((a, b) => a - b).map((i) => chunks[i])
 }
 
 // ---------- 模块三：续写 ----------
@@ -220,7 +268,7 @@ export function summarizeMessages({ text }) {
 }
 
 export function continueMessages({ text, summary, world, characters, outline, timeline, style, forbidden, instruction, index }) {
-  const angle = CONTINUE_ANGLES[index] || CONTINUE_ANGLES[0][0]
+  const angle = CONTINUE_ANGLES[index] || CONTINUE_ANGLES[0]
   let ctx = ''
   if (instruction) ctx += `\n\n【用户续写指令（最高优先级，必须遵循）】\n${instruction}`
   if (summary) ctx += `\n\n【前文摘要（原文较长，仅提供摘要作为上下文）】\n${summary}`
@@ -273,5 +321,343 @@ export function followupMessages({ text, summary, world, characters, outline, ti
   return [
     { role: 'system', content: followupSystem(angle) + NO_AI_FLAVOR_RULE + styleBlockOf({ style, forbidden }) },
     { role: 'user', content: `以下是小说原文（请紧接结尾续写）：\n\n${text}${ctx}\n\n请以「${angle.title}」的剧情走向续写。` },
+  ]
+}
+
+// ---------- 全局诊断看板 ----------
+// 对已有文本做一次"体检"：梳理故事线与节奏、评估伏笔健康度，供各 tab 的看板复用
+const DIAGNOSE_SYSTEM = `你是一位资深小说编辑，负责对给定的小说内容进行全局诊断。
+请输出以下内容：
+1. storylines：梳理现有故事线（主线 + 各支线），每条用一句话概括当前进展与悬而未决的问题；
+2. pace_issues：节奏问题诊断，重点关注：进程过快（关键转折缺乏铺垫）、伏笔收得太早（缺少发酵期）、事件密度过高（一章塞太多大事）；没有则为空数组；
+3. foreshadows：识别已埋下但尚未回收的伏笔/悬念，并给出建议回收时机（距当前还需几章发酵）；
+4. suggestions：不超过 5 条最重要的写作建议，针对具体问题，不要空话。
+客观基于给定内容分析，不要推测内容之外的情节。
+【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容：
+{"storylines": [{"name": "故事线名称", "progress": "当前进展与未决问题"}], "pace_issues": ["问题描述"], "foreshadows": [{"content": "伏笔内容", "suggestion": "建议回收时机与方式"}], "suggestions": ["建议1"]}`
+
+export function diagnoseMessages({ text, context }) {
+  return [
+    { role: 'system', content: DIAGNOSE_SYSTEM },
+    { role: 'user', content: `${context ? `【背景设定（供参考）】
+${context}
+
+` : ''}【待诊断内容】
+${text}` },
+  ]
+}
+
+// 完整故事时间线：把各章摘要串成细粒度的事件级时间线（新手写作第 5 步使用）
+const TIMELINE_SYSTEM = `你是一位小说剧情档案师。请根据给定的各章内容摘要，梳理出整个故事的完整时间线。
+要求：
+1. 尽量细：按章节顺序逐个展开，每章列出实际发生的关键事件（每条 30 字以内），不要笼统概括；
+2. 标注事件的因果关系与前后呼应（哪些事件为后文埋了钩子、哪些是前文钩子的回应）；
+3. 最后用 2~3 句话总结当前故事停在哪里、接下来悬而未决的问题是什么；
+4. 只基于给定摘要梳理，不编造未发生的情节。
+直接输出时间线文本，用清晰的分层格式，不要输出 JSON。`
+
+export function timelineMessages({ chapterSummaries }) {
+  const body = (chapterSummaries || [])
+    .map((c) => `第${c.no}章：${c.summary || '（无摘要）'}`)
+    .join('\n')
+  return [
+    { role: 'system', content: TIMELINE_SYSTEM },
+    { role: 'user', content: `以下是各章内容摘要，请梳理完整时间线：\n\n${body}` },
+  ]
+}
+
+const FORESHADOW_PLAN_SYSTEM = `你是一位小说节奏策划师。给定当前章节号与未回收伏笔清单，请为每条伏笔规划回收节奏。
+【规则】
+1. 伏笔需要充分发酵：回收时机一般不早于埋设后 5~15 章（主线伏笔可以更长），切忌刚埋就收；
+2. 为每条伏笔给出 min_resolve_chapter（最早允许回收的章节号，整数）与一句节奏建议；
+3. 如果伏笔埋设太久、再不回收会让读者遗忘，可以适当提前，但仍需保留至少 3 章发酵期；
+4. 不要遗漏任何一条伏笔，不要改变伏笔内容。
+【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容：
+{"plans": [{"id": "伏笔id", "min_resolve_chapter": 最早回收章号, "advice": "节奏建议"}]}`
+
+export function foreshadowPlanMessages({ currentChapter, active }) {
+  const list = (active || [])
+    .map((f) => `[id:${f.id}] 第${f.plantedChapter}章埋设：${f.content}（${f.importance}）`)
+    .join('\n')
+  return [
+    { role: 'system', content: FORESHADOW_PLAN_SYSTEM },
+    { role: 'user', content: `当前已写到第 ${currentChapter} 章。未回收伏笔：\n${list || '（暂无）'}` },
+  ]
+}
+
+// 卷级长时记忆：每 20 章把章节摘要链压缩成一段不可变的"卷志"，防止早期剧情被滚动摘要遗忘
+const VOLUME_MEMORY_SYSTEM = `你是一位小说档案师。请把给定的一卷章节摘要压缩成一段"卷志"，作为全书的长期记忆永久保存。
+要求：
+1. 500 字以内，保留本卷的关键事件、重要人物及其状态变化、埋下与回收的伏笔、重要地点与物品；
+2. 客观陈述，不评价、不预测；对后续写作仍有约束力的既成事实（人物死亡、誓言、恩怨、身份秘密等）必须保留；
+3. 直接输出卷志正文。
+【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容：
+{"memory": "卷志正文"}`
+
+export function volumeMemoryMessages({ chapters }) {
+  const body = (chapters || [])
+    .map((c) => `第${c.chapterNo}章 ${c.title}：${c.summary || '（无摘要）'}`)
+    .join('\n')
+  return [
+    { role: 'system', content: VOLUME_MEMORY_SYSTEM },
+    { role: 'user', content: `以下是本卷各章摘要，请压缩成卷志：\n\n${body}` },
+  ]
+}
+
+// ---------- 长篇一致性系统 ----------
+// 章节摘要：每章独立压缩成摘要，形成持久化的章节摘要链（供滚动摘要与回看）
+const CHAPTER_SUMMARY_SYSTEM = `你是一位小说编辑。请把给定章节内容浓缩成一份章节摘要。
+要求：150 字以内，客观罗列本章的关键事件、重要人物行动与章末状态；不添加原文没有的内容，不预测后续。
+【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容：
+{"summary": "章节摘要正文"}`
+
+export function chapterSummaryMessages({ text }) {
+  return [
+    { role: 'system', content: CHAPTER_SUMMARY_SYSTEM },
+    { role: 'user', content: `请为以下章节写摘要：\n\n${text}` },
+  ]
+}
+
+// 滚动摘要：把旧的全书摘要与最新章节摘要合并，维护唯一一份全书进度摘要，随写作滚动更新
+const ROLLING_SUMMARY_SYSTEM = `你是一位小说编辑，负责维护一部长篇小说的「滚动摘要」。
+请把旧的全书摘要与最新章节摘要合并成一份更新后的全书摘要：
+1. 保留旧摘要中的主要人物、核心设定与主线脉络；
+2. 并入最新章节的关键事件，并更新人物的最新状态；
+3. 删去对后续写作不再重要的琐碎细节；
+4. 总长度控制在 400 字以内，客观陈述，不预测后续。
+【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容：
+{"summary": "更新后的全书摘要"}`
+
+export function rollingSummaryMessages({ prevSummary, chapterSummary }) {
+  return [
+    { role: 'system', content: ROLLING_SUMMARY_SYSTEM },
+    { role: 'user', content: `旧的全书摘要：\n${prevSummary || '（无，这是开篇章节）'}\n\n最新章节摘要：\n${chapterSummary}` },
+  ]
+}
+
+// 章后状态回写：从章节内容提取人物状态变化、新人物、时间线事件与叙事视角，更新活档案
+const STATE_UPDATE_SYSTEM = `你是一位小说档案管理员。根据最新章节内容，输出人物状态变化与本章时间线事件。
+【规则】
+1. 只输出本章中明确发生变化的状态（位置、伤势、物品获得/失去、关系变化、生死、能力成长等），无变化的人物不要出现在结果中。
+2. name 必须与给定名单中的某个姓名完全一致，不要自造既有人物姓名；本章新出场的重要人物放入 new_characters。
+3. events 为本章关键事件，按先后顺序，每条 30 字以内；没有则空数组。
+4. pov 为本章的叙事视角人物（读者跟随谁的视角看故事），只输出一个姓名；如果是全知视角无固定人物，输出"全知"。
+【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容：
+{"character_updates": [{"name": "人物姓名", "change": "状态变化描述"}], "new_characters": [{"name": "姓名", "identity": "身份", "personality": "性格"}], "events": ["事件1", "事件2"], "pov": "视角人物姓名"}`
+
+export function stateUpdateMessages({ characters, text }) {
+  const roster = (characters || []).map((c) => c.name).filter(Boolean).join('、') || '（暂无）'
+  return [
+    { role: 'system', content: STATE_UPDATE_SYSTEM },
+    { role: 'user', content: `人物名单：${roster}\n\n最新章节内容：\n${text}` },
+  ]
+}
+
+// 故事线回写：章后检测本章推进了哪些故事线、是否新开了支线，持久化到项目档案
+const STORYLINE_SYSTEM = `你是一位小说故事线管理员。根据最新章节内容与现有故事线清单，输出故事线的最新进展。
+【规则】
+1. 对每条被本章推进的故事线，输出其名称与最新进展（一句话，含悬而未决的问题）；未被本章触及的故事线不要输出。
+2. 本章新开启的故事线（新的支线冲突、新的人物目标线）也要输出，type 取 "主线" 或 "支线"。
+3. 名称必须简短（6 字以内）且稳定：已有故事线必须原样沿用清单中的名称，不要改名。
+4. 客观基于章节内容，不预测后续。
+【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容：
+{"storylines": [{"name": "故事线名称", "type": "主线|支线", "progress": "最新进展与未决问题"}]}`
+
+export function storylineUpdateMessages({ storylines, text }) {
+  const list = (storylines || []).map((s) => `- ${s.name}（${s.type}）：${s.progress}`).join('\n') || '（暂无已登记故事线）'
+  return [
+    { role: 'system', content: STORYLINE_SYSTEM },
+    { role: 'user', content: `现有故事线：\n${list}\n\n最新章节内容：\n${text}` },
+  ]
+}
+
+// 检索词扩展：把本章写作方向扩展成一组检索关键词，用于从已写章节中召回相关前文片段（无需 embedding 服务的语义检索近似）
+const SEARCH_EXPAND_SYSTEM = `你是一位检索助手。把用户的"本章写作方向"扩展成一组检索关键词，用于从已有章节中召回相关前文片段。
+【规则】输出 6~12 个关键词：人物名（含别名）、地点、物品、组织、事件名词；只输出与写作方向相关或设定中出现过的词，不要解释。
+【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容：
+{"keywords": ["词1", "词2"]}`
+
+export function searchExpandMessages({ instruction, characters, world }) {
+  const roster = (characters || [])
+    .map((c) => [c.name, ...(c.aliases || [])].filter(Boolean).join('（又名：') + ((c.aliases || []).length ? '）' : ''))
+    .join('、')
+  return [
+    { role: 'system', content: SEARCH_EXPAND_SYSTEM },
+    { role: 'user', content: `本章写作方向：${instruction || '（未指定，按当前剧情自然推进）'}\n\n人物名单：${roster || '（暂无）'}\n\n世界观设定（节选）：${(world || '').slice(0, 1500) || '（暂无）'}` },
+  ]
+}
+
+// 伏笔账本：检测本章新埋的伏笔，以及对既有未回收伏笔的回收/提及（保守判定）
+const FORESHADOW_SYSTEM = `你是一位小说伏笔管理员，负责根据最新章节维护伏笔账本。
+【规则】
+1. new_foreshadows：本章新埋下、需要后文回收的暗示、悬念、未解之谜或承诺；没有则空数组。importance 取 "主线" 或 "支线"。
+2. resolved：本章被明确揭示或回收的伏笔的 id。
+3. mentioned：本章被提及或推进、但尚未回收的伏笔的 id。
+4. 保守判定：拿不准时宁可标 mentioned 也不要标 resolved，不要错标、多标。
+【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容：
+{"new_foreshadows": [{"content": "伏笔内容描述", "related_chars": ["相关人物"], "importance": "主线"}], "resolved": ["伏笔id"], "mentioned": ["伏笔id"]}`
+
+export function foreshadowMessages({ active, text }) {
+  const list = (active || []).map((f) => `[id:${f.id}] ${f.content}`).join('\n') || '（暂无未回收伏笔）'
+  return [
+    { role: 'system', content: FORESHADOW_SYSTEM },
+    { role: 'user', content: `当前未回收伏笔：\n${list}\n\n最新章节内容：\n${text}` },
+  ]
+}
+
+// 一致性校验：独立质检 agent，对照设定、人物状态、伏笔与大纲检查新章节（含大纲偏离检测）
+const CONSISTENCY_SYSTEM = `你是一位严格的小说一致性审校员，检查最新章节是否违背给定设定。
+检查项：
+1. 设定冲突：与世界观规则或前文既成事实矛盾；
+2. 人物一致：人物性格、能力、状态与记录矛盾（如死人复活、伤势瞬愈、性格突变）；
+3. 伏笔一致：与未回收伏笔矛盾或擅自提前揭示答案；
+4. 大纲偏离：明显偏离给定大纲的方向；如有，在 outline_drift 中描述；
+5. 节奏过快：一章内塞入过多关键事件、跳过本应展开的过程，或过早回收伏笔（尤其是仍在保护期内的伏笔）。
+没有问题时 issues 为空数组；每条简洁说明问题与依据，不要挑剔文风类小问题。
+【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容：
+{"issues": [{"type": "设定冲突|人物一致|伏笔一致|节奏过快|其他", "description": "问题描述"}], "outline_drift": "大纲偏离描述，没有则为空字符串"}`
+
+export function consistencyCheckMessages({ world, characters, outline, foreshadows, text }) {
+  const chars = (characters || []).map((c) => `${c.name}${c.status ? `（当前状态：${c.status}）` : ''}`).join('\n') || '（暂无）'
+  const hooks = (foreshadows || []).map((f) => `- ${f.content}`).join('\n') || '（暂无）'
+  return [
+    { role: 'system', content: CONSISTENCY_SYSTEM },
+    {
+      role: 'user',
+      content: `【世界观设定】\n${world || '（暂无）'}\n\n【人物名单与当前状态】\n${chars}\n\n【全书大纲】\n${outline || '（暂无）'}\n\n【未回收伏笔】\n${hooks}\n\n【最新章节】\n${text}`,
+    },
+  ]
+}
+
+// 长篇章节初稿：上下文由「大纲 + 长时记忆 + 滚动摘要 + 前章摘要 + 前文尾部 + 伏笔提醒（含保护期）+ 检索片段」组装，而不是全量原文
+export function longFormDraftMessages({ chapterNo, synopsis, world, characters, outline, longTerm, rollingSummary, prevChapterSummary, tail, foreshadows, passages, instruction, forbidden, storylines, povRule, scenePlan, chronicles }) {
+  const chars = (characters || [])
+    .map((c) => `${c.name}${c.aliases ? `（又名：${c.aliases}）` : ''}：${[c.identity, c.personality, c.status ? `当前状态：${c.status}` : ''].filter(Boolean).join('，')}`)
+    .join('\n')
+  const hooks = (foreshadows || [])
+    .map((f) => {
+      const guard = f.minResolveChapter && chapterNo < f.minResolveChapter ? `保护期内，第 ${f.minResolveChapter} 章前禁止回收，只可铺垫渲染` : '已到回收窗口，可自然回收'
+      return `- ${f.content}（${guard}）`
+    })
+    .join('\n')
+  const passageText = (passages || []).map((p) => `【出自：${p.title}】\n${p.text}`).join('\n\n')
+  let ctx = ''
+  if (scenePlan) ctx += `\n\n【本章场景清单（用户已确认，逐场景展开写作，不要跳过或合并场景，每个场景写足过程）】\n${scenePlan}`
+  if (instruction) ctx += `\n\n【本章写作方向（最高优先级，必须遵循）】\n${instruction}`
+  if (synopsis) ctx += `\n\n【故事梗概】\n${synopsis}`
+  if (world) ctx += `\n\n【世界观设定】\n${world}`
+  if (chars) ctx += `\n\n【人物名单（含当前状态，必须保持一致）】\n${chars}`
+  if (chronicles) ctx += `\n\n【人物编年史（各人物关键经历，写作不得与之矛盾）】\n${chronicles}`
+  if (outline) ctx += `\n\n【全书细纲（找到本章对应的细纲并完成它）】\n${outline}`
+  if (longTerm) ctx += `\n\n【长时记忆（全书重要事件沉淀，写较早章节时以此为准）】\n${longTerm}`
+  if (rollingSummary) ctx += `\n\n【全书滚动摘要（近期剧情回顾）】\n${rollingSummary}`
+  if (prevChapterSummary) ctx += `\n\n【上一章摘要】\n${prevChapterSummary}`
+  if (hooks) ctx += `\n\n【未回收伏笔（可自然推进，不要擅自回收）】\n${hooks}`
+  if (storylines && storylines.length) {
+    ctx += `\n\n【现有故事线（写作须服务于其中，只推进不擅自完结）】\n` + storylines.map((s) => `- ${s.name}（${s.type}）：${s.progress}`).join('\n')
+  }
+  if (passageText) ctx += `\n\n【相关前文片段（检索所得，供细节与文风参考，禁止照抄）】\n${passageText}`
+  return [
+    {
+      role: 'system',
+      content:
+        `你是一位职业小说作者，正在撰写一部长篇连载小说的第 ${chapterNo} 章。
+【规则】
+1. 篇幅约 2500 字；严格紧接前文尾部继续，不要重复或复述前文内容；
+2. 必须与世界观、人物当前状态、既有剧情保持一致；不要凭空捏造新的重要人物与设定；
+3. 如有细纲，按细纲完成本章事件，章末落在钩子上；
+4. 第一行先输出本章标题（10 字以内，概括本章核心事件或悬念，不带"第X章"前缀、不加引号），第二行起输出正文；除此之外不要输出任何解释性文字；
+5. 控制叙事节奏：本章只推进 1~2 个关键事件，不要压缩过程、跳过应展开的内容；严格遵守伏笔保护期，保护期内的伏笔只能铺垫渲染，绝不能回收或揭示答案。
+6. 叙事视角：以主角线为主；${povRule || '如需使用非主角视角，连续不得超过 3~5 章，篇幅也应明显短于主角线。'}` +
+        NO_AI_FLAVOR_RULE +
+        styleBlockOf({ forbidden }),
+    },
+    { role: 'user', content: `前文尾部（请紧接其后续写）：\n\n${tail}${ctx}\n\n请撰写第 ${chapterNo} 章正文。` },
+  ]
+}
+
+// 场景清单（两段式写作第一步）：先让 AI 规划本章 3~5 个场景，用户确认后再扩写正文，根治"进程太快/跳过应展开的场景"
+const SCENE_PLAN_SYSTEM = `你是一位职业小说作者，正在为下一章规划场景清单。
+【规则】
+1. 输出 3~5 个场景，场景依次衔接，每个场景推进一小步剧情或情感变化，合起来完成本章应写的内容；
+2. 每个场景用一句话描述（30 字以内）：在哪里、谁参与、发生什么、落在什么钩子上；
+3. 必须紧接上一章结尾，遵守伏笔保护期与故事线约束；保护期内的伏笔只能铺垫，不得安排揭示；
+4. 控制节奏：不要把多个重大事件塞进一章，留出对话与细节展开的空间。
+【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容：
+{"scenes": [{"title": "场景标题（6字以内）", "summary": "这个场景发生什么（30字以内）"}]}`
+
+export function scenePlanMessages({ chapterNo, synopsis, outline, rollingSummary, prevChapterSummary, storylines, foreshadows, povRule, instruction }) {
+  const hooks = (foreshadows || [])
+    .map((f) => {
+      const guard = f.minResolveChapter && chapterNo < f.minResolveChapter ? `保护期内，第 ${f.minResolveChapter} 章前禁止回收` : '可自然回收'
+      return `- ${f.content}（${guard}）`
+    })
+    .join('\n')
+  let ctx = ''
+  if (synopsis) ctx += `\n\n【故事梗概】\n${synopsis}`
+  if (outline) ctx += `\n\n【本章对应细纲】\n${outline}`
+  if (rollingSummary) ctx += `\n\n【全书滚动摘要】\n${rollingSummary}`
+  if (prevChapterSummary) ctx += `\n\n【上一章摘要（本章须紧接其后）】\n${prevChapterSummary}`
+  if (hooks) ctx += `\n\n【未回收伏笔】\n${hooks}`
+  if (storylines && storylines.length) {
+    ctx += `\n\n【现有故事线（只推进不擅自完结）】\n` + storylines.map((s) => `- ${s.name}（${s.type}）：${s.progress}`).join('\n')
+  }
+  if (instruction) ctx += `\n\n【用户指定的本章方向（必须遵循）】\n${instruction}`
+  if (povRule) ctx += `\n\n【视角约束】${povRule}`
+  return [
+    { role: 'system', content: SCENE_PLAN_SYSTEM },
+    { role: 'user', content: `请为长篇小说的第 ${chapterNo} 章规划场景清单。${ctx}` },
+  ]
+}
+
+// ---------- 章节审核模块（GLM 审核 + DeepSeek 重写） ----------
+// 五章连贯性审核：只查硬性连贯问题，明确禁止挑刺（文风/用词/修辞/节奏等主观问题一律不算问题）
+const CHAPTER_REVIEW_SYSTEM = `你是一位资深小说编辑，负责对最近若干章做一次「剧情连贯性审核」。
+【审核范围（只查这些，其余一律不管）】
+1. 设定冲突：违背世界观规则或前文既成事实；
+2. 时间线矛盾：事件先后、时间跨度与给定时间线冲突；
+3. 人物矛盾：人物状态、能力、性格前后不一致（如死人复活、伤势瞬愈、立场突变无铺垫）；
+4. 剧情断裂：相邻章节之间情节接不上、场景或目标无故跳变；
+5. 伏笔误处理：未回收的伏笔被提前揭示，或已回收的伏笔被当作未发生。
+【严格禁止的挑刺行为】
+- 不得指出文风、用词、修辞、对话风格、节奏快慢、篇幅长短等主观问题；
+- 不得建议"可以写得更好"式的优化项；只有硬性的逻辑/事实矛盾才算问题；
+- 没有硬性矛盾时必须判定通过，不要为了凑建议而编造问题。
+【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容：
+{"pass": true或false, "analysis": "300字以内的整体连贯性分析（客观陈述这五章讲了什么、衔接是否顺畅）", "suggestions": [{"chapter_no": 章号数字, "problem": "该章存在的硬性矛盾（含依据）", "fix_prompt": "300~500字的修改提示词：写明该章需要修正什么、必须保持与前后文哪些内容一致、重写时的注意事项"}]}
+没有问题时 suggestions 为空数组且 pass 为 true。`
+
+export function chapterReviewMessages({ world, timeline, rollingSummary, characters, foreshadows, beforeSummary, chapters }) {
+  const chars = (characters || []).map((c) => `${c.name}${c.status ? `（当前状态：${c.status}）` : ''}`).join('\n') || '（暂无）'
+  const hooks = (foreshadows || []).map((f) => `- ${f.content}`).join('\n') || '（暂无）'
+  const body = (chapters || []).map((c) => `【第 ${c.chapterNo} 章 ${c.title || ''}】\n${c.content}`).join('\n\n')
+  return [
+    { role: 'system', content: CHAPTER_REVIEW_SYSTEM },
+    {
+      role: 'user',
+      content: `【世界观设定（严禁违背）】\n${world || '（暂无）'}\n\n【全书事件时间线（严禁时间矛盾）】\n${timeline || '（暂无）'}\n\n【人物当前状态】\n${chars}\n\n【未回收伏笔】\n${hooks}\n\n【审核窗口之前的剧情摘要（须与之衔接）】\n${beforeSummary || '（这是开篇章节，无前文）'}\n\n【全书滚动摘要】\n${rollingSummary || '（暂无）'}\n\n【待审核章节全文】\n${body}`,
+    },
+  ]
+}
+
+// 单章定向重写：只改审核建议指出的问题，其余内容尽量保持原样（由 DeepSeek 执行，复用书风规则）
+export function chapterRewriteMessages({ chapterNo, title, content, fixPrompt, world, prevSummary, nextSummary, forbidden }) {
+  return [
+    {
+      role: 'system',
+      content:
+        `你是一位职业小说作者，正在修订长篇连载小说的第 ${chapterNo} 章。
+【规则】
+1. 严格按照【修改指令】重写本章：只修正指令指出的问题，其余情节、对话、场景尽量保持原样，不要大改无关内容；
+2. 重写后必须与【上一章摘要】自然衔接，也不能破坏【下一章摘要】所依赖的既成事实；
+3. 必须与世界观设定保持一致；
+4. 篇幅与原章相当；第一行输出章节标题（沿用「${title || '原标题'}」或按修改后内容微调，不带"第X章"前缀、不加引号），第二行起输出完整正文；除此之外不要输出任何解释性文字。` +
+        NO_AI_FLAVOR_RULE +
+        styleBlockOf({ forbidden }),
+    },
+    {
+      role: 'user',
+      content: `【修改指令】\n${fixPrompt}\n\n【上一章摘要（重写后须紧接其后）】\n${prevSummary || '（这是第一章，无前文）'}\n\n【下一章摘要（重写不得破坏的后续既成事实）】\n${nextSummary || '（这是最新章节，无后文）'}\n\n【世界观设定】\n${world || '（暂无）'}\n\n【本章原文】\n${content}\n\n请输出修订后的完整章节。`,
+    },
   ]
 }

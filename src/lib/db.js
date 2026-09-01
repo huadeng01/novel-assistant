@@ -1,6 +1,6 @@
-// IndexedDB 轻量封装：存小说全文、文风档案（突破 localStorage 5MB 限制）
+// IndexedDB 轻量封装：存小说全文、文风档案、长篇写作项目（突破 localStorage 5MB 限制）
 const DB_NAME = 'novel-assistant'
-const DB_VERSION = 1
+const DB_VERSION = 2
 
 let dbPromise = null
 
@@ -12,6 +12,7 @@ function openDB() {
       const db = req.result
       if (!db.objectStoreNames.contains('books')) db.createObjectStore('books', { keyPath: 'id' })
       if (!db.objectStoreNames.contains('styles')) db.createObjectStore('styles', { keyPath: 'bookId' })
+      if (!db.objectStoreNames.contains('projects')) db.createObjectStore('projects', { keyPath: 'id' })
     }
     req.onsuccess = () => resolve(req.result)
     req.onerror = () => reject(req.error)

@@ -1,13 +1,20 @@
 import { useRef, useState } from 'react'
-import { testKey } from '../lib/llm.js'
+import Ic from '../components/Ic.jsx'
+import { testKey, testGlmKey, GLM_DEFAULT_MODEL } from '../lib/llm.js'
 import { exportBackup, importBackup, wipeAll } from '../lib/backup.js'
 
-export default function ProfilePage({ apiKey, onKeyChange }) {
+export default function ProfilePage({ apiKey, onKeyChange, glmKey, onGlmKeyChange }) {
   const [input, setInput] = useState(apiKey)
   const [visible, setVisible] = useState(false)
   const [testing, setTesting] = useState(false)
   const [msg, setMsg] = useState(null) // {type: 'ok'|'err', text}
   const [wiping, setWiping] = useState(false)
+  // 智谱 GLM（章节审核引擎，可选）：Key 与模型 ID 分开管理，都存 localStorage
+  const [glmInput, setGlmInput] = useState(glmKey || '')
+  const [glmModelInput, setGlmModelInput] = useState(localStorage.getItem('glm_model') || GLM_DEFAULT_MODEL)
+  const [glmVisible, setGlmVisible] = useState(false)
+  const [glmTesting, setGlmTesting] = useState(false)
+  const [glmMsg, setGlmMsg] = useState(null)
   const importRef = useRef(null)
 
   const save = () => {
@@ -43,6 +50,47 @@ export default function ProfilePage({ apiKey, onKeyChange }) {
     }
   }
 
+  // 智谱 GLM Key 的保存 / 清除 / 测试（审核引擎专用，不影响写作引擎）
+  const saveGlm = () => {
+    const key = glmInput.trim()
+    const model = glmModelInput.trim() || GLM_DEFAULT_MODEL
+    localStorage.setItem('glm_model', model)
+    if (!key) {
+      setGlmMsg({ type: 'err', text: '请先填写智谱 API Key。' })
+      return
+    }
+    localStorage.setItem('glm_api_key', key)
+    onGlmKeyChange()
+    setGlmMsg({ type: 'ok', text: `已保存（模型：${model}），可在长篇写作的「章节审核」中使用。` })
+  }
+
+  const clearGlm = () => {
+    localStorage.removeItem('glm_api_key')
+    setGlmInput('')
+    onGlmKeyChange()
+    setGlmMsg({ type: 'ok', text: '智谱 Key 已清除。' })
+  }
+
+  const testGlm = async () => {
+    const key = glmInput.trim() || glmKey
+    if (!key) {
+      setGlmMsg({ type: 'err', text: '请先填写智谱 API Key。' })
+      return
+    }
+    // 测试前先落盘模型 ID，确保测试用的就是用户配置的模型
+    localStorage.setItem('glm_model', glmModelInput.trim() || GLM_DEFAULT_MODEL)
+    setGlmTesting(true)
+    setGlmMsg(null)
+    try {
+      await testGlmKey(key)
+      setGlmMsg({ type: 'ok', text: '连接成功！智谱 Key 有效，可以开始审核了。' })
+    } catch (e) {
+      setGlmMsg({ type: 'err', text: e.message })
+    } finally {
+      setGlmTesting(false)
+    }
+  }
+
   const onImport = async (e) => {
     const file = e.target.files?.[0]
     e.target.value = ''
@@ -65,8 +113,8 @@ export default function ProfilePage({ apiKey, onKeyChange }) {
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       {/* 小白上手引导 */}
-      <section className="rounded-2xl bg-[#fffaf6] p-6 shadow-sm">
-        <h2 className="text-base font-bold">🚀 三步开始使用</h2>
+      <section className="rounded-2xl bg-[#fbf8ef] p-6 shadow-sm">
+        <h2 className="text-base font-bold"><Ic n="rocket" /> 三步开始使用</h2>
         <ol className="mt-4 space-y-3 text-sm text-stone-600">
           <li className="flex gap-3">
             <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-stone-800 text-xs text-white">1</span>
@@ -102,8 +150,8 @@ export default function ProfilePage({ apiKey, onKeyChange }) {
       </section>
 
       {/* Key 管理 */}
-      <section className="rounded-2xl bg-[#fffaf6] p-6 shadow-sm">
-        <h2 className="text-base font-bold">🔑 API Key</h2>
+      <section className="rounded-2xl bg-[#fbf8ef] p-6 shadow-sm">
+        <h2 className="text-base font-bold"><Ic n="key" /> API Key</h2>
         <div className="mt-4 flex flex-col gap-3 sm:flex-row">
           <input
             type={visible ? 'text' : 'password'}
@@ -136,9 +184,60 @@ export default function ProfilePage({ apiKey, onKeyChange }) {
         )}
       </section>
 
+      {/* 智谱 GLM Key（审核引擎，可选） */}
+      <section className="rounded-2xl bg-[#fbf8ef] p-6 shadow-sm">
+        <h2 className="text-base font-bold"><Ic n="search" /> 智谱 GLM API Key（章节审核用，可选）</h2>
+        <p className="mt-2 text-sm text-stone-500">
+          长篇写作中每写满 5 章可解锁一次剧情连贯性审核，由 GLM-4.7-Flash 执行（只查硬性矛盾，不挑刺）；写作本身仍用 DeepSeek，两个 Key 互不影响。
+        </p>
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+          <input
+            type={glmVisible ? 'text' : 'password'}
+            value={glmInput}
+            onChange={(e) => setGlmInput(e.target.value)}
+            placeholder="智谱 API Key（bigmodel.cn 获取，有免费额度）"
+            className="flex-1 rounded-xl border border-stone-300 px-4 py-2.5 text-sm focus:border-stone-500 focus:outline-none"
+          />
+          <input
+            value={glmModelInput}
+            onChange={(e) => setGlmModelInput(e.target.value)}
+            placeholder={`模型 ID（默认 ${GLM_DEFAULT_MODEL}）`}
+            className="rounded-xl border border-stone-300 px-4 py-2.5 text-sm focus:border-stone-500 focus:outline-none sm:w-56"
+          />
+          <button onClick={() => setGlmVisible(!glmVisible)} className="rounded-xl border border-stone-300 px-4 py-2.5 text-sm text-stone-600 hover:bg-stone-50">
+            {glmVisible ? '隐藏' : '显示'}
+          </button>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-3">
+          <button onClick={saveGlm} className="rounded-full bg-stone-800 px-5 py-2.5 text-sm font-medium text-white hover:bg-stone-700">
+            保存
+          </button>
+          <button onClick={testGlm} disabled={glmTesting} className="rounded-full border border-stone-300 px-5 py-2.5 text-sm text-stone-700 hover:bg-stone-50 disabled:opacity-50">
+            {glmTesting ? '测试中…' : '测试连接'}
+          </button>
+          {glmKey && (
+            <button onClick={clearGlm} className="rounded-full border border-red-200 px-5 py-2.5 text-sm text-red-600 hover:bg-red-50">
+              清除 Key
+            </button>
+          )}
+        </div>
+        {glmMsg && (
+          <p className={`mt-3 rounded-lg px-3 py-2 text-sm ${glmMsg.type === 'ok' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
+            {glmMsg.text}
+          </p>
+        )}
+        <p className="mt-3 text-xs text-stone-400">
+          获取方法：登录{' '}
+          <a href="https://bigmodel.cn" target="_blank" rel="noreferrer" className="underline hover:text-stone-600">
+            智谱开放平台（bigmodel.cn）
+          </a>
+          ，在「API Keys」中创建，新用户有免费额度；不填也不影响写作功能。
+        </p>
+      </section>
+
       {/* 数据管理 */}
-      <section className="rounded-2xl bg-[#fffaf6] p-6 shadow-sm">
-        <h2 className="text-base font-bold">💾 数据备份</h2>
+      <section className="rounded-2xl bg-[#fbf8ef] p-6 shadow-sm">
+        <h2 className="text-base font-bold"><Ic n="save" /> 数据备份</h2>
         <p className="mt-2 text-sm text-stone-500">
           你的小说和文风档案只存在当前设备的浏览器里。换设备或清理浏览器缓存前，请先导出备份。
         </p>

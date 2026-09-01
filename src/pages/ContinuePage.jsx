@@ -1,16 +1,21 @@
 import { useRef, useState } from 'react'
+import Ic from '../components/Ic.jsx'
 import KeyBanner from '../components/KeyBanner.jsx'
 import Library from '../components/Library.jsx'
+import DiagnosePanel from '../components/DiagnosePanel.jsx'
 import { useLibrary } from '../hooks/useLibrary.js'
 import { chatJSON, chatStream } from '../lib/llm.js'
 import { analyzeMessages, continueMessages, CONTINUE_ANGLES, followupMessages, FOLLOWUP_ANGLES, summarizeMessages } from '../lib/prompts.js'
-import { copyText, countWords, mapLimit } from '../lib/utils.js'
+import { copyText, countWords, mapLimit, uid } from '../lib/utils.js'
+import { put } from '../lib/db.js'
+import { newProject } from '../lib/longform.js'
 
 // 原文过长时：先给前文做摘要，再拼上尾部原文发给续写
 const SUMMARIZE_THRESHOLD = 8000 // 超过这个字数才做前文摘要
 const TAIL_LENGTH = 4000 // 尾部原文保留字数（紧接续写处）
+const ANALYZE_LIMIT = 60000 // 分析原文的最大截取字数，防止超出上下文窗口
 
-export default function ContinuePage({ apiKey, onNeedKey }) {
+export default function ContinuePage({ apiKey, onNeedKey, onOpenLongForm }) {
   const lib = useLibrary()
   const [text, setText] = useState('')
   const [analyzing, setAnalyzing] = useState(false)
@@ -103,7 +108,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
     let tail = text
     if (text.length > SUMMARIZE_THRESHOLD) {
       setSummarizing(true)
-      const headText = text.slice(0, text.length - TAIL_LENGTH)
+      const headText = text.slice(Math.max(0, text.length - TAIL_LENGTH - 60000), text.length - TAIL_LENGTH)
       try {
         const sumRes = await chatJSON({ apiKey, messages: summarizeMessages({ text: headText }), temperature: 0.3 })
         summary = sumRes.summary || ''
@@ -181,7 +186,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
     let tail = text
     if (text.length > SUMMARIZE_THRESHOLD) {
       setSummarizing(true)
-      const headText = text.slice(0, text.length - TAIL_LENGTH)
+      const headText = text.slice(Math.max(0, text.length - TAIL_LENGTH - 60000), text.length - TAIL_LENGTH)
       try {
         const sumRes = await chatJSON({ apiKey, messages: summarizeMessages({ text: headText }), temperature: 0.3 })
         summary = sumRes.summary || ''
@@ -245,6 +250,33 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
   }
   const removeChar = (idx) => setCharacters(characters.filter((_, i) => i !== idx))
 
+  // 把分析结果与原文一键转入长篇写作：人物卡升级为人物档案，后续由一致性档案接手连载
+  const migrateToLongForm = async () => {
+    if (!text) return
+    const proj = newProject(`续写导入 ${new Date().toLocaleDateString()}`)
+    proj.world = world
+    proj.outline = outline
+    proj.characters = characters
+      .filter((c) => c?.name)
+      .map((c) => ({ name: c.name, aliases: [], identity: c.identity || '', personality: c.personality || '', description: c.description || '', status: '' }))
+    proj.events = timeline.map((t) => ({ chapter: 0, text: `${t.stage}：${t.summary}` }))
+    proj.chapters = [
+      {
+        id: uid(),
+        chapterNo: 1,
+        title: '既有正文',
+        content: text,
+        wordCount: countWords(text),
+        summary: '',
+        issueCount: 0,
+        createdAt: Date.now(),
+      },
+    ]
+    await put('projects', proj)
+    localStorage.setItem('na_open_project', proj.id)
+    onOpenLongForm && onOpenLongForm()
+  }
+
   const copy = async (t, btn) => {
     await copyText(t)
     if (btn) {
@@ -261,11 +293,11 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
       <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
         <Library lib={lib} apiKey={apiKey} onNeedKey={onNeedKey} />
 
-        <div className="space-y-4">
+        <div className="min-w-0 space-y-4">
           {/* 原文输入 */}
-          <section className="rounded-2xl bg-[#fffaf6] p-5 shadow-sm">
+          <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 className="text-base font-bold">📖 粘贴或导入要续写的原文</h2>
+              <h2 className="text-base font-bold"><Ic n="book" /> 粘贴或导入要续写的原文</h2>
               <div className="flex items-center gap-2">
                 <span className="text-xs text-stone-400">{wordCount} 字</span>
                 <button
@@ -290,7 +322,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
                 disabled={analyzing}
                 className="min-h-[44px] rounded-full bg-stone-800 px-6 py-3 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
               >
-                {analyzing ? 'AI 分析中…' : '🔍 分析原文（世界观 / 人物 / 大纲 / 故事线）'}
+                {analyzing ? 'AI 分析中…' : <><Ic n="search" /> 分析原文（世界观 / 人物 / 大纲 / 故事线）</>}
               </button>
               <span className="text-xs text-stone-400">分析结果可编辑，作为续写的可选上下文</span>
             </div>
@@ -299,15 +331,23 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
 
           {/* 分析结果（可编辑） */}
           {analyzed && (
-            <section className="space-y-4 rounded-2xl bg-[#fffaf6] p-5 shadow-sm">
+            <section className="space-y-4 rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="text-base font-bold">📋 原文分析结果（可编辑）</h2>
-                <span className="text-xs text-stone-400">留空的项 = 原文未明确提及，AI 未捏造</span>
+                <h2 className="text-base font-bold"><Ic n="clipboard" /> 原文分析结果（可编辑）</h2>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-stone-400">留空的项 = 原文未明确提及，AI 未捏造</span>
+                  <button
+                    onClick={migrateToLongForm}
+                    className="rounded-full border border-stone-300 px-4 py-1.5 text-xs text-stone-600 hover:bg-stone-50"
+                  >
+                    <Ic n="mountain" /> 转入长篇写作（人物卡升级为活档案）
+                  </button>
+                </div>
               </div>
 
               {/* 世界观 */}
               <div>
-                <p className="mb-1.5 text-xs font-semibold text-stone-500">🌍 世界观设定</p>
+                <p className="mb-1.5 text-xs font-semibold text-stone-500"><Ic n="globe" /> 世界观设定</p>
                 <textarea
                   value={world}
                   onChange={(e) => setWorld(e.target.value)}
@@ -319,7 +359,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
 
               {/* 人物卡 */}
               <div>
-                <p className="mb-1.5 text-xs font-semibold text-stone-500">👤 人物卡（{characters.length}）</p>
+                <p className="mb-1.5 text-xs font-semibold text-stone-500"><Ic n="user" /> 人物卡（{characters.length}）</p>
                 {characters.length === 0 ? (
                   <p className="rounded-xl border border-dashed border-stone-300 p-3 text-xs text-stone-400">原文未分析出明确人物，可在下方手动添加。</p>
                 ) : (
@@ -330,7 +370,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
                           onClick={() => removeChar(i)}
                           className="absolute right-2 top-2 rounded-full px-2 py-0.5 text-xs text-red-500 hover:bg-red-50"
                         >
-                          ✕
+                          <Ic n="x" />
                         </button>
                         <p className="pr-6 text-sm font-bold text-stone-800">{c.name || '未命名'}</p>
                         {c.identity && <p className="mt-0.5 text-xs text-stone-600">身份：{c.identity}</p>}
@@ -381,7 +421,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
 
               {/* 大纲 */}
               <div>
-                <p className="mb-1.5 text-xs font-semibold text-stone-500">🗺 故事大纲</p>
+                <p className="mb-1.5 text-xs font-semibold text-stone-500"><Ic n="map" /> 故事大纲</p>
                 <textarea
                   value={outline}
                   onChange={(e) => setOutline(e.target.value)}
@@ -410,10 +450,27 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
             </section>
           )}
 
+          {/* 诊断看板：梳理现有故事线与节奏（含伏笔是否收太早），在续写前先看一眼 */}
+          {text && (
+            <DiagnosePanel
+              apiKey={apiKey}
+              text={text.length > 16000 ? text.slice(-16000) : text}
+              context={[
+                world && `【世界观】${world.slice(0, 500)}`,
+                outline && `【大纲】${outline.slice(0, 800)}`,
+                timeline.length > 0 && `【已有故事线】${timeline.map((t) => `${t.stage}：${t.summary}`).join('；')}`,
+              ]
+                .filter(Boolean)
+                .join('\n')}
+              disabled={analyzing || generating || followupGenerating}
+              cacheKey={`na_diag_cont_${text.length}_${text.slice(0, 16)}`}
+            />
+          )}
+
           {/* 续写按钮区 */}
-          <section className="rounded-2xl bg-[#fffaf6] p-5 shadow-sm">
+          <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 className="text-base font-bold">✍️ 续写</h2>
+              <h2 className="text-base font-bold"><Ic n="pen" /> 续写</h2>
               {lib.selectedBook && lib.style ? (
                 <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs text-emerald-700">将贴合《{lib.selectedBook.name}》文风</span>
               ) : (
@@ -427,14 +484,14 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
                 disabled={generating || summarizing || followupGenerating}
                 className="min-h-[44px] rounded-full bg-stone-800 px-6 py-3 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
               >
-                {summarizing && generating ? '正在摘要前文…' : generating ? `AI 续写中… ${progress}/4` : '✍️ 自定义续写'}
+                {summarizing && generating ? '正在摘要前文…' : generating ? `AI 续写中… ${progress}/4` : <><Ic n="pen" /> 自定义续写</>}
               </button>
               <button
                 onClick={generateFollowup}
                 disabled={followupGenerating || summarizing || generating}
                 className="min-h-[44px] rounded-full border-2 border-stone-800 bg-transparent px-6 py-3 text-sm font-medium text-stone-800 hover:bg-stone-100 disabled:opacity-50"
               >
-                {followupGenerating ? `探索后续中… ${followupProgress}/4` : '🔮 探索后续版本'}
+                {followupGenerating ? `探索后续中… ${followupProgress}/4` : <><Ic n="wand" /> 探索后续版本</>}
               </button>
               {(generating || summarizing || followupGenerating) && (
                 <div className="flex items-center gap-2 text-sm text-stone-500">
@@ -451,7 +508,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
               {CONTINUE_ANGLES.map((a, i) => {
                 const v = versions[i]
                 return (
-                  <article key={i} className="flex flex-col rounded-2xl bg-[#fffaf6] shadow-sm">
+                  <article key={i} className="flex flex-col rounded-2xl bg-[#fbf8ef] shadow-sm">
                     <header className="flex items-center justify-between rounded-t-2xl border-b border-stone-100 px-4 py-3">
                       <h3 className="text-sm font-bold">{a.title}</h3>
                       {v?.content && !v.error && (
@@ -482,12 +539,12 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
           {/* 后续版本卡片（AI 自动探索 4 种剧情走向，区别于自定义续写） */}
           {(followupGenerating || followupVersions.length > 0) && (
             <section className="space-y-3">
-              <h3 className="text-sm font-bold text-stone-700">🔮 后续版本（AI 自动探索 4 种剧情走向）</h3>
+              <h3 className="text-sm font-bold text-stone-700"><Ic n="wand" /> 后续版本（AI 自动探索 4 种剧情走向）</h3>
               <div className="grid gap-4 sm:grid-cols-2">
                 {FOLLOWUP_ANGLES.map((a, i) => {
                   const v = followupVersions[i]
                   return (
-                    <article key={i} className="flex flex-col rounded-2xl bg-[#fffaf6] shadow-sm">
+                    <article key={i} className="flex flex-col rounded-2xl bg-[#fbf8ef] shadow-sm">
                       <header className="flex items-center justify-between rounded-t-2xl border-b border-stone-100 px-4 py-3">
                         <h3 className="text-sm font-bold">{a.title}</h3>
                         {v?.content && !v.error && (
@@ -525,10 +582,10 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
           onClick={() => !generating && setShowDialog(false)}
         >
           <div
-            className="w-full max-w-lg rounded-2xl bg-[#fffaf6] p-6 shadow-xl"
+            className="w-full max-w-lg rounded-2xl bg-[#fbf8ef] p-6 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-base font-bold">✍️ 续写设定</h3>
+            <h3 className="text-base font-bold"><Ic n="pen" /> 续写设定</h3>
             <p className="mt-1 text-xs leading-relaxed text-stone-500">
               告诉 AI 你希望故事如何发展，例如：接下来主角发现了一个秘密 / 节奏加快 / 引入新冲突 / 让某人物出场 / 场景切换到某处… 不填则 AI 自由发挥。
             </p>
@@ -558,7 +615,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
                 disabled={generating || countWords(text) < 50}
                 className="min-h-[40px] rounded-full bg-stone-800 px-5 py-2 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
               >
-                🚀 开始续写
+                <Ic n="rocket" /> 开始续写
               </button>
             </div>
             {countWords(text) < 50 && (

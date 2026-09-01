@@ -6,14 +6,14 @@ import { downloadText } from './utils.js'
 const WIZARD_KEY = 'na_wizard_state'
 
 export async function exportBackup() {
-  const [books, styles] = await Promise.all([getAll('books'), getAll('styles')])
+  const [books, styles, projects] = await Promise.all([getAll('books'), getAll('styles'), getAll('projects')])
   let wizard = null
   try {
     wizard = JSON.parse(localStorage.getItem(WIZARD_KEY) || 'null')
   } catch {
     /* 忽略 */
   }
-  const data = { app: 'novel-assistant', version: 1, exportedAt: new Date().toISOString(), books, styles, wizard }
+  const data = { app: 'novel-assistant', version: 2, exportedAt: new Date().toISOString(), books, styles, projects, wizard }
   downloadText(`novel-assistant-备份-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(data, null, 2), 'application/json')
 }
 
@@ -22,9 +22,10 @@ export async function importBackup(file) {
   if (data.app !== 'novel-assistant' || !Array.isArray(data.books)) {
     throw new Error('备份文件格式不正确，请选择本项目导出的备份文件。')
   }
-  await Promise.all([clearStore('books'), clearStore('styles')])
+  await Promise.all([clearStore('books'), clearStore('styles'), clearStore('projects')])
   for (const b of data.books) await put('books', b)
   for (const s of data.styles || []) await put('styles', s)
+  for (const p of data.projects || []) await put('projects', p)
   if (data.wizard) localStorage.setItem(WIZARD_KEY, JSON.stringify(data.wizard))
 }
 
@@ -41,6 +42,6 @@ export function saveWizardState(state) {
 }
 
 export async function wipeAll() {
-  await Promise.all([clearStore('books'), clearStore('styles')])
+  await Promise.all([clearStore('books'), clearStore('styles'), clearStore('projects')])
   localStorage.removeItem(WIZARD_KEY)
 }

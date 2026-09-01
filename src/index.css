@@ -1,27 +1,63 @@
 @import "tailwindcss";
 
-/* 可爱柔和主题：把整套 stone 中性色重映射为奶茶粉棕暖色系，
-   所有页面的既有类名自动获得柔和暖色调 */
+/* 墨韵宣纸主题：中性色重映射为「宣纸—松烟—墨黑」色阶，
+   琥珀→朱砂（唯一强调色）、天蓝→黛青、翠绿→苔绿，
+   所有页面的既有类名自动获得纸墨气质，无需改动页面逻辑 */
 @theme {
-  --color-stone-50: #fdf7f3;
-  --color-stone-100: #f9ece5;
-  --color-stone-200: #f2d9cf;
-  --color-stone-300: #e6bfb1;
-  --color-stone-400: #d69c8b;
-  --color-stone-500: #bd7d6c;
-  --color-stone-600: #a2624f;
-  --color-stone-700: #874d40;
-  --color-stone-800: #6e4036;
-  --color-stone-900: #57332c;
+  /* 纸墨中性色阶：50 浅宣 → 800/900 墨黑 */
+  --color-stone-50: #f6f2e7;
+  --color-stone-100: #efe9d8;
+  --color-stone-200: #e0d8c1;
+  --color-stone-300: #c9c0a4;
+  --color-stone-400: #9d9483;
+  --color-stone-500: #7a7263;
+  --color-stone-600: #5d5649;
+  --color-stone-700: #403a2f;
+  --color-stone-800: #262218;
+  --color-stone-900: #15120c;
 
-  /* 柔光着色阴影：阴影带粉棕色相，替代通用黑阴影 */
-  --shadow-sm: 0 2px 10px -2px rgb(214 156 139 / 0.22);
-  --shadow-md: 0 6px 20px -6px rgb(189 125 108 / 0.28);
-  --shadow-lg: 0 12px 32px -10px rgb(189 125 108 / 0.32);
+  /* 朱砂：警告、高亮与唯一强调色统一为朱批色阶 */
+  --color-amber-50: #faf1ea;
+  --color-amber-100: #f4e0d2;
+  --color-amber-200: #e9c3ab;
+  --color-amber-300: #db9f7f;
+  --color-amber-400: #cf7451;
+  --color-amber-500: #c65837;
+  --color-amber-600: #c2402a;
+  --color-amber-700: #a13423;
+  --color-amber-800: #832a1d;
+  --color-amber-900: #6a2318;
 
-  /* 更软糯的圆角 */
-  --radius-xl: 1rem;
-  --radius-2xl: 1.4rem;
+  /* 黛青：信息、预览与档案区块 */
+  --color-sky-50: #eef3f3;
+  --color-sky-100: #dde8e9;
+  --color-sky-200: #bcd3d6;
+  --color-sky-300: #93b5ba;
+  --color-sky-400: #6a939b;
+  --color-sky-500: #4d7580;
+  --color-sky-600: #3d5f6a;
+  --color-sky-700: #2f4858;
+  --color-sky-800: #263a47;
+
+  /* 苔绿：成功与通过状态，降饱和贴近植物色 */
+  --color-emerald-50: #f1f5ec;
+  --color-emerald-100: #e2ebd9;
+  --color-emerald-200: #c5d7b7;
+  --color-emerald-300: #a2bd8f;
+  --color-emerald-400: #7f9f6b;
+  --color-emerald-500: #64854f;
+  --color-emerald-600: #557046;
+  --color-emerald-700: #445a3a;
+  --color-emerald-800: #36472f;
+
+  /* 墨色投影：低饱和、像纸上淡影，替代粉棕柔光 */
+  --shadow-sm: 0 2px 8px -2px rgb(38 34 24 / 0.08);
+  --shadow-md: 0 6px 18px -6px rgb(38 34 24 / 0.12);
+  --shadow-lg: 0 12px 30px -10px rgb(38 34 24 / 0.16);
+
+  /* 纸页式小圆角：稿纸与书页不是软糖 */
+  --radius-xl: 0.45rem;
+  --radius-2xl: 0.7rem;
 }
 
 html {
@@ -30,21 +66,32 @@ html {
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
-    "Microsoft YaHei", sans-serif;
-  letter-spacing: 0.01em;
-  /* 奶油底 + 两抹淡淡的腮红渐变 */
-  background-color: #fdf7f3;
+  /* 正文用宋体（网页端为思源宋体），读与写都接近纸面 */
+  font-family: "Noto Serif SC", "Songti SC", "STSong", "PingFang SC", serif;
+  letter-spacing: 0.02em;
+  /* 宣纸底：暖象牙底色 + 两抹极淡的纤维光斑 */
+  background-color: #f3eee0;
   background-image:
-    radial-gradient(48rem 28rem at 12% -6%, rgb(249 205 198 / 0.35), transparent 60%),
-    radial-gradient(44rem 26rem at 96% 12%, rgb(250 220 196 / 0.4), transparent 55%);
+    radial-gradient(46rem 26rem at 14% -8%, rgb(252 249 238 / 0.9), transparent 62%),
+    radial-gradient(40rem 24rem at 92% 6%, rgb(233 224 199 / 0.5), transparent 55%);
   background-attachment: fixed;
+  color: #262218;
 }
 
-/* 全局交互反馈：柔和过渡 + 按下时轻微回弹，聚焦时粉色描边 */
+/* 标题字：楷体味的展示字体（朱砂印章式的存在感），仅用于各级标题；
+   字重交给页面自身的 font-bold 类，不在此覆盖 */
+h1,
+h2,
+h3 {
+  font-family: "ZCOOL XiaoWei", "Noto Serif SC", "Songti SC", serif;
+  letter-spacing: 0.06em;
+}
+
+/* 全局交互反馈：纸面元素轻抬，聚焦时朱砂描边 */
 button,
 input,
 textarea,
+select,
 a {
   transition: background-color 0.2s ease, color 0.2s ease, transform 0.15s ease,
     box-shadow 0.2s ease, border-color 0.2s ease;
@@ -55,27 +102,27 @@ button:hover:not(:disabled) {
 }
 
 button:active:not(:disabled) {
-  transform: translateY(0) scale(0.96);
+  transform: translateY(0) scale(0.97);
 }
 
 :focus-visible {
-  outline: 2px solid #e6a5b4;
+  outline: 2px solid #c2402a;
   outline-offset: 2px;
 }
 
-/* 小说正文区域使用衬线字体，更接近阅读体验 */
+/* 小说正文区域：衬线 + 舒朗行距，更接近阅读体验 */
 .novel-text {
-  font-family: "Songti SC", "Noto Serif SC", serif;
-  line-height: 1.9;
+  font-family: "Noto Serif SC", "Songti SC", serif;
+  line-height: 1.95;
 }
 
-/* 细滚动条，弱化工具感 */
+/* 细滚动条：纸色系，弱化工具感 */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #e6bfb1;
+  background: #c9c0a4;
   border-radius: 999px;
 }
 ::-webkit-scrollbar-track {

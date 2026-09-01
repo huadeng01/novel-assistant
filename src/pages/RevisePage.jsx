@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
+import Ic from '../components/Ic.jsx'
 import KeyBanner from '../components/KeyBanner.jsx'
 import Library from '../components/Library.jsx'
+import DiagnosePanel from '../components/DiagnosePanel.jsx'
 import { useLibrary } from '../hooks/useLibrary.js'
 import { chatJSON } from '../lib/llm.js'
 import { reviewMessages, versionMessages, VERSION_ANGLES } from '../lib/prompts.js'
@@ -101,11 +103,11 @@ export default function RevisePage({ apiKey, onNeedKey }) {
       <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
         <Library lib={lib} apiKey={apiKey} onNeedKey={onNeedKey} />
 
-        <div className="space-y-4">
+        <div className="min-w-0 space-y-4">
           {/* 原文输入 */}
-          <section className="rounded-2xl bg-[#fffaf6] p-5 shadow-sm">
+          <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
             <div className="flex items-center justify-between">
-              <h2 className="text-base font-bold">✏️ 粘贴要修改的片段</h2>
+              <h2 className="text-base font-bold"><Ic n="pencil" /> 粘贴要修改的片段</h2>
               {lib.selectedBook && lib.style && (
                 <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs text-emerald-700">已贴合《{lib.selectedBook.name}》文风</span>
               )}
@@ -136,10 +138,13 @@ export default function RevisePage({ apiKey, onNeedKey }) {
             )}
           </section>
 
+          {/* 诊断看板：梳理片段的故事线与节奏问题（含伏笔是否收太早） */}
+          {text && <DiagnosePanel apiKey={apiKey} text={text} disabled={loading} cacheKey={`na_diag_rev_${text.length}_${text.slice(0, 16)}`} />}
+
           {/* 无需修改的提示 */}
           {result && !result.needRevision && (
             <section className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5">
-              <p className="text-sm font-semibold text-emerald-800">👏 这一段写得很好，AI 认为不需要修改</p>
+              <p className="text-sm font-semibold text-emerald-800"><Ic n="clap" /> 这一段写得很好，AI 认为不需要修改</p>
               <p className="mt-1 text-xs text-emerald-700/80">以下是 AI 给出的详细点评，见下方点评区。</p>
             </section>
           )}
@@ -148,7 +153,7 @@ export default function RevisePage({ apiKey, onNeedKey }) {
           {result && result.needRevision && result.versions.length > 0 && (
             <section className="grid gap-4 sm:grid-cols-2">
               {result.versions.map((v, i) => (
-                <article key={i} className="flex flex-col rounded-2xl bg-[#fffaf6] shadow-sm">
+                <article key={i} className="flex flex-col rounded-2xl bg-[#fbf8ef] shadow-sm">
                   <header className="flex items-center justify-between rounded-t-2xl border-b border-stone-100 px-4 py-3">
                     <h3 className="text-sm font-bold">{v.title || `版本${i + 1}`}</h3>
                     <div className="flex gap-2">
@@ -186,7 +191,7 @@ export default function RevisePage({ apiKey, onNeedKey }) {
           {result && result.review && (
             <section className="rounded-2xl border border-amber-100 bg-amber-50 p-5">
               <h3 className="flex items-center gap-2 text-sm font-bold text-amber-900">
-                📝 AI 写作点评
+                <Ic n="notepad" /> AI 写作点评
               </h3>
               <p className="novel-text mt-2 text-sm leading-relaxed whitespace-pre-wrap text-amber-900/90">{result.review}</p>
             </section>

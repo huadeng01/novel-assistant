@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react'
+import Ic from './Ic.jsx'
 
 // 书库侧边栏：导入设备上的小说、选择参考书、查看与编辑文风档案
 // 电脑 / 平板统一走系统文件选择器（iPad 从「文件」App 选择）
@@ -55,9 +56,9 @@ export default function Library({ lib, apiKey, onNeedKey }) {
   return (
     <div className="space-y-4">
       {/* 书库 */}
-      <section className="rounded-2xl bg-[#fffaf6] p-4 shadow-sm">
+      <section className="rounded-2xl bg-[#fbf8ef] p-4 shadow-sm">
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-bold">📚 我的书库</h3>
+          <h3 className="text-sm font-bold"><Ic n="library" /> 我的书库</h3>
           <button
             onClick={() => fileRef.current?.click()}
             className="rounded-full bg-stone-800 px-4 py-1.5 text-xs font-medium text-white hover:bg-stone-700"
@@ -90,7 +91,7 @@ export default function Library({ lib, apiKey, onNeedKey }) {
                   window.confirm(`确定删除《${b.name}》吗？其文风档案也会一并删除。`) && removeBook(b.id)
                 }}
                 className={`ml-2 shrink-0 rounded-full px-2 py-1 text-xs ${
-                  selectedId === b.id ? 'text-stone-300 hover:bg-stone-700' : 'text-stone-400 hover:bg-stone-100'
+                  selectedId === b.id ? 'text-stone-200 hover:bg-stone-700 hover:text-red-200' : 'text-stone-400 hover:bg-stone-100 hover:text-red-600'
                 }`}
               >
                 删除
@@ -102,9 +103,9 @@ export default function Library({ lib, apiKey, onNeedKey }) {
 
       {/* 文风档案 */}
       {selectedBook && (
-        <section className="rounded-2xl bg-[#fffaf6] p-4 shadow-sm">
+        <section className="rounded-2xl bg-[#fbf8ef] p-4 shadow-sm">
           <div className="flex items-center justify-between">
-            <h3 className="text-sm font-bold">🖋 文风档案</h3>
+            <h3 className="text-sm font-bold"><Ic n="style" /> 文风档案</h3>
             {style && (
               <button onClick={onAnalyze} disabled={analyzing} className="text-xs text-stone-400 underline hover:text-stone-600 disabled:opacity-50">
                 重新分析
@@ -115,7 +116,7 @@ export default function Library({ lib, apiKey, onNeedKey }) {
           {analyzing ? (
             <div className="mt-3 flex items-center gap-2 rounded-xl bg-stone-50 p-4 text-sm text-stone-500">
               <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-stone-300 border-t-stone-600" />
-              正在分析《{selectedBook.name}》的写作习惯…约需 20 秒
+              正在抽样分析《{selectedBook.name}》的开头、中间与结尾…约需 1 分钟
             </div>
           ) : style ? (
             <div className="mt-3 space-y-3 text-sm">
@@ -139,7 +140,7 @@ export default function Library({ lib, apiKey, onNeedKey }) {
                       className="rounded-full bg-red-50 px-2.5 py-1 text-xs text-red-600 hover:bg-red-100"
                       title="点击移除"
                     >
-                      {w} ✕
+                      {w} <Ic n="x" />
                     </button>
                   ))}
                 </div>
@@ -160,10 +161,10 @@ export default function Library({ lib, apiKey, onNeedKey }) {
           ) : (
             <div className="mt-3">
               <p className="text-xs leading-relaxed text-stone-500">
-                选中《{selectedBook.name}》后，AI 会参照这本书拆分出你的书写习惯，后续所有改写都会严格贴合你的文风；AI 自身也会自动去除 AI 腔表达。
+                选中《{selectedBook.name}》后，AI 会抽取这本书的开头、中间与结尾共 7 段样本，深度拆解你的书写习惯（约 600~800 字的文风档案）；后续所有改写与成文都会严格贴合你的文风，AI 自身也会自动去除 AI 腔表达。
               </p>
               <button onClick={onAnalyze} className="mt-3 w-full rounded-full bg-stone-800 px-4 py-2.5 text-sm font-medium text-white hover:bg-stone-700">
-                分析文风（约 20 秒）
+                分析文风（约 1 分钟）
               </button>
             </div>
           )}
