@@ -15,6 +15,8 @@ export default function ProfilePage({ apiKey, onKeyChange, glmKey, onGlmKeyChang
   const [glmVisible, setGlmVisible] = useState(false)
   const [glmTesting, setGlmTesting] = useState(false)
   const [glmMsg, setGlmMsg] = useState(null)
+  // 智谱 Embedding-3 可选开关：默认关闭（前文召回用零费用的关键词检索）；启用后长篇写作前文召回改走语义向量。
+  const [embedOn, setEmbedOn] = useState(localStorage.getItem('glm_embedding') === '1')
   const importRef = useRef(null)
 
   const save = () => {
@@ -233,6 +235,27 @@ export default function ProfilePage({ apiKey, onKeyChange, glmKey, onGlmKeyChang
           </a>
           ，在「API Keys」中创建，新用户有免费额度；不填也不影响写作功能。
         </p>
+      </section>
+
+      {/* 智谱 Embedding-3 可选开关：与上方审核共用同一把智谱 Key，按量计费极便宜；不启用则前文召回用免费关键词检索 */}
+      <section className="rounded-2xl bg-[#fbf8ef] p-6 shadow-sm">
+        <h2 className="text-base font-bold"><Ic n="pulse" /> 语义向量召回（可选，智谱 Embedding-3）</h2>
+        <p className="mt-2 text-sm text-stone-500">
+          长篇写作生成初稿时，前文片段召回默认用不花钱的关键词检索。开启后改用语义向量召回（同一把智谱 Key，Embedding-3 约 0.5 元/百万 tokens，一本书全部章节向量化通常不到一毛钱，向量会缓存不重复计费），对语义相近但用词不同的前文召回更准。服务异常时自动降级回关键词检索，不影响写作。
+        </p>
+        <label className="mt-3 flex cursor-pointer items-center gap-3">
+          <input
+            type="checkbox"
+            checked={embedOn}
+            onChange={(e) => {
+              localStorage.setItem('glm_embedding', e.target.checked ? '1' : '0')
+              setEmbedOn(e.target.checked)
+            }}
+            className="h-4 w-4 accent-stone-700"
+          />
+          <span className="text-sm text-stone-700">{embedOn ? '已启用：前文召回优先走语义向量' : '未启用：用免费关键词检索（推荐先用这个）'}</span>
+        </label>
+        {!glmKey && embedOn && <p className="mt-2 text-xs text-amber-700">注意：还没填智谱 Key，开启后会自动降级回关键词检索；要真正生效请先在上方填写智谱 Key。</p>}
       </section>
 
       {/* 数据管理 */}

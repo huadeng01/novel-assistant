@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "墨语系统架构（三层 + 外部模型）",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [1260, 680],
+    "views": [
+      { "id": "main-path", "label": "长篇写作主路径", "focus": ["workbench", "longform", "prompts", "llm", "idb"], "note": "主工作台的每一次生成，都经流程引擎组装提示词后调用模型，成果落回 IndexedDB。" },
+      { "id": "persistence", "label": "本地持久化", "focus": ["longform", "idb", "ls"], "note": "书籍资产存 IndexedDB，密钥、草稿快照与归档检查点存 localStorage。" },
+      { "id": "external-models", "label": "外部模型边界", "focus": ["llm", "deepseek", "glm"], "note": "仅生成请求离开本机：DeepSeek 负责写作类任务，智谱 GLM 负责审核与向量召回（可选）。" }
+    ]
+  },
+  "components": [
+    { "id": "workbench", "type": "frontend", "label": "长篇写作主工作台", "sublabel": "章节写作 / 伏笔账本 / 设定与人物 / 拆书 / 时间线 / 质检中心", "pos": [40, 60], "size": [330, 84], "tag": "LongFormPage" },
+    { "id": "rewrite", "type": "frontend", "label": "改写润色", "pos": [420, 70], "size": [140, 64] },
+    { "id": "continue", "type": "frontend", "label": "续写", "pos": [584, 70], "size": [120, 64] },
+    { "id": "starter", "type": "frontend", "label": "新手写作", "pos": [728, 70], "size": [140, 64] },
+    { "id": "mine", "type": "frontend", "label": "我的", "sublabel": "密钥与设置", "pos": [892, 70], "size": [120, 64] },
+    { "id": "longform", "type": "backend", "label": "longform.js 流程引擎", "sublabel": "导演链路 / 逐场景扩写 / 五路归档 / 伏笔保护期 / 卷结构 / 检索召回 / AI 味扫描", "pos": [40, 300], "size": [430, 84] },
+    { "id": "llm", "type": "backend", "label": "llm.js 模型客户端", "sublabel": "统一请求 / 重试 / 流式", "pos": [640, 300], "size": [222, 68], "tag": "用户自带 Key" },
+    { "id": "deepseek", "type": "external", "label": "DeepSeek", "sublabel": "写作 / 规划 / 重写 / 归档", "pos": [950, 250], "size": [240, 70] },
+    { "id": "glm", "type": "external", "label": "智谱 GLM", "sublabel": "连贯性审核 / 向量召回", "pos": [950, 560], "size": [240, 70], "tag": "可选" },
+    { "id": "prompts", "type": "backend", "label": "prompts.js 提示词契约", "sublabel": "各步骤 system/user 模板与输出协议", "pos": [40, 450], "size": [430, 68] },
+    { "id": "idb", "type": "database", "label": "IndexedDB", "sublabel": "books / styles / projects / analyses", "pos": [530, 450], "size": [250, 68] },
+    { "id": "ls", "type": "database", "label": "localStorage", "sublabel": "API Key / 草稿快照 / 归档检查点", "pos": [810, 450], "size": [220, 68] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "浏览器纯前端 · React 18 + Vite 6 + Tailwind 4（无服务端）", "wraps": ["workbench", "rewrite", "continue", "starter", "mine", "longform", "llm", "prompts", "idb", "ls"], "pad": 24 }
+  ],
+  "connections": [
+    { "from": "workbench", "to": "longform", "label": "调用流程引擎", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "labelDx": 70 },
+    { "from": "rewrite", "to": "llm", "label": "直接请求", "variant": "dashed", "fromSide": "bottom", "toSide": "top", "labelDy": -10 },
+    { "from": "continue", "to": "llm", "variant": "dashed", "fromSide": "bottom", "toSide": "top" },
+    { "from": "starter", "to": "llm", "variant": "dashed", "fromSide": "bottom", "toSide": "top" },
+    { "from": "longform", "to": "prompts", "label": "组装提示词", "fromSide": "bottom", "toSide": "top", "labelDx": -100, "labelDy": 30 },
+    { "from": "longform", "to": "llm", "label": "发起请求", "variant": "emphasis", "fromSide": "right", "toSide": "left", "labelDy": -12 },
+    { "from": "longform", "to": "idb", "label": "读写书籍资产", "fromSide": "bottom", "toSide": "top", "labelAt": [296, 400] },
+    { "from": "longform", "to": "ls", "label": "快照与检查点", "variant": "dashed", "fromSide": "right", "toSide": "top", "labelAt": [560, 382] },
+    { "from": "llm", "to": "deepseek", "label": "写作类任务", "variant": "emphasis", "fromSide": "right", "toSide": "left" },
+    { "from": "llm", "to": "glm", "label": "审核与召回（可选）", "variant": "dashed", "fromSide": "right", "toSide": "right", "via": [[1230, 334], [1230, 595]], "labelSegment": 1, "labelDx": -104 }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "页面层", "items": ["五个页面共享同一套引擎与存储", "长篇主工作台是流程引擎的唯一全流程入口", "改写 / 续写 / 新手页直连 prompts + llm"] },
+    { "dot": "emerald", "title": "引擎层", "items": ["longform.js 编排所有多步链路并逐步落库", "prompts.js 固化输出协议，llm.js 统一模型访问"] },
+    { "dot": "rose", "title": "边界与安全", "items": ["数据只存浏览器本地（IndexedDB / localStorage）", "仅模型生成请求离开本机，Key 由用户自带", "GLM 为可选增强，不配置也不影响写作链路"] }
+  ]
+}

@@ -5,3 +5,5 @@ dist
 .vercel
 .vercel-tmp
 *-preview.png
+
+__MACOSX

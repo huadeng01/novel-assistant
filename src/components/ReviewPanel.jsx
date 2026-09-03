@@ -4,7 +4,7 @@
 import { useState } from 'react'
 import { glmChatJSON } from '../lib/llm.js'
 import { chapterReviewMessages } from '../lib/prompts.js'
-import { REVIEW_WINDOW, reviewOpportunity, buildReviewInput, applyReview, dismissReview } from '../lib/longform.js'
+import { REVIEW_WINDOW, reviewOpportunity, buildReviewInput, buildCrossReviewInput, applyReview, dismissReview } from '../lib/longform.js'
 import ChapterRewriter from './ChapterRewriter.jsx'
 import Ic from './Ic.jsx'
 
@@ -17,14 +17,15 @@ export default function ReviewPanel({ project, saveProject, apiKey, glmKey, onNe
   const showResult = current && !current.dismissed
   const busy = globalBusy || reviewing
 
-  // 执行审核：消耗一次机会，结果落库（刷新不丢）
-  const runReview = async () => {
+  // 执行审核：消耗一次机会，结果落库（刷新不丢）；cross 为抽章交叉审核（随机抽早期章 + 最近 3 章，专查跨窗口矛盾）
+  const runReview = async (cross = false) => {
     if (!glmKey) return onNeedGlmKey?.()
     if (!opp.available) return
     setErr('')
     setReviewing(true)
     try {
-      const input = buildReviewInput(project)
+      const input = cross ? buildCrossReviewInput(project) : buildReviewInput(project)
+      if (!input) throw new Error('章节太少（不足 6 章）或早期章节不足，暂无法抽章交叉审核，请先用常规审核。')
       let res
       try {
         res = await glmChatJSON({ apiKey: glmKey, messages: chapterReviewMessages(input), temperature: 0.2 })
@@ -33,7 +34,7 @@ export default function ReviewPanel({ project, saveProject, apiKey, glmKey, onNe
         if (/格式/.test(e.message)) res = await glmChatJSON({ apiKey: glmKey, messages: chapterReviewMessages(input), temperature: 0.1 })
         else throw e
       }
-      await saveProject(applyReview(project, res))
+      await saveProject(applyReview(project, res, cross ? 'cross' : 'window'))
     } catch (e) {
       setErr(e.message)
     } finally {
@@ -60,6 +61,15 @@ export default function ReviewPanel({ project, saveProject, apiKey, glmKey, onNe
         >
           {reviewing ? 'GLM 审核中…' : opp.available ? `开始审核（窗口：最近 ${REVIEW_WINDOW} 章）` : opp.written < REVIEW_WINDOW ? `再写 ${opp.toNext} 章解锁审核` : '暂无审核机会'}
         </button>
+        {/* 抽章交叉审核：常规审核只看最近 5 章，跨窗口的远期矛盾靠它兜底；与常规审核共用机会 */}
+        <button
+          onClick={() => runReview(true)}
+          disabled={busy || !opp.available || project.chapters.length < 6}
+          title="从早期章节随机抽 2 章 + 最近 3 章送审，专查跨窗口矛盾（消耗同一次审核机会）"
+          className="rounded-full border-2 border-stone-800 px-4 py-2 text-xs font-medium text-stone-800 hover:bg-stone-100 disabled:opacity-50"
+        >
+          <Ic n="shuffle" /> 抽章交叉审核（早期章 × 最近章）
+        </button>
       </div>
 
       {!glmKey && (
@@ -75,7 +85,9 @@ export default function ReviewPanel({ project, saveProject, apiKey, glmKey, onNe
           <div className={`rounded-xl p-3 ${current.pass && !current.suggestions.length ? 'bg-emerald-50' : 'bg-amber-50'}`}>
             <p className={`text-xs font-semibold ${current.pass && !current.suggestions.length ? 'text-emerald-700' : 'text-amber-700'}`}>
               {current.pass && !current.suggestions.length ? <><Ic n="ok" /> 审核通过</> : <><Ic n="alert" /> 发现连贯性问题</>}
-              <span className="ml-1 font-normal opacity-70">（审核窗口：截至第 {current.windowEnd} 章的最近 {REVIEW_WINDOW} 章）</span>
+              <span className="ml-1 font-normal opacity-70">
+                {current.kind === 'cross' ? '（抽章交叉审核：早期抽样章 × 最近 3 章）' : `（审核窗口：截至第 ${current.windowEnd} 章的最近 ${REVIEW_WINDOW} 章）`}
+              </span>
             </p>
             <p className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-stone-600">{current.analysis}</p>
           </div>

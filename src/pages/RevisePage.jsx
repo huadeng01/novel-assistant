@@ -48,6 +48,7 @@ export default function RevisePage({ apiKey, onNeedKey }) {
 
     const style = lib.style?.profile
     const forbidden = lib.style?.forbidden
+    const samples = lib.style?.samples || []
     try {
       // 第一步：点评 + 判断是否需要修改（独立一次请求）
       const reviewRes = await callJSON(reviewMessages({ text }), 0.4)
@@ -60,7 +61,7 @@ export default function RevisePage({ apiKey, onNeedKey }) {
         const items = VERSION_ANGLES.map((angle, i) => ({ angle, i }))
         const results = await mapLimit(items, 2, async ({ angle, i }) => {
           try {
-            const r = await callJSON(versionMessages({ style, forbidden, text, index: i }), angle.temp)
+            const r = await callJSON(versionMessages({ style, forbidden, samples, text, index: i }), angle.temp)
             return {
               title: r.title || angle.title,
               revised_text: r.revised_text || '',

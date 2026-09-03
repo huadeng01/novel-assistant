@@ -4,7 +4,8 @@
 import { useRef, useState } from 'react'
 import { chatStream } from '../lib/llm.js'
 import { chapterRewriteMessages } from '../lib/prompts.js'
-import { replaceChapter, refreshChapterMeta } from '../lib/longform.js'
+import { replaceChapter, refreshChapterMeta, activeStyleRules, aiFlavorScan } from '../lib/longform.js'
+import { getById } from '../lib/db.js'
 import { countWords } from '../lib/utils.js'
 import Ic from './Ic.jsx'
 
@@ -25,6 +26,7 @@ export function parseTitle(full) {
 export default function ChapterRewriter({ project, saveProject, apiKey, chapterNo, fixPrompt, label, disabled, onDone }) {
   const [rewriting, setRewriting] = useState(false)
   const [preview, setPreview] = useState(null) // {title, text, streaming}
+  const [flavor, setFlavor] = useState([]) // AI 味扫描命中（重写完成后验证；空 = 未命中）
   const [step, setStep] = useState('')
   const [err, setErr] = useState('')
   const abortRef = useRef(null) // 停止按钮用：中止后已生成部分保留供预览
@@ -40,8 +42,11 @@ export default function ChapterRewriter({ project, saveProject, apiKey, chapterN
     setErr('')
     setRewriting(true)
     setPreview(null)
+    setFlavor([])
     abortRef.current = new AbortController()
     try {
+      // 写法引擎：重写同样套用本书绑定的文风档案、范例与反模板规则（未绑定则不注入）
+      const styleRec = project.styleBookId ? await getById('styles', project.styleBookId) : null
       const full = await chatStream({
         apiKey,
         messages: chapterRewriteMessages({
@@ -52,6 +57,10 @@ export default function ChapterRewriter({ project, saveProject, apiKey, chapterN
           world: project.world,
           prevSummary: sorted[idx - 1]?.summary || '',
           nextSummary: sorted[idx + 1]?.summary || '',
+          forbidden: styleRec?.forbidden || [],
+          style: styleRec?.profile || '',
+          rules: activeStyleRules(project),
+          samples: styleRec?.samples || [],
         }),
         temperature: 0.8,
         signal: abortRef.current?.signal,
@@ -59,6 +68,8 @@ export default function ChapterRewriter({ project, saveProject, apiKey, chapterN
       })
       if (countWords(full) < 200) throw new Error('重写结果太短，可能生成异常，请重试。')
       setPreview({ ...parseTitle(full), streaming: false })
+      // AI 味输出层验证：重写完成后扫描成品，命中则提醒（不阻断替换）
+      setFlavor(aiFlavorScan(parseTitle(full).text, styleRec?.forbidden || []))
     } catch (e) {
       if (e.name === 'AbortError') {
         // 停止后保留已生成部分供预览，由用户决定丢弃还是继续看
@@ -129,6 +140,11 @@ export default function ChapterRewriter({ project, saveProject, apiKey, chapterN
           <div className={`mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap rounded-lg bg-white p-3 text-xs leading-relaxed ${preview.streaming ? 'text-stone-500' : 'text-stone-700'}`}>
             {preview.text}
           </div>
+          {!preview.streaming && flavor.length > 0 && (
+            <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800">
+              <Ic n="alert" /> AI 味扫描命中 {flavor.length} 类套路表达：{flavor.slice(0, 5).map((h) => (h.type === '结构' ? h.name : h.word)).join('、')}{flavor.length > 5 ? ' 等' : ''}。可再次重写或替换后手动调整。
+            </p>
+          )}
           {!preview.streaming && (
             <button
               onClick={confirmReplace}

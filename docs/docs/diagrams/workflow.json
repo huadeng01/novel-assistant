@@ -1,0 +1,55 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "墨语长篇小说创作工作流",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "opening", "label": "开书链路", "focus": ["idea", "angles", "assets", "scenes"], "note": "一句话灵感经导演拍板后链式生成全套资产，细纲带逐章起承转合定位标签。" },
+      { "id": "chapter_loop", "label": "逐章循环", "focus": ["scenes", "draft", "archive"], "note": "场景清单确认后逐场景扩写，保存即五路并发归档。" },
+      { "id": "quality_recovery", "label": "质检与恢复", "focus": ["archive", "checkpoint", "review", "rewrite"], "note": "归档中断可断点续跑；每 5 章解锁一次连贯性审核与定向重写。" }
+    ]
+  },
+  "lanes": [
+    { "id": "author", "label": "作者 · 开书导演" },
+    { "id": "writing", "label": "章节写作" },
+    { "id": "quality", "label": "质检 · 成书" },
+    { "id": "exceptions", "label": "中断恢复", "variant": "exception" }
+  ],
+  "phases": [
+    { "id": "plan", "label": "规划", "fromCol": 0, "toCol": 2 },
+    { "id": "write", "label": "写作·归档·质检·成书", "fromCol": 3, "toCol": 5, "variant": "emphasis" }
+  ],
+  "mainPath": ["idea", "angles", "assets", "scenes", "draft", "archive"],
+  "nodes": [
+    { "id": "idea", "lane": "author", "col": 0, "type": "frontend", "label": "一句话灵感", "sublabel": "书名 + 创意" },
+    { "id": "angles", "lane": "author", "col": 1, "type": "backend", "label": "3 个开书方向", "sublabel": "题材 / 基调差异化", "tag": "作者拍板", "width": 142 },
+    { "id": "assets", "lane": "author", "col": 2, "type": "backend", "label": "链式生成开书资产", "sublabel": "梗概→世界观→人物→细纲→卷战略", "tag": "逐步落库", "width": 190 },
+    { "id": "scenes", "lane": "writing", "col": 3, "type": "frontend", "label": "场景清单", "sublabel": "3~5 场景 + 出场人物 + 分支提案", "tag": "作者确认", "width": 150 },
+    { "id": "draft", "lane": "writing", "col": 4, "type": "backend", "label": "逐场景扩写初稿", "sublabel": "每场景 600~900 字 · AI 味扫描", "width": 150 },
+    { "id": "archive", "lane": "writing", "col": 5, "type": "database", "label": "保存即归档", "sublabel": "摘要/状态/伏笔/时间线/故事线 五路并发", "tag": "每章结算", "width": 190 },
+    { "id": "review", "lane": "quality", "col": 3, "type": "security", "label": "五章连贯性审核", "sublabel": "只查硬性矛盾 + 结构错位", "tag": "每 5 章解锁", "width": 142 },
+    { "id": "rewrite", "lane": "quality", "col": 4, "type": "backend", "label": "定向重写", "sublabel": "按章绑定修改指令", "tag": "预览确认后替换", "width": 130 },
+    { "id": "export", "lane": "quality", "col": 5, "type": "external", "label": "成书导出", "sublabel": "按章拼接全文 .txt", "width": 130 },
+    { "id": "checkpoint", "lane": "exceptions", "col": 5, "type": "messagebus", "label": "归档检查点", "sublabel": "每完成一路落盘一次", "tag": "断点续跑", "width": 142 }
+  ],
+  "edges": [
+    { "from": "idea", "to": "angles", "label": "生成方向候选" },
+    { "from": "angles", "to": "assets", "label": "选定方向", "variant": "emphasis" },
+    { "from": "assets", "to": "scenes", "label": "资产就位开写", "variant": "emphasis" },
+    { "from": "scenes", "to": "draft", "label": "确认后扩写" },
+    { "from": "draft", "to": "archive", "label": "保存章节" },
+    { "from": "archive", "to": "scenes", "label": "开写下一章", "variant": "dashed", "role": "return" },
+    { "from": "archive", "to": "review", "label": "每写满 5 章", "variant": "emphasis" },
+    { "from": "review", "to": "rewrite", "label": "发现问题" , "role": "branch" },
+    { "from": "rewrite", "to": "archive", "label": "替换原文回写", "variant": "dashed", "role": "return" },
+    { "from": "review", "to": "export", "label": "审核通过", "variant": "emphasis" },
+    { "from": "archive", "to": "checkpoint", "label": "中断", "role": "error", "variant": "security" },
+    { "from": "checkpoint", "to": "archive", "label": "只补未完成步骤", "variant": "dashed", "role": "return" }
+  ],
+  "cards": [
+    { "dot": "emerald", "title": "一条主线", "items": ["灵感先经导演拍板再链式生成，每一步落库，中途刷新不丢", "场景清单由作者确认后才扩写，重大剧情分支停下等拍板", "保存即五路归档（摘要/人物状态/伏笔/时间线/故事线），下一章上下文自动就位"] },
+    { "dot": "rose", "title": "中断与修正", "items": ["归档途中被刷新或中断，从检查点只补未完成的步骤", "审核只查硬性矛盾与结构错位，不挑文风", "定向重写先预览 diff，确认后才替换原文"] }
+  ]
+}

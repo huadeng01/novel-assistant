@@ -49,6 +49,8 @@ export function useLibrary() {
           bookId: book.id,
           profile: res.style_profile || '',
           habits: Array.isArray(res.habits) ? res.habits : [],
+          // 文风范例（原样摘录的典型段落）：写作时作为 few-shot 注入，模仿效果强于纯描述；旧档案无此字段时为空
+          samples: Array.isArray(res.samples) ? res.samples.filter((s) => typeof s === 'string' && s.trim()).slice(0, 3) : [],
           // 禁用词改为纯用户手动管理：重新分析时保留用户已添加的词，不覆盖
           forbidden: style?.forbidden || [],
           updatedAt: Date.now(),

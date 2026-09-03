@@ -133,6 +133,48 @@ export async function glmChatJSON({ apiKey, messages, temperature = 0.3, signal 
   return extractJSON(text)
 }
 
+// ---------- 智谱 Embedding-3（可选向量召回） ----------
+// 与 GLM 审核共用同一把智谱 Key；0.5 元/百万 tokens，单请求最多 64 条、单条 3072 tokens。
+// 默认关闭（用不花钱的关键词/扩词检索，即方案 A）；在「我的」页开关启用后用于前文语义召回。
+export const embeddingEnabled = () => localStorage.getItem('glm_embedding') === '1'
+
+export async function glmEmbed({ apiKey, texts }) {
+  let res
+  try {
+    res = await fetch('https://open.bigmodel.cn/api/paas/v4/embeddings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model: 'embedding-3', input: texts }),
+    })
+  } catch {
+    throw new Error('网络连接失败，请检查网络后重试。')
+  }
+  if (!res.ok) {
+    let data = {}
+    try {
+      data = await res.json()
+    } catch {
+      /* 忽略 */
+    }
+    throw friendlyError(res.status, data, '智谱向量')
+  }
+  const data = await res.json()
+  return (data.data || []).sort((a, b) => a.index - b.index).map((d) => d.embedding)
+}
+
+export function cosine(a, b) {
+  if (!a || !b || a.length !== b.length) return 0
+  let dot = 0
+  let na = 0
+  let nb = 0
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i]
+    na += a[i] * a[i]
+    nb += b[i] * b[i]
+  }
+  return na && nb ? dot / Math.sqrt(na * nb) : 0
+}
+
 // 用最小请求测试智谱 Key 是否有效
 export async function testGlmKey(apiKey) {
   await doFetch({
