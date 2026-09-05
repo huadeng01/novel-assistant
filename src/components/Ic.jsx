@@ -3,9 +3,9 @@
 import {
   Activity, Archive, Ban, BookOpen, Bookmark, Check, ChartColumn, CircleCheck,
   Clapperboard, ClipboardList, Download, Feather, FileInput, FileText, Globe,
-  KeyRound, Library, Lightbulb, Map, Mountain, PartyPopper, Pencil, PenLine, Hourglass,
-  RefreshCw, Rocket, RotateCcw, Route, Scroll, Search, Settings, Shield,
-  MessagesSquare, Shuffle, Sparkles, Sprout, Square, Stethoscope, Target, Timer, TriangleAlert, Undo2, User, Video, Wand2, X,
+  KeyRound, Library, Lightbulb, Map, MessageCircle, Mountain, PartyPopper, Pencil, PenLine, Hourglass,
+  RefreshCw, Rocket, RotateCcw, Route, Scroll, Search, Settings, Shield, Shuffle,
+  Sparkles, Sprout, Square, Stethoscope, Target, Timer, TriangleAlert, Undo2, User, Video, Wand2, X,
 } from 'lucide-react'
 
 const MAP = {
@@ -54,8 +54,8 @@ const MAP = {
   timer: Timer,          // ⏱ 节奏
   hourglass: Hourglass,  // ⏳ 时间线
   pulse: Activity,       // 心跳 / 状态流
-  shuffle: Shuffle,      // 🔀 抽章交叉审核
-  chat: MessagesSquare,  // 💬 剧情讨论
+  chat: MessageCircle,   // 💬 剧情讨论
+  shuffle: Shuffle,      // 🔀 引擎切换 / 交叉审核
 }
 
 export default function Ic({ n, className = '', ...rest }) {

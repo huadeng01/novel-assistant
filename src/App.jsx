@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import Ic from './components/Ic.jsx'
+import { writerProvider, setWriterProvider } from './lib/llm.js'
 import RevisePage from './pages/RevisePage.jsx'
 import WizardPage from './pages/WizardPage.jsx'
 import ContinuePage from './pages/ContinuePage.jsx'
@@ -22,10 +23,22 @@ export default function App() {
     setTabState(t)
   }
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('ds_api_key') || '')
+  const [qwenKey, setQwenKey] = useState(() => localStorage.getItem('qwen_api_key') || '')
   const [glmKey, setGlmKey] = useState(() => localStorage.getItem('glm_api_key') || '')
 
-  const refreshKey = () => setApiKey(localStorage.getItem('ds_api_key') || '')
+  const refreshKey = () => {
+    setApiKey(localStorage.getItem('ds_api_key') || '')
+    setQwenKey(localStorage.getItem('qwen_api_key') || '')
+  }
   const refreshGlmKey = () => setGlmKey(localStorage.getItem('glm_api_key') || '')
+  // 写作引擎（DeepSeek / 通义千问）选择状态；下发给各页面的 Key 始终对应当前选中的引擎，
+  // 缺 Key 引导也自然指向对应引擎；GLM 审核引擎独立不受影响。
+  const [provider, setProviderState] = useState(() => writerProvider())
+  const changeProvider = (p) => {
+    setWriterProvider(p)
+    setProviderState(p)
+  }
+  const activeKey = provider === 'qwen' ? qwenKey : apiKey
 
   return (
     <div className="min-h-screen text-stone-800">
@@ -59,11 +72,11 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-6xl px-4 py-6 pb-16">
-        {tab === 'revise' && <RevisePage apiKey={apiKey} onNeedKey={() => setTab('profile')} />}
-        {tab === 'continue' && <ContinuePage apiKey={apiKey} onNeedKey={() => setTab('profile')} onOpenLongForm={() => setTab('longform')} />}
-        {tab === 'longform' && <LongFormPage apiKey={apiKey} glmKey={glmKey} onNeedKey={() => setTab('profile')} />}
-        {tab === 'wizard' && <WizardPage apiKey={apiKey} onNeedKey={() => setTab('profile')} onOpenLongForm={() => setTab('longform')} />}
-        {tab === 'profile' && <ProfilePage apiKey={apiKey} onKeyChange={refreshKey} glmKey={glmKey} onGlmKeyChange={refreshGlmKey} />}
+        {tab === 'revise' && <RevisePage apiKey={activeKey} onNeedKey={() => setTab('profile')} />}
+        {tab === 'continue' && <ContinuePage apiKey={activeKey} onNeedKey={() => setTab('profile')} onOpenLongForm={() => setTab('longform')} />}
+        {tab === 'longform' && <LongFormPage apiKey={activeKey} glmKey={glmKey} onNeedKey={() => setTab('profile')} />}
+        {tab === 'wizard' && <WizardPage apiKey={activeKey} onNeedKey={() => setTab('profile')} onOpenLongForm={() => setTab('longform')} />}
+        {tab === 'profile' && <ProfilePage apiKey={apiKey} qwenKey={qwenKey} provider={provider} onProviderChange={changeProvider} onKeyChange={refreshKey} glmKey={glmKey} onGlmKeyChange={refreshGlmKey} />}
       </main>
     </div>
   )

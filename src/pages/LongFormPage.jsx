@@ -12,12 +12,12 @@ import {
   synopsisMessages,
   worldMessages,
   outlineMessages,
-  summarizeMessages,
   longFormDraftMessages,
   chapterTitleMessages,
   foreshadowPlanMessages,
   scenePlanMessages,
   outlineExtendMessages,
+  draftSelfCheckMessages,
   bookAnalyzeMessages,
   directorAnglesMessages,
   directorCastMessages,
@@ -28,13 +28,16 @@ import {
   TONES,
   TEMPLATE_RULES,
 } from '../lib/prompts.js'
-import { newProject, searchChapters, semanticPassages, runPostChapter, applyReport, applyForeshadowPlans, outlineForChapter, outlineMaxChapter, outlinePositionFor, expandKeywords, povStreak, reviewOpportunity, rerunArchive, chronicleContext, restoreChapter, loadArchiveCheckpoint, clearArchiveCheckpoint, buildWorldBlockText, splitWorldToBlocks, activeStyleRules, trialWrite, referenceContext, needNewVolume, currentVolume, volumeStrategyText, planVolume, arcTextForRange, refSimilarityReport, aiFlavorScan, hookCheck, properNounScan, settlementReport, exportBookText, PROTECT_GAP } from '../lib/longform.js'
+import WorldviewEditor from '../components/WorldviewEditor.jsx'
+import { allGenres, saveWorldview, EMPTY_WORLDVIEW } from '../lib/worldviews/index.js'
+import { newProject, searchChapters, semanticPassages, runPostChapter, applyReport, applyForeshadowPlans, outlineForChapter, outlineMaxChapter, outlinePositionFor, expandKeywords, povStreak, reviewOpportunity, rerunArchive, chronicleContext, restoreChapter, loadArchiveCheckpoint, clearArchiveCheckpoint, buildWorldBlockText, splitWorldToBlocks, activeStyleRules, trialWrite, referenceContext, needNewVolume, currentVolume, volumeStrategyText, planVolume, arcTextForRange, volumeStoryForRange, refSimilarityReport, aiFlavorScan, hookCheck, properNounScan, settlementReport, exportBookText, PROTECT_GAP, chapterTaskOf, splitChapters, archiveImportedChapter, recheckFollowing, dedupeScenePiece, aliasesOf, fallbackVolumeEmotion } from '../lib/longform.js'
 import { countWords, uid, downloadText } from '../lib/utils.js'
 
 // 长篇一致性系统的交互中枢：
 // 章节写作（上下文组装 + 章后档案流水线）、伏笔账本（保护期）、设定与人物活档案、事件级时间线、诊断看板
 const SUBTABS = [
   { id: 'chapters', label: '章节写作', icon: 'book' },
+  { id: 'worldview', label: '世界观', icon: 'globe' },
   { id: 'foreshadow', label: '伏笔账本', icon: 'hook' },
   { id: 'settings', label: '设定与人物', icon: 'gear' },
   { id: 'analysis', label: '拆书工作台', icon: 'search' },
@@ -49,6 +52,8 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
   const [selectedId, setSelectedId] = useState(null)
   const [loading, setLoading] = useState(true)
   const [subtab, setSubtab] = useState('chapters')
+  const [wvGenre, setWvGenre] = useState('') // 世界观页当前查看的题材（空 = 跟随本书题材）
+  const [wvNew, setWvNew] = useState('') // 世界观页新增题材输入
   const [err, setErr] = useState('')
   const [newName, setNewName] = useState('')
 
@@ -59,10 +64,15 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
   const [streaming, setStreaming] = useState(false)
   const [savingMsg, setSavingMsg] = useState('')
   const [lastReport, setLastReport] = useState(null)
+  // 级联复查：重写中间章后提示后续章可能脱节，一键逐章复查刷新存疑徽章
+  const [cascadeFrom, setCascadeFrom] = useState(null)
+  const [cascading, setCascading] = useState('')
+  const [cascadeMsg, setCascadeMsg] = useState('')
   const [expandedId, setExpandedId] = useState(null)
-  // 导入已有文本开局
+  // 导入已有文本开局（分章）
   const [seedText, setSeedText] = useState('')
   const [seeding, setSeeding] = useState('')
+  const [seedReport, setSeedReport] = useState(null)
   // 伏笔手动登记
   const [newHook, setNewHook] = useState({ content: '', importance: '主线' })
   // 两段式写作：本章场景清单（第一步规划、用户确认后再扩写，防 AI 进程过快跳过应展开的场景）
@@ -258,12 +268,14 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
       outline: project.outline || '',
       outlineCount: project.outlineCount || 10,
       protagonist: project.protagonist || '',
-      characters: project.characters || [],
+      // aliases 归一为数组：早期向导成书曾把别名存成字符串，字符串没有 join/some，直接渲染会白屏；旧书也在此统一修复
+      characters: (project.characters || []).map((c) => ({ ...c, aliases: aliasesOf(c) })),
       styleBookId: project.styleBookId || '',
       ruleIds: project.ruleIds ?? null,
       customRules: project.customRules || [],
       refAnalysisId: project.refAnalysisId || '',
-      volumes: project.volumes || [],
+      // 旧书卷档案可能缺 id（向导早期成书未补），渲染 key 与 patchVolume 都按 id 寻址，这里统一兜底
+      volumes: (project.volumes || []).map((v) => ({ ...v, id: v.id || uid() })),
       volumeLength: project.volumeLength ?? 20,
     })
     setSimReport(null)
@@ -350,7 +362,8 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
         worldBlockText: buildWorldBlockText(project, { locations: sceneLocs, fallbackText: `${instruction}\n${lastChapter?.summary || ''}` }),
         characters: project.characters,
         participants: sceneChars.length ? sceneChars : null,
-        outline: outlineForChapter(project.outline, nextNo),
+        // 只注入本章细纲窗口（1 章）：后续章节的节点不进写作上下文，从源头消除抢写诱惑
+        outline: outlineForChapter(project.outline, nextNo, 1),
         longTerm,
         rollingSummary: project.rollingSummary,
         prevChapterSummary: lastChapter?.summary || '',
@@ -371,6 +384,8 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
         volumeStrategy: volumeStrategyText(project, nextNo),
         // 起承转合定位：细纲章头标签（旧细纲无标签时为空不注入）
         chapterPosition: outlinePositionFor(project.outline, nextNo),
+        // 本章核心任务（章名骨架产物，硬约束每章只完成一个任务；无骨架时为空不注入）
+        chapterTask: chapterTaskOf(project, nextNo),
         // 拆书工作台：绑定的参考资产只注入结构层叙事功能（不含原作专名），附硬约束防照搬；未绑定则为空不注入。
         reference: referenceContext(analyses.find((a) => a.id === (form?.refAnalysisId ?? project.refAnalysisId))),
       }
@@ -382,12 +397,12 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
         for (let i = 0; i < scenes.length; i++) {
           const piece = await chatStream({
             apiKey,
-            messages: longFormDraftMessages({ ...draftArgs, scenePlan: scenes[i], upcoming: scenes.slice(i + 1).join('\n'), multiScene: true, withTitle: i === 0, tail: base ? base.slice(-2000) : draftArgs.tail }),
+            messages: longFormDraftMessages({ ...draftArgs, scenePlan: scenes[i], upcoming: scenes.slice(i + 1).join('\n'), multiScene: true, withTitle: i === 0, lastScene: i === scenes.length - 1, tail: base ? base.slice(-2000) : draftArgs.tail }),
             temperature: 0.9,
             signal: abortRef.current?.signal,
             onDelta: (t) => setDraft(base + t),
           })
-          base += (base ? '\n\n' : '') + String(piece).trim()
+          base += (base ? '\n\n' : '') + dedupeScenePiece(base, piece)
         }
         full = base
       } else {
@@ -523,6 +538,32 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
     return title ? { title, text: lines.slice(firstIdx + 1).join('\n').replace(/^\s+/, '') } : { title: '', text: String(full) }
   }
 
+  // 场景清单下限兜底：部分模型（如 Qwen）会只回 1 个场景，导致逐场景扩写退化为单次生成；
+  // 少于 2 个时追加纠正消息重试一次，取返回更多的一版；重试仍不足则照旧降级单次生成，不阻塞写章。
+  const planScenesOnce = async (args) => {
+    const messages = scenePlanMessages(args)
+    let res = await chatJSON({ apiKey, messages, temperature: 0.5 })
+    let scenes = Array.isArray(res.scenes) ? res.scenes.filter((s) => s?.summary) : []
+    if (scenes.length < 2) {
+      try {
+        const res2 = await chatJSON({
+          apiKey,
+          messages: [
+            ...messages,
+            { role: 'assistant', content: JSON.stringify(res) },
+            { role: 'user', content: `上面的场景清单只有 ${scenes.length} 个场景，不满足 3~5 个的下限。请重新规划并输出 3~5 个场景：把本章拆成递进的过程场景（铺垫→推进→落钩），每个场景一小步。` },
+          ],
+          temperature: 0.5,
+        })
+        const scenes2 = Array.isArray(res2.scenes) ? res2.scenes.filter((s) => s?.summary) : []
+        if (scenes2.length > scenes.length) res = res2
+      } catch {
+        /* 重试失败不阻塞：降级单次生成 */
+      }
+    }
+    return res
+  }
+
   // 生成一章的完整链路：场景清单（顺带产出待确认提案）→ 前文召回 → 扩写初稿；不碰写作器 UI 状态。
   const generateChapterBody = async ({ proj, chapterNo, dir = '', onDelta }) => {
     let sceneText = ''
@@ -536,12 +577,10 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
       else if (streak0 >= 3) povShort = `优先回到主角「${proj.protagonist}」的视角。`
     }
     try {
-      const res = await chatJSON({
-        apiKey,
-        messages: scenePlanMessages({
+      const res = await planScenesOnce({
           chapterNo,
           synopsis: proj.synopsis,
-          outline: outlineForChapter(proj.outline, chapterNo),
+          outline: outlineForChapter(proj.outline, chapterNo, 1),
           rollingSummary: proj.rollingSummary,
           prevChapterSummary: proj.chapters[proj.chapters.length - 1]?.summary || '',
           storylines: proj.storylines || [],
@@ -550,8 +589,9 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
           instruction: dir,
           characters: proj.characters,
           chapterPosition: outlinePositionFor(proj.outline, chapterNo),
-        }),
-        temperature: 0.5,
+          chapterTask: chapterTaskOf(proj, chapterNo),
+          volumeStory: volumeStoryForRange(proj, chapterNo, chapterNo),
+          chapterWords: proj.chapterWords,
       })
       const scenes = Array.isArray(res.scenes) ? res.scenes.filter((s) => s?.summary) : []
       if (scenes.length) {
@@ -594,7 +634,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
       worldBlockText: buildWorldBlockText(proj, { locations: locs, fallbackText: `${dir}\n${lastCh?.summary || ''}` }),
       characters: proj.characters,
       participants: chars.length ? chars : null,
-      outline: outlineForChapter(proj.outline, chapterNo),
+      outline: outlineForChapter(proj.outline, chapterNo, 1),
       longTerm: (proj.memory || []).map((m) => m.text).join('\n\n'),
       rollingSummary: proj.rollingSummary,
       prevChapterSummary: lastCh?.summary || '',
@@ -612,6 +652,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
       rules: activeStyleRules(proj),
       volumeStrategy: volumeStrategyText(proj, chapterNo),
       chapterPosition: outlinePositionFor(proj.outline, chapterNo),
+      chapterTask: chapterTaskOf(proj, chapterNo),
       reference: referenceContext(analyses.find((a) => a.id === proj.refAnalysisId)),
     }
     // 逐场景扩写（与手动路径同机制）：场景 ≥2 个时每场景一次请求，根治后段压缩；无场景清单退回单次生成
@@ -622,11 +663,11 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
       for (let i = 0; i < scenes.length; i++) {
         const piece = await chatStream({
           apiKey,
-          messages: longFormDraftMessages({ ...draftArgs, scenePlan: scenes[i], upcoming: scenes.slice(i + 1).join('\n'), multiScene: true, withTitle: i === 0, tail: base ? base.slice(-2000) : draftArgs.tail }),
+          messages: longFormDraftMessages({ ...draftArgs, scenePlan: scenes[i], upcoming: scenes.slice(i + 1).join('\n'), multiScene: true, withTitle: i === 0, lastScene: i === scenes.length - 1, tail: base ? base.slice(-2000) : draftArgs.tail }),
           temperature: 0.9,
           onDelta: onDelta ? (t) => onDelta(base + t) : undefined,
         })
-        base += (base ? '\n\n' : '') + String(piece).trim()
+        base += (base ? '\n\n' : '') + dedupeScenePiece(base, piece)
       }
       full = base
     } else {
@@ -640,12 +681,30 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
         /* 标题生成失败不阻塞 */
       }
     }
+    // 落库前预检：对照状态记录检查数字台账/生死连续/收束点/严重文本重复，发现问题最小修订（多花一次调用，把事后审校前移）
+    try {
+      const sc = await chatJSON({
+        apiKey,
+        messages: draftSelfCheckMessages({ chapterNo, text, characters: proj.characters, scenePlan: sceneText, outline: outlineForChapter(proj.outline, chapterNo, 1) }),
+        temperature: 0.2,
+      })
+      if (!sc.ok && typeof sc.revisedText === 'string' && sc.revisedText.trim()) {
+        const fixed = stripTitle(sc.revisedText)
+        // 修订稿过短视为异常，放弃修订用原稿（预检是增强不是门槛）
+        if (countWords(fixed.text) >= Math.max(100, countWords(text) * 0.7)) {
+          text = fixed.text
+          title = fixed.title || title
+        }
+      }
+    } catch {
+      /* 预检失败不阻塞写章 */
+    }
     if (countWords(text) < 100) throw new Error(`第 ${chapterNo} 章生成过短（${countWords(text)} 字），疑似异常`)
-    return { text, title, proposals }
+    return { text, title, proposals, sceneText }
   }
 
   // 保存一章并跑章后档案流水线，返回新书对象供循环接棒（检查点照常逐步落盘，中断可续跑）
-  const saveChapterText = async ({ proj, chapterNo, text, title }) => {
+  const saveChapterText = async ({ proj, chapterNo, text, title, instruction = '', scenePlan = '' }) => {
     const rep = await runPostChapter({
       apiKey,
       project: proj,
@@ -654,12 +713,16 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
       title,
       checkpointId: proj.id,
       policy: proj.qualityPolicy === 'strict' ? 'strict' : 'fast',
+      instruction,
+      scenePlan,
       onStep: setSavingMsg,
     })
     const { project: next } = applyReport(proj, { chapterNo, title, text }, rep)
     await saveProject(next)
     clearArchiveCheckpoint(proj.id)
     setArchiveCp(null)
+    // 自动连写路径没有手动保存的 finally：不清空 savingMsg 会导致连写结束后 busy 恒真、整页按钮被禁用（表现为卡在「2/2 收尾…」）
+    setSavingMsg('')
     return next
   }
 
@@ -699,7 +762,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
           setAutoStatus(`自动连写暂停：第 ${no} 章遇到待确认的剧情分支`)
           return
         }
-        cur = await saveChapterText({ proj: cur, chapterNo: no, text: gen.text, title: gen.title })
+        cur = await saveChapterText({ proj: cur, chapterNo: no, text: gen.text, title: gen.title, instruction: dir, scenePlan: gen.sceneText })
         setDraft('')
         setDraftTitle('')
         dir = ''
@@ -710,6 +773,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
       setAutoDoneMsg(`已自动连写 ${remaining} 章，每章均走完整档案流水线（摘要/状态/伏笔/校验），可在章节列表回看。`)
     } catch (e) {
       setAutoStatus('')
+      setSavingMsg('')
       setErr(`自动连写已停止：${e.message}。已完成的章节均已安全存档，可检查后再启动自动连写继续。`)
     }
   }
@@ -753,12 +817,10 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
         if (streak >= 5) povRule = `非主角视角已连续 ${streak} 章，已达上限；本章必须回到主角「${project.protagonist}」的视角。`
         else if (streak >= 3) povRule = `优先回到主角「${project.protagonist}」的视角。`
       }
-      const res = await chatJSON({
-        apiKey,
-        messages: scenePlanMessages({
+      const res = await planScenesOnce({
           chapterNo: nextNo,
           synopsis: project.synopsis,
-          outline: outlineForChapter(project.outline, nextNo),
+          outline: outlineForChapter(project.outline, nextNo, 1),
           rollingSummary: project.rollingSummary,
           prevChapterSummary: lastChapter?.summary || '',
           storylines: project.storylines || [],
@@ -767,8 +829,9 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
           instruction,
           characters: project.characters,
           chapterPosition: outlinePositionFor(project.outline, nextNo),
-        }),
-        temperature: 0.5,
+          chapterTask: chapterTaskOf(project, nextNo),
+          volumeStory: volumeStoryForRange(project, nextNo, nextNo),
+          chapterWords: project.chapterWords,
       })
       const scenes = Array.isArray(res.scenes) ? res.scenes.filter((s) => s?.summary) : []
       if (!scenes.length) throw new Error('AI 未返回有效场景清单，请重试。')
@@ -806,6 +869,8 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
         title: draftTitle.trim(),
         checkpointId: project.id,
         policy: project.qualityPolicy === 'strict' ? 'strict' : 'fast',
+        instruction,
+        scenePlan,
         onStep: setSavingMsg,
       })
       // applyReport 返回拦截信息：保护期内的伏笔被 AI 抢收时不会真的标记回收，而是提示用户。
@@ -882,52 +947,61 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
     }
   }
 
-  // 导入已有长文开局：分析设定 + 首章入库 + 初始滚动摘要
+  // 导入已有长文开局：分章 → 逐章入库（章号连续）→ 逐章轻量归档（摘要+伏笔检测）→ 滚动摘要；
+  // 续写自然从 maxNo+1 开始。旧行为把整段存成单章会导致摘要链/伏笔账本/审核窗口全部错位，已废除。
   const seedFromText = async () => {
     if (!apiKey) return onNeedKey()
     if (countWords(seedText) < 200) {
       setErr('请先粘贴或导入至少几百字的已有正文。')
       return
     }
+    const parts = splitChapters(seedText)
+    if (!parts.length) {
+      setErr('导入内容为空。')
+      return
+    }
     setErr('')
-    setSeeding('1/3 分析原文的世界观、人物与故事线…')
+    setSeedReport(null)
+    const hadHeads = parts.length > 1 || /^第\s*[0-9〇零一二三四五六七八九十百两]+\s*章/.test(String(seedText).trim())
     try {
-      const res = await chatJSON({ apiKey, messages: analyzeMessages({ text: seedText.slice(0, 60000) }), temperature: 0.3 })
-      const characters = Array.isArray(res.characters)
-        ? res.characters.filter((c) => c?.name).map((c) => ({ ...c, description: c.description || '', status: '' }))
-        : []
-      const events = Array.isArray(res.timeline) ? res.timeline.map((t) => ({ chapter: 0, text: `${t.stage}：${t.summary}` })) : []
-      setSeeding('2/3 生成初始滚动摘要…')
-      let summary = ''
+      // 1/3 设定分析（世界观/大纲/人物/时间线），失败不阻塞分章导入；
+      // 人物只提取原文明确出场的（后续由归档自然生长，不在导入时生成全套班底防早露）
+      setSeeding('1/3 分析原文的世界观、人物与故事线…')
+      let cur = { ...project }
       try {
-        summary = (await chatJSON({ apiKey, messages: summarizeMessages({ text: seedText.slice(-12000) }), temperature: 0.3 })).summary || ''
+        const res = await chatJSON({ apiKey, messages: analyzeMessages({ text: seedText.slice(0, 60000) }), temperature: 0.3 })
+        const chars = Array.isArray(res.characters) ? res.characters.filter((c) => c?.name) : []
+        const events = Array.isArray(res.timeline) ? res.timeline.map((t) => ({ chapter: 0, text: `${t.stage}：${t.summary}` })) : []
+        cur = {
+          ...cur,
+          world: res.world_setting || cur.world,
+          outline: res.outline || cur.outline,
+          characters: chars.length ? chars.map((c) => ({ ...c, description: c.description || '', status: '' })) : cur.characters,
+          events: [...(cur.events || []), ...events],
+        }
       } catch {
-        /* 摘要失败不阻塞导入 */
+        /* 设定分析失败降级跳过，分章导入继续 */
       }
+      // 2/3 逐章入库 + 轻量归档；前文归档完成后后续章才能把前文伏笔检测为提及/回收，必须串行
+      const startNo = (cur.chapters || []).reduce((m, c) => Math.max(m, c.chapterNo), 0) + 1
+      for (let i = 0; i < parts.length; i++) {
+        const p = parts[i]
+        setSeeding(`2/3 归档第 ${i + 1}/${parts.length} 章：章节摘要 + 伏笔检测${hadHeads ? '' : '（未识别到章头，按单章导入）'}…`)
+        const { project: next } = await archiveImportedChapter({ apiKey, project: cur, chapterNo: startNo + i, title: p.title || `第${startNo + i}章`, text: p.text })
+        cur = next
+      }
+      // 3/3 滚动摘要：以末章摘要为初始进度快照（后续保存新章时由归档流水线接管滚动）
       setSeeding('3/3 写入档案…')
-      await saveProject({
-        ...project,
-        world: res.world_setting || project.world,
-        outline: res.outline || project.outline,
-        characters,
-        events: [...project.events, ...events],
-        rollingSummary: summary,
-        chapters: [
-          ...project.chapters,
-          {
-            id: uid(),
-            chapterNo: 1,
-            title: '既有正文',
-            content: seedText,
-            wordCount: countWords(seedText),
-            summary,
-            issueCount: 0,
-            createdAt: Date.now(),
-          },
-        ],
-        updatedAt: Date.now(),
-      })
+      const lastCh = cur.chapters[cur.chapters.length - 1]
+      await saveProject({ ...cur, rollingSummary: lastCh?.summary || cur.rollingSummary || '', updatedAt: Date.now() })
       setSeedText('')
+      setSeedReport({
+        chapters: parts.length,
+        hadHeads,
+        foreshadows: (cur.foreshadows || []).length - (project.foreshadows || []).length,
+        characters: (cur.characters || []).length,
+        startNo,
+      })
       setFormVersion((v) => v + 1)
     } catch (e) {
       setErr(e.message)
@@ -1006,6 +1080,19 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
   const patchVolume = (id, patch) => {
     setForm((f) => ({ ...f, volumes: f.volumes.map((v) => (v.id === id ? { ...v, ...patch } : v)) }))
   }
+  // 情感走向补全：只对空缺的卷从题材×基调库确定性补齐（按卷号轮转、跳过已用，卷间不重复），已有值不动；零费用不调 AI。
+  const fillVolumeEmotions = () => {
+    setForm((f) => {
+      const used = f.volumes.map((v) => v.emotion).filter(Boolean)
+      const volumes = f.volumes.map((v) => {
+        if (v.emotion) return v
+        const e = fallbackVolumeEmotion({ genre: f.genre, tone: f.tone, volumeNo: v.volumeNo + f.volumes.length, used })
+        if (e) used.push(e)
+        return { ...v, emotion: e }
+      })
+      return { ...f, volumes }
+    })
+  }
   // AI 规划下一卷：从下一章接棒；卷档案未启用时第一次点击即启用（第 1 卷从第 1 章或已有章节后接棒）。规划结果立即落库（自动连写读的是库内数据），不等保存设定。
   const planNextVol = async () => {
     if (!apiKey) return onNeedKey()
@@ -1019,6 +1106,8 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
       if (last && last.startChapter + last.length - 1 > maxNo) return setErr(`第 ${last.volumeNo} 卷尚未写完（计划到第 ${last.startChapter + last.length - 1} 章），无需规划新卷。`)
       const start = last ? last.startChapter + last.length : Math.max(1, maxNo + 1)
       const vol = await planVolume({ apiKey, project: { ...project, volumes: vols, volumeLength: form.volumeLength ?? 20 }, startChapter: start })
+      // 新卷情感走向：planVolume 不产此字段，从题材×基调库补（跳过已有卷用过的）
+      if (!vol.emotion) vol.emotion = fallbackVolumeEmotion({ genre: form.genre, tone: form.tone, volumeNo: vol.volumeNo + vols.length, used: vols.map((x) => x.emotion).filter(Boolean) })
       const volumes = [...vols, vol]
       setForm((f) => ({ ...f, volumes }))
       updateProject({ volumes })
@@ -1278,6 +1367,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
           rollingSummary: project.rollingSummary,
           storylines: project.storylines || [],
           outlineTail: project.outline.slice(-1500),
+          volumeStory: volumeStoryForRange(project, outlineMax + 1, outlineMax + 15),
           volumeContext: arcTextForRange(project, outlineMax + 1, outlineMax + 15),
         }),
         temperature: 0.7,
@@ -1298,6 +1388,14 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
     await saveProject(restoreChapter(project, chapterNo))
   }
 
+  // 删除单章：对某章不满意时删掉重写（如最新章删掉后 nextNo 回到该章号重新生成）；
+  // 档案（滚动摘要/人物状态/伏笔账本）不随之回滚，章号不重排（删中间章会留空号，新章仍从最大章号+1 续写）
+  const deleteChapter = async (chapterNo) => {
+    if (!window.confirm(`确定删除第 ${chapterNo} 章？删除后不可恢复；滚动摘要/人物状态/伏笔账本不会回滚，删除中间章会留下空章号。`)) return
+    await saveProject({ ...project, chapters: (project.chapters || []).filter((c) => c.chapterNo !== chapterNo), updatedAt: Date.now() })
+    setExpandedId(null)
+  }
+
   // 补跑归档：对已保存章节重跑章后流水线（降级补救 / 手改正文后重新建档）
   const rerunChapter = async (chapterNo) => {
     if (!apiKey) return onNeedKey()
@@ -1310,6 +1408,37 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
       setErr(e.message)
     } finally {
       setRerunning('')
+    }
+  }
+
+  // 重写归档完成回调：同步报告卡；若后面还有已写章节，提示级联复查（后续章是基于重写前上下文写的）
+  const handleRewriteDone = (rep) => {
+    if (!rep) return
+    setLastReport(rep)
+    const max = Math.max(...project.chapters.map((c) => c.chapterNo))
+    if (rep.chapterNo < max) {
+      setCascadeFrom(rep.chapterNo)
+      setCascadeMsg('')
+    }
+  }
+
+  // 级联复查：对重写章之后的每章只跑一致性校验一路，刷新 issues/徽章，单章失败跳过
+  const runCascadeRecheck = async () => {
+    if (!apiKey) return onNeedKey()
+    if (cascadeFrom == null) return
+    setErr('')
+    setCascadeMsg('')
+    try {
+      const { project: next, results } = await recheckFollowing({ apiKey, project, fromChapter: cascadeFrom, onStep: setCascading })
+      await saveProject(next)
+      const flagged = results.filter((r) => r.issues && r.issues.length)
+      const failed = results.filter((r) => r.issues === null).length
+      setCascadeMsg(`复查完成：共查 ${results.length} 个后续章，${flagged.length} 章存疑（徽章已更新）${failed ? `，${failed} 章检查失败跳过` : ''}；脱节章节请用一键重写修复问题。`)
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setCascading('')
+      setCascadeFrom(null)
     }
   }
 
@@ -1395,6 +1524,10 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                   {hooksReady > 0 && <span className="ml-1 text-amber-600">（{hooksReady} 条已到回收窗口）</span>}
                 </li>
                 <li>资产就绪度：{assetReady}/6（梗概·世界观·人物·细纲·文风·卷档案）</li>
+                <li>
+                  剩余细纲：{outlineMax === 0 ? '未建档' : outlineMax < nextNo ? `已耗尽（规划到第 ${outlineMax} 章）` : `${outlineMax - nextNo + 1} 章（规划到第 ${outlineMax} 章）`}
+                  {outlineLow && <span className="ml-1 text-amber-600">（建议续写）</span>}
+                </li>
               </ul>
               {/* 下一章建议：定位标签 + 细纲覆盖 + 卷归属，开写前一眼看清坐标 */}
               <div className="mt-3 border-t border-stone-200/70 pt-2.5">
@@ -1481,7 +1614,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                     <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
                       <h2 className="text-base font-bold"><Ic n="import" /> 用已有正文开局（可选）</h2>
                       <p className="mt-1 text-xs leading-relaxed text-stone-400">
-                        粘贴或导入已经写好的正文：AI 会自动分析世界观、人物、故事线，生成初始滚动摘要，并从结尾处继续写新章节。全新开书可跳过此步，先去「设定与人物」生成梗概与细纲。
+                        粘贴或导入已经写好的正文：按「第N章」章头自动分章（章号重排连续），逐章生成摘要并检测伏笔入帐，再从结尾处继续写新章节。未带章头时按单章导入。全新开书可跳过此步，先去「设定与人物」生成梗概与细纲。
                       </p>
                       <div className="mt-3 flex justify-end">
                         <button onClick={() => seedFileRef.current?.click()} className="rounded-full border border-stone-300 px-4 py-1.5 text-xs text-stone-600 hover:bg-stone-50">
@@ -1513,6 +1646,11 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                       >
                         {seeding || '分析并导入为起始章节'}
                       </button>
+                      {seedReport && (
+                        <p className="mt-2 rounded-xl bg-emerald-50 px-4 py-3 text-xs leading-relaxed text-emerald-800">
+                          导入完成：共分成 {seedReport.chapters} 章（从第 {seedReport.startNo} 章起）{seedReport.hadHeads ? '' : '，未识别到章头已按单章导入'}；登记伏笔 {seedReport.foreshadows} 条，识别人物 {seedReport.characters} 位。下一章从第 {seedReport.startNo + seedReport.chapters} 章开始续写。
+                        </p>
+                      )}
                     </section>
                   )}
 
@@ -1527,7 +1665,23 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                   {/* 写作器 */}
                   <section ref={composerRef} className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <h2 className="text-base font-bold"><Ic n="pen" /> 撰写第 {nextNo} 章</h2>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h2 className="text-base font-bold"><Ic n="pen" /> 撰写第 {nextNo} 章</h2>
+                        <span
+                          className={`rounded-full px-3 py-1 text-xs ${outlineMax === 0 || outlineMax < nextNo ? 'bg-red-100 text-red-600' : outlineLow ? 'bg-amber-100 text-amber-700' : 'bg-stone-100 text-stone-500'}`}
+                          title="细纲剩余章数 = 细纲规划到的最大章号 − 下一章章号 + 1"
+                        >
+                          剩余细纲：{outlineMax === 0 ? '未建档' : outlineMax < nextNo ? '已耗尽' : `${outlineMax - nextNo + 1} 章`}
+                        </span>
+                        <button
+                          onClick={extendOutline}
+                          disabled={busy || !apiKey || extending}
+                          title="AI 紧接细纲末尾规划后 15 章并追加；只追加不改动现有细纲"
+                          className="rounded-full border border-stone-300 px-3 py-1 text-xs text-stone-600 hover:bg-stone-100 disabled:opacity-50"
+                        >
+                          {extending ? 'AI 规划中…' : <><Ic n="sparkle" /> 续写细纲</>}
+                        </button>
+                      </div>
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-500">
                           流程：生成场景清单（可编辑）→ 扩写初稿 → 自由修改 → 保存并更新档案（也可跳过清单直接生成）
@@ -1984,19 +2138,19 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                             </p>
                           </div>
                         )}
-                        <div className={`rounded-xl p-3 ${lastReport.issues.length || lastReport.drift ? 'bg-red-50' : 'bg-emerald-50'}`}>
-                          <p className={`font-semibold ${lastReport.issues.length || lastReport.drift ? 'text-red-600' : 'text-emerald-700'}`}>一致性校验</p>
+                        <div className={`rounded-xl p-3 ${lastReport.issues.some((i) => i.severity !== 'soft') || lastReport.drift ? 'bg-red-50' : lastReport.issues.length ? 'bg-stone-100' : 'bg-emerald-50'}`}>
+                          <p className={`font-semibold ${lastReport.issues.some((i) => i.severity !== 'soft') || lastReport.drift ? 'text-red-600' : lastReport.issues.length ? 'text-stone-500' : 'text-emerald-700'}`}>一致性校验</p>
                           {lastReport.issues.length === 0 && !lastReport.drift ? (
                             <p className="mt-1 leading-relaxed text-emerald-700">未发现问题，与设定、人物状态和大纲一致。</p>
                           ) : (
                             <>
-                              <ul className="mt-1 list-disc space-y-1 pl-4 leading-relaxed text-red-600">
+                              <ul className="mt-1 list-disc space-y-1 pl-4 leading-relaxed">
                                 {lastReport.issues.map((it, i) => (
-                                  <li key={i}>
-                                    【{it.type}】{it.description}
+                                  <li key={i} className={it.severity === 'soft' ? 'text-stone-500' : 'text-red-600'}>
+                                    【{it.type}{it.severity === 'soft' ? '·软存疑' : ''}】{it.description}
                                   </li>
                                 ))}
-                                {lastReport.drift && <li>【大纲偏离】{lastReport.drift}</li>}
+                                {lastReport.drift && <li className="text-red-600">【大纲偏离】{lastReport.drift}</li>}
                               </ul>
                               {project.qualityPolicy === 'strict' && (
                                 <p className="mt-1.5 text-xs text-red-500">质量优先模式：建议先在下方章节列表里对存疑章节一键重写，再写下一章。</p>
@@ -2022,6 +2176,22 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                           </button>
                         </div>
                       </div>
+                      {/* 级联复查提示：重写中间章后，后续章基于重写前上下文写成，可能脱节 */}
+                      {cascadeFrom != null && (
+                        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl bg-amber-50 p-3">
+                          <p className="text-xs leading-relaxed text-amber-800">
+                            第 {cascadeFrom} 章重写已归档。后续 {project.chapters.filter((c) => c.chapterNo > cascadeFrom).length} 章是基于重写前的上下文写成的，人物状态、细节连续与伏笔层级可能与新版脱节，建议复查。
+                          </p>
+                          <button
+                            onClick={runCascadeRecheck}
+                            disabled={!!cascading || busy}
+                            className="rounded-full bg-amber-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-amber-700 disabled:opacity-50"
+                          >
+                            {cascading || '逐章复查后续章节'}
+                          </button>
+                        </div>
+                      )}
+                      {cascadeMsg && <p className="mt-2 text-xs text-stone-600">{cascadeMsg}</p>}
                       {/* 写作统计：总字数/章均/近 7 天产量，纯前端计算零请求 */}
                       {showStats && stats && (
                         <div className="mt-3 rounded-xl border border-stone-200 bg-white p-4">
@@ -2078,37 +2248,66 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                               <span className="flex items-center gap-2 text-xs text-stone-400">
                                 {c.wordCount} 字
                                 {c.pov && <span>POV {c.pov}</span>}
-                                {c.issueCount > 0 && <span className="rounded-full bg-red-50 px-2 py-0.5 text-red-600">{c.issueCount} 处存疑</span>}
+                                {(() => {
+                                  const hard = (c.issues || []).filter((i) => i.severity !== 'soft').length
+                                  const soft = (c.issues || []).length - hard
+                                  return (
+                                    <>
+                                      {hard > 0 && <span className="rounded-full bg-red-50 px-2 py-0.5 text-red-600">{hard} 处存疑</span>}
+                                      {soft > 0 && <span className="rounded-full bg-stone-100 px-2 py-0.5 text-stone-500">{soft} 软存疑</span>}
+                                    </>
+                                  )
+                                })()}
                                 {expandedId === c.id ? '收起' : '展开'}
                               </span>
                             </button>
                             {expandedId === c.id && (
                               <div className="mt-2 min-w-0 space-y-2 border-t border-stone-100 pt-2">
                                 {c.summary && <p className="text-xs leading-relaxed text-stone-500"><Ic n="notepad" /> 摘要：{c.summary}</p>}
-                                {c.issues?.length > 0 && (
-                                  <div className="rounded-lg bg-red-50 p-3">
-                                    <p className="text-xs font-semibold text-red-600"><Ic n="alert" /> 一致性问题（{c.issues.length}，持久保存）</p>
-                                    <ul className="mt-1 list-disc space-y-1 pl-4 text-xs leading-relaxed text-red-600">
-                                      {c.issues.map((it, i) => (
-                                        <li key={i}>
-                                          【{it.type}】{it.description}
-                                        </li>
-                                      ))}
-                                    </ul>
-                                    <div className="mt-2">
-                                      <ChapterRewriter
-                                        project={project}
-                                        saveProject={saveProject}
-                                        apiKey={apiKey}
-                                        chapterNo={c.chapterNo}
-                                        fixPrompt={`请修正本章存在的以下一致性问题，其余内容尽量保持原样：${c.issues.map((it, i) => `${i + 1}.【${it.type}】${it.description}`).join('；')}`}
-                                        label="一键重写修复问题"
-                                        disabled={busy || !apiKey}
-                                      />
+                                {c.issues?.length > 0 && (() => {
+                                  const hard = c.issues.filter((i) => i.severity !== 'soft')
+                                  const soft = c.issues.length - hard.length
+                                  return (
+                                    <div className={`rounded-lg p-3 ${hard.length ? 'bg-red-50' : 'bg-stone-100'}`}>
+                                      <p className={`text-xs font-semibold ${hard.length ? 'text-red-600' : 'text-stone-500'}`}>
+                                        <Ic n="alert" /> 一致性问题（硬 {hard.length} / 软 {soft}，持久保存）
+                                      </p>
+                                      <ul className="mt-1 list-disc space-y-1 pl-4 text-xs leading-relaxed">
+                                        {c.issues.map((it, i) => (
+                                          <li key={i} className={it.severity === 'soft' ? 'text-stone-500' : 'text-red-600'}>
+                                            【{it.type}{it.severity === 'soft' ? '·软存疑' : ''}】{it.description}
+                                          </li>
+                                        ))}
+                                      </ul>
+                                      {hard.length > 0 && (
+                                        <div className="mt-2">
+                                          <ChapterRewriter
+                                            project={project}
+                                            saveProject={saveProject}
+                                            apiKey={apiKey}
+                                            chapterNo={c.chapterNo}
+                                            fixPrompt={`请修正本章存在的以下一致性问题，其余内容尽量保持原样：${hard.map((it, i) => `${i + 1}.【${it.type}】${it.description}`).join('；')}`}
+                                            label="一键重写修复问题"
+                                            disabled={busy || !apiKey}
+                                            onDone={handleRewriteDone}
+                                          />
+                                        </div>
+                                      )}
                                     </div>
-                                  </div>
-                                )}
+                                  )
+                                })()}
                                 <div className="novel-text max-h-56 overflow-y-auto whitespace-pre-wrap rounded-lg bg-stone-50 p-3 text-xs text-stone-600">{c.content}</div>
+                                {/* 剧情讨论·按我的想法重写：作者给修改意见，走与一键重写同一条链路（预览→确认→重跑归档） */}
+                                <ChapterRewriter
+                                  project={project}
+                                  saveProject={saveProject}
+                                  apiKey={apiKey}
+                                  chapterNo={c.chapterNo}
+                                  label="按我的想法重写"
+                                  editable
+                                  disabled={busy || !apiKey}
+                                  onDone={handleRewriteDone}
+                                />
                                 <div className="flex flex-wrap gap-2">
                                   <button
                                     onClick={() => rerunChapter(c.chapterNo)}
@@ -2126,6 +2325,13 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                                       <Ic n="undo" /> 恢复替换前的原稿（{c.prev.wordCount} 字）
                                     </button>
                                   )}
+                                  <button
+                                    onClick={() => deleteChapter(c.chapterNo)}
+                                    disabled={busy}
+                                    className="rounded-full border border-red-200 px-3 py-1 text-xs text-red-600 hover:bg-red-50 disabled:opacity-50"
+                                  >
+                                    <Ic n="x" /> 删除本章
+                                  </button>
                                 </div>
                               </div>
                             )}
@@ -2134,6 +2340,46 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                       </ul>
                     </section>
                   )}
+                </div>
+              )}
+
+              {/* ============ 世界观库 ============ */}
+              {subtab === 'worldview' && (
+                <div className="space-y-4">
+                  <div className="rounded-xl border border-stone-200 bg-white/60 p-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-semibold">世界观库（题材世界模板）</p>
+                      <select value={wvGenre || project.genre} onChange={(e) => setWvGenre(e.target.value)} className="rounded-xl border border-stone-200 bg-white px-3 py-1.5 text-xs text-stone-700">
+                        {allGenres().map((g) => (
+                          <option key={g}>{g}</option>
+                        ))}
+                      </select>
+                      <span className="text-xs text-stone-400">模板仅供灵感选题低权重参考，不定死世界（完整世界观在开书时自动生成）；修改只存本机，不影响已写章节。</span>
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <input
+                        value={wvNew}
+                        onChange={(e) => setWvNew(e.target.value)}
+                        placeholder="新增题材世界模板，如：克苏鲁 / 种田 / 宫斗"
+                        className="w-64 rounded-xl border border-stone-200 bg-white px-3 py-1.5 text-xs text-stone-700 focus:border-stone-500 focus:outline-none"
+                      />
+                      <button
+                        onClick={() => {
+                          const name = wvNew.trim()
+                          if (!name || allGenres().includes(name)) return
+                          saveWorldview(name, { ...EMPTY_WORLDVIEW })
+                          setWvGenre(name)
+                          setWvNew('')
+                        }}
+                        className="rounded-full bg-stone-800 px-4 py-1.5 text-xs font-medium text-white hover:bg-stone-700"
+                      >
+                        新建题材
+                      </button>
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-stone-200 bg-white/60 p-4">
+                    <WorldviewEditor key={wvGenre || project.genre} genre={wvGenre || project.genre} />
+                  </div>
                 </div>
               )}
 
@@ -2449,6 +2695,32 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                       <textarea value={form.outline} onChange={(e) => setForm({ ...form, outline: e.target.value })} rows={8} className="novel-text w-full resize-y rounded-xl border border-stone-200 p-3 text-sm focus:border-stone-500 focus:outline-none" />
                     </div>
 
+                    {/* 全书章名骨架：成书时按卷分次生成的方向锚点（每章一行：章名 + 唯一剧情任务），此处只读查看；进卷时由细纲细化 */}
+                    <div>
+                      <p className="mb-1.5 text-xs font-semibold text-stone-500"><Ic n="doc" /> 全书章名骨架（{(project.chapterSkeleton || []).length} 章；成书锚点，每章只完成一个任务，写章时作为硬约束注入）</p>
+                      {(project.chapterSkeleton || []).length ? (
+                        <details className="rounded-xl border border-stone-200 bg-stone-50 p-3">
+                          <summary className="cursor-pointer text-xs text-stone-500">展开查看（开书向导按卷生成；写作时自动对账，偏离会报警）</summary>
+                          <ul className="mt-2 max-h-64 space-y-0.5 overflow-y-auto">
+                            {(project.chapterSkeleton || []).map((c) => (
+                              <li key={c.chapterNo} className="text-xs leading-relaxed text-stone-600">
+                                第{c.chapterNo}章 {c.title || ''}
+                                {c.task && <span className="text-stone-400"> ｜ 任务：{c.task}</span>}
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                      ) : (
+                        <p className="rounded-xl border border-stone-200 bg-stone-50 p-3 text-xs text-stone-400">暂无骨架：可在开书向导分卷生成，或在上方细纲区手写逐章方向。</p>
+                      )}
+                    </div>
+
+                    {/* 全书滚动摘要：每章保存后由归档流水线自动更新的进度快照，写新章时注入；与写作页折叠区同源 */}
+                    <div>
+                      <p className="mb-1.5 text-xs font-semibold text-stone-500"><Ic n="rolling" /> 全书滚动摘要（每章保存后自动更新，写新章时作为进度快照注入）</p>
+                      <p className="novel-text max-h-40 overflow-y-auto whitespace-pre-wrap rounded-xl border border-stone-200 bg-stone-50 p-3 text-xs leading-relaxed text-stone-600">{project.rollingSummary || '暂无（保存第一章后自动生成）'}</p>
+                    </div>
+
                     {/* 写法引擎：文风绑定 + 反模板规则勾选 + 自定义规则 + 试写（初稿与重写均自动套用） */}
                     <div>
                       <p className="mb-1.5 text-xs font-semibold text-stone-500"><Ic n="style" /> 写法引擎（文风绑定 + 反模板规则，初稿与章节重写均自动套用）</p>
@@ -2539,7 +2811,15 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                     </div>
                     {/* 卷结构：显式卷档案 + 卷战略，写作时注入本章所属卷的战略；自动连写超出末卷范围时自动断卷规划新卷 */}
                     <div>
-                      <p className="mb-1.5 text-xs font-semibold text-stone-500"><Ic n="scroll" /> 卷结构（卷档案 + 卷战略，可选启用；不建档则写作不注入卷战略）</p>
+                      <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-xs font-semibold text-stone-500"><Ic n="scroll" /> 卷结构（卷档案 + 卷战略，可选启用；不建档则写作不注入卷战略）</p>
+                        {/* 情感走向一键补全：向导成书时 AI 已逐卷生成；旧书/漏给的卷从题材×基调库确定性补齐（零费用，卷间不重复） */}
+                        {(form.volumes || []).some((v) => !v.emotion) && (
+                          <button onClick={fillVolumeEmotions} className="rounded-full border border-stone-300 px-3 py-1 text-xs text-stone-600 hover:bg-stone-100">
+                            补全情感走向
+                          </button>
+                        )}
+                      </div>
                       <div className="space-y-2 rounded-xl border border-stone-200 bg-stone-50 p-3">
                         {(form.volumes || []).map((v) => (
                           <div key={v.id} className="rounded-xl border border-stone-200 bg-white p-3">
@@ -2882,7 +3162,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
               {/* ============ 质检中心：章节审核（GLM）+ 全局诊断（DeepSeek）+ 卷志长时记忆 ============ */}
               {subtab === 'dashboard' && (
                 <div className="space-y-4">
-                  <ReviewPanel project={project} saveProject={saveProject} apiKey={apiKey} glmKey={glmKey} onNeedGlmKey={onNeedKey} busy={busy} />
+                  <ReviewPanel project={project} saveProject={saveProject} apiKey={apiKey} glmKey={glmKey} onNeedGlmKey={onNeedKey} busy={busy} onRewriteDone={handleRewriteDone} />
                   <DiagnosePanel apiKey={apiKey} text={diagnoseText} context={diagnoseContext} disabled={busy} cacheKey={`na_diag_${project.id}_${project.chapters.length}`} />
                   {project.memory?.length > 0 && (
                     <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">

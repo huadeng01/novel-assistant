@@ -2,6 +2,27 @@
 const API_URL = 'https://api.deepseek.com/v1/chat/completions'
 const MODEL = 'deepseek-chat'
 
+// 通义千问（Qwen，第二写作引擎，可选）：阿里云百炼 DashScope OpenAI 兼容模式；
+// 与 DeepSeek 同为 OpenAI 兼容协议，chatStream / chatJSON 全链复用，切换只改 url/model。
+// 模型 ID 可在「我的」页自定义，默认 qwen3.8-max。
+const QWEN_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'
+export const QWEN_DEFAULT_MODEL = 'qwen3.8-max'
+export const getQwenModel = () => localStorage.getItem('qwen_model') || QWEN_DEFAULT_MODEL
+
+// 写作引擎选择：'deepseek'（默认）或 'qwen'，存 localStorage；GLM 审核引擎独立不受影响。
+// 全站所有生成请求（写作/规划/归档/重写）统一走当前选中的引擎，API Key 各自独立保存。
+export const writerProvider = () => (localStorage.getItem('writer_provider') === 'qwen' ? 'qwen' : 'deepseek')
+export const setWriterProvider = (p) => localStorage.setItem('writer_provider', p === 'qwen' ? 'qwen' : 'deepseek')
+export const WRITER_LABELS = { deepseek: 'DeepSeek', qwen: '通义千问' }
+export const writerProviderLabel = () => WRITER_LABELS[writerProvider()]
+
+// 当前写作引擎的连接配置（url / model / 文案标签 / 本机存的 Key / 是否需要关思考模式）
+export function writerConfig() {
+  return writerProvider() === 'qwen'
+    ? { url: QWEN_URL, model: getQwenModel(), provider: '通义千问', key: localStorage.getItem('qwen_api_key') || '', noThinking: true }
+    : { url: API_URL, model: MODEL, provider: 'DeepSeek', key: localStorage.getItem('ds_api_key') || '', noThinking: false }
+}
+
 // 智谱 GLM（审核引擎）：OpenAI 兼容协议，模型 ID 可在「我的」页自定义，默认 glm-4.7-flash
 const GLM_URL = 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
 export const GLM_DEFAULT_MODEL = 'glm-4.7-flash'
@@ -16,13 +37,24 @@ function friendlyError(status, data, provider = 'DeepSeek') {
   return new Error(data?.error?.message || `请求失败（${status}），请稍后重试。`)
 }
 
-async function doFetch({ apiKey, messages, stream, temperature, jsonMode, maxTokens, signal, url = API_URL, model = MODEL, provider }) {
-  const body = { model, messages, stream, temperature }
+async function doFetch({ apiKey, messages, stream, temperature, jsonMode, maxTokens, signal, url, model, provider, webSearch }) {
+  // 未显式传 url 时（写作链路）按当前选中的写作引擎路由；显式传 url 的（GLM 审核）不受影响
+  const cfg = url ? { url, model, provider } : writerConfig()
+  const body = { model: cfg.model, messages, stream, temperature }
+  // qwen3 系列默认开启思考模式：思考内容走 reasoning_content 字段，本站解析器只读 content，
+  // 表现为长时间无响应；且官方要求思考模式只能用于流式请求，非流式（归档/诊断等 JSON 调用）会报错。
+  // 写作场景不需要思考链，统一关闭，响应也更快。
+  if (cfg.noThinking) body.enable_thinking = false
   if (jsonMode) body.response_format = { type: 'json_object' }
   if (maxTokens) body.max_tokens = maxTokens
+  // 联网搜索（灵感选题用）：智谱走 web_search 工具、通义走 enable_search；DeepSeek 无此能力，忽略
+  if (webSearch) {
+    if (cfg.provider === '智谱 GLM') body.tools = [{ type: 'web_search', web_search: { enable: true } }]
+    else if (cfg.provider === '通义千问') body.enable_search = true
+  }
   let res
   try {
-    res = await fetch(url, {
+    res = await fetch(cfg.url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -42,14 +74,15 @@ async function doFetch({ apiKey, messages, stream, temperature, jsonMode, maxTok
     } catch {
       /* 忽略 */
     }
-    throw friendlyError(res.status, data, provider)
+    throw friendlyError(res.status, data, cfg.provider)
   }
   return res
 }
 
-// 流式调用：边生成边回调，返回完整文本（用于打字机效果）
+// 流式调用：边生成边回调，返回完整文本（用于打字机效果）；
+// Key 始终取当前写作引擎的（页面层传入的可能是切换引擎前的旧值，避免拿错家的 Key 打错家的门）
 export async function chatStream({ apiKey, messages, temperature = 0.9, onDelta, signal }) {
-  const res = await doFetch({ apiKey, messages, stream: true, temperature, signal })
+  const res = await doFetch({ apiKey: writerConfig().key || apiKey, messages, stream: true, temperature, signal })
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -82,7 +115,7 @@ export async function chatStream({ apiKey, messages, temperature = 0.9, onDelta,
 
 // 非流式调用并要求 JSON 输出，解析失败时抛错由调用方重试
 export async function chatJSON({ apiKey, messages, temperature = 0.4, signal }) {
-  const res = await doFetch({ apiKey, messages, stream: false, temperature, jsonMode: true, signal })
+  const res = await doFetch({ apiKey: writerConfig().key || apiKey, messages, stream: false, temperature, jsonMode: true, signal })
   const data = await res.json()
   const text = data.choices?.[0]?.message?.content || ''
   return extractJSON(text)
@@ -103,7 +136,7 @@ export function extractJSON(text) {
   }
 }
 
-// 用最小的请求测试 Key 是否有效
+// 用最小的请求测试 Key 是否有效（按当前选中的写作引擎测试）
 export async function testKey(apiKey) {
   await doFetch({
     apiKey,
@@ -113,6 +146,29 @@ export async function testKey(apiKey) {
     maxTokens: 1,
   })
   return true
+}
+
+// 指定引擎测试 Key（「我的」页两个写作引擎各自测试用，不依赖当前选中项）
+export async function testKeyFor(provider, apiKey) {
+  const cfg = provider === 'qwen' ? { url: QWEN_URL, model: getQwenModel(), provider: '通义千问' } : { url: API_URL, model: MODEL, provider: 'DeepSeek' }
+  await doFetch({
+    apiKey,
+    messages: [{ role: 'user', content: '你好' }],
+    stream: false,
+    temperature: 0,
+    maxTokens: 1,
+    ...cfg,
+  })
+  return true
+}
+
+// 灵感选题生成：纯题材脑洞（不联网搜热梗），走当前写作引擎；
+// 世界观底稿由调用方注入 messages（见 worldviews 库），温度偏高鼓励发散。
+export async function inspirationJSON({ apiKey, messages, temperature = 0.95 }) {
+  const cfg = writerConfig()
+  const res = await doFetch({ apiKey: cfg.key || apiKey, messages, stream: false, temperature })
+  const data = await res.json()
+  return { data: extractJSON(data.choices?.[0]?.message?.content || ''), engine: cfg.provider }
 }
 
 // ============ 智谱 GLM 客户端（章节审核引擎，与写作引擎分工） ============

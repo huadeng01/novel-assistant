@@ -19,10 +19,134 @@ import {
 
 // 每 20 章压缩一卷"卷志"进入长时记忆，防止早期剧情被滚动摘要遗忘
 export const VOLUME_SIZE = 20
-// 伏笔默认保护期（埋设后最早允许回收的章距）：主线更长，支线也要发酵
+// 伏笔默认保护期（埋设后最早允许回收的章距）：主线更长，支线也要发酵（旧字段，归档自动登记沿用）
 export const PROTECT_GAP = { 主线: 8, 支线: 5 }
+// 四层伏笔默认保护期下限：短线日常爽点、中线卷中反转、长线主角身世级、终极锚定终卷（见 anchorForeshadowResolve）
+export const TIER_GAP = { 短: 10, 中: 50, 长: 150 }
+// 圣经终极真相四类固定槽位（新手写作按此生成；truth 层永不进写作上下文，只有 clues 可注入）
+export const BIBLE_TRUTH_KINDS = ['终极世界观真相', '主角终极宿命', '金手指真实来源', '终极反派真实目的']
+
+// ---------- 卷节奏模板与卷角色：打破「均分卷 + 每卷同构四幕」的模板化节奏 ----------
+// 权重为相对占比：快头（开卷短而密快速立钩子）肥中（腹地卷承载地图扩张与中长伏笔）快尾（收割卷加速回收）。
+// 模板长度为 6 卷基准，实际卷数不同时由 resampleWeights 等比重采样适配，无需降级均分。
+export const RHYTHM_TEMPLATES = {
+  '快头肥中快尾': [1, 2, 3, 2, 1, 1],
+  '橄榄肥中': [1, 2, 3, 3, 2, 1],
+  '渐进加速': [1, 1, 2, 2, 3, 3],
+  '缓起急收': [1, 1, 1, 2, 3, 4],
+  '双高潮': [2, 1, 3, 1, 3, 2],
+  '均匀': [1, 1, 1, 1, 1, 1],
+}
+
+// 把权重模板重采样到指定卷数：任意模板适配任意卷数（按区间重叠比例重新分箱，形状保持）；
+// 每卷权重至少 1（短卷也得有章），取整用最大余数法保形状。
+export function resampleWeights(weights, n) {
+  const w = (Array.isArray(weights) && weights.length ? weights : [1]).map(Number).filter((x) => x > 0)
+  if (!Number.isFinite(n) || n <= 0) return []
+  if (w.length === n) return w
+  const L = w.length
+  const raw = []
+  for (let j = 0; j < n; j++) {
+    const s = (j * L) / n
+    const e = ((j + 1) * L) / n
+    let acc = 0
+    for (let i = 0; i < L; i++) {
+      const overlap = Math.min(i + 1, e) - Math.max(i, s)
+      if (overlap > 0) acc += overlap * w[i]
+    }
+    raw.push(acc)
+  }
+  const out = raw.map((x) => Math.max(1, Math.floor(x)))
+  let sum = out.reduce((a, b) => a + b, 0)
+  const target = Math.max(n, Math.round(raw.reduce((a, b) => a + b, 0)))
+  const order = raw.map((x, i) => ({ i, frac: x - Math.floor(x) })).sort((a, b) => b.frac - a.frac)
+  let k = 0
+  while (sum < target && order.length) {
+    out[order[k % order.length].i] += 1
+    sum += 1
+    k += 1
+  }
+  return out
+}
+
+// 按权重把总章数切成各卷章数（最大余数法，总和严格等于总章数）；权重长度与卷数不匹配时调用方自行均分兜底。
+export function chaptersByRhythm(total, weights) {
+  const sum = (weights || []).reduce((a, b) => a + b, 0)
+  const n = (weights || []).length
+  if (!sum || !n || total < n) return Array.from({ length: n }, () => Math.max(1, Math.floor(total / Math.max(1, n))))
+  const raw = weights.map((w) => (w / sum) * total)
+  const floors = raw.map(Math.floor)
+  let rest = total - floors.reduce((a, b) => a + b, 0)
+  const order = raw.map((r, i) => [r - floors[i], i]).sort((a, b) => b[0] - a[0])
+  for (const [, i] of order) {
+    if (rest <= 0) break
+    floors[i] += 1
+    rest -= 1
+  }
+  return floors
+}
+
+// 卷的叙事角色（决定四幕比例参考与提示词侧重）：首卷=开卷；末两卷=收割；其余按权重分腹地深耕/扩张过渡。
+export function volumeRole(volumeNo, weights) {
+  const n = (weights || []).length
+  if (!n) return '腹地'
+  if (volumeNo <= 1) return '开卷'
+  if (volumeNo >= n - 1) return '收割'
+  const avg = weights.reduce((a, b) => a + b, 0) / n
+  return weights[volumeNo - 1] > avg ? '腹地深耕' : '扩张过渡'
+}
+
+// 四幕比例参考（仅供 AI 参考，鼓励按剧情打破；硬规则只有"禁止每卷同构均分"）
+export const ACT_RATIO_GUIDE = {
+  开卷: '起幕约10%（快入局不慢热），发展幕约30%，冲突幕约35%（核心冲突提前引爆），高潮落幕约25%',
+  腹地深耕: '起幕约20%，发展幕约40%（地图与伏笔的主要发酵区），冲突幕约25%，高潮落幕约15%',
+  扩张过渡: '起幕约15%（新地图探索为主），发展幕约35%，冲突幕约30%，高潮落幕约20%',
+  收割: '起幕约10%，发展幕约20%，冲突幕约45%（终极对决主战场），高潮落幕约25%（加速回收高密度）',
+}
 // 章节审核：每写满 5 章解锁一次审核机会（GLM 审核剧情连贯性，只查硬性矛盾不挑刺）
 export const REVIEW_WINDOW = 5
+
+// 卷级情感走向库：每题材 2~3 条 + 每基调 2 条，题材×基调笛卡尔积即覆盖全部组合；
+// AI 未生成时的确定性兜底（按卷号轮转 + 已用去重，卷间不撞车），也供设定页一键补全/换一换。
+export const EMOTION_ARCS_GENRE = {
+  玄幻: ['憋屈蛰伏→逆袭爆发→锋芒初露→强敌压顶→登顶畅快', '孤身闯荡→屡败不甘→奇遇翻身→宿命对决→豪迈登顶', '热血集结→并肩鏖战→牺牲刺痛→复仇怒火→破境狂喜'],
+  仙侠: ['尘世困顿→机缘得道→问道孤旅→劫难淬心→羽化释然', '宗门冷暖→师门变故→独行问道→斩断尘缘→大道澄明'],
+  修真: ['资质平庸→苦修不甘→资源争夺→突破狂喜→心魔拷问', '门派倾轧→外出历练→生死一线→归来得悟→境界飞跃'],
+  都市: ['底层窘迫→机遇试探→名利浮沉→情感拉扯→站稳脚跟', '平凡日常→意外卷入→多方周旋→真相逼近→城市新生'],
+  现实: ['生计重压→尊严受挫→微光互助→咬牙坚持→苦尽回甘', '故乡羁绊→进城漂泊→理想碰壁→和解回望→扎根生长'],
+  科幻: ['认知安稳→异象冲击→探寻真相→信念动摇→新宇宙观', '技术乐观→失控征兆→自救挣扎→牺牲抉择→文明续火'],
+  末世: ['安逸骤碎→求生恐慌→同伴聚拢→人性试炼→废墟立誓', '物资紧缺→据点攻防→背叛刺痛→绝地反击→重建曙光'],
+  奇幻: ['异世新奇→盟友结识→阴谋浮现→远征艰险→史诗凯歌', '平凡入局→血统觉醒→王国倾覆→流亡复起→加冕回响'],
+  悬疑: ['平静假象→疑点刺入→追查胶着→误导反转→真相窒息', '旧案重提→故人疑云→线索断裂→险境逼近→尘埃落定'],
+  推理: ['谜面惊艳→排查受挫→灵光乍现→推理收网→揭晓快感', '委托上门→证词矛盾→暗流浮现→设局引凶→正义落槌'],
+  恐怖: ['日常渗入→寒意渐浓→逃避失败→直面梦魇→余悸难消', '新家异象→传闻拼图→仪式失控→孤身对抗→天亮幸存'],
+  言情: ['初遇心动→误会疏离→双向试探→深情剖白→相守笃定', '重逢旧爱→克制拉扯→心结揭开→破镜重圆→岁月温柔'],
+  古代言情: ['闺阁波澜→命运错嫁→深宅周旋→情根深种→并肩破局', '江湖偶遇→恩怨纠缠→生死相护→身份揭晓→白首之约'],
+  历史: ['庙堂暗涌→站队抉择→权谋缠斗→忠义两难→青史回响', '乱世离歌→投身洪流→建功立业→代价沉重→天下初定'],
+  武侠: ['少年意气→师门恩怨→江湖险恶→侠义抉择→事了拂衣', '退隐不甘→旧敌重临→快意恩仇→生死一诺→相忘江湖'],
+  军事: ['新兵磨砺→战友情深→战局胶着→血战突围→凯旋与哀思', '沙盘推演→情报暗战→决战部署→牺牲换胜→和平守望'],
+  游戏: ['新手吃瘪→钻研翻盘→副本鏖战→版本风暴→登顶封神', '战队组建→磨合挫败→强敌压制→绝地翻盘→荣光加冕'],
+  无限流: ['初入惊悚→规则摸索→队友聚散→高难绝境→破局升华', '副本轮回→积分博弈→真相线索→终局试炼→挣脱系统'],
+  竞技: ['低谷复出→刻苦训练→首胜振奋→强敌连败→决赛燃魂', '新人出道→团队磨合→质疑风暴→联赛逆袭→捧杯时刻'],
+  轻小说: ['日常欢乐→天降变故→羁绊加深→中二对决→青春无悔', '转生错愕→金手指试水→伙伴集结→魔王讨伐→后日谈余韵'],
+}
+export const EMOTION_ARCS_TONE = {
+  轻松幽默: ['啼笑皆非→歪打正着→欢喜冤家→笑中带泪→圆满收场', '插科打诨→麻烦滚雪球→荒诞破局→相视大笑→轻松过关'],
+  热血燃向: ['屈辱蓄力→誓约立旗→恶战连场→绝境怒吼→登顶畅快', '败而不服→特训蜕变→宿命再战→燃尽全力→痛快胜利'],
+  细腻治愈: ['孤独疏离→微光相遇→彼此治愈→风雨守护→温柔归宿', '旧伤回避→缓慢靠近→信任交付→共同和解→心有所安'],
+  暗黑沉重: ['希望微光→接连失去→信念拷问→深渊边缘→血路抉择', '隐忍负重→真相残酷→孤注一掷→代价沉重→余烬微明'],
+  悬疑烧脑: ['疑云密布→线索诱饵→逻辑反转→认知崩塌→真相重构', '信息迷宫→层层误导→关键时刻→全局推演→豁然惊雷'],
+}
+
+// 确定性选一卷情感走向：题材池在前（风味优先）、基调池殿后；按卷号轮转且跳过已用的，保证卷间不重复。
+// 库内条目均为 4~5 拍结构（用 → 分隔），与 AI 生成的卷情感走向同形。
+export function fallbackVolumeEmotion({ genre, tone, volumeNo = 1, used = [] }) {
+  const pool = [...(EMOTION_ARCS_GENRE[genre] || []), ...(EMOTION_ARCS_TONE[tone] || [])]
+  if (!pool.length) return ''
+  const avail = pool.filter((a) => !used.includes(a))
+  const src = avail.length ? avail : pool
+  return src[(Math.max(1, volumeNo) - 1) % src.length]
+}
 
 // 创建新书项目（长篇写作的持久化实体：设定 + 章节 + 摘要 + 伏笔 + 时间线归属同一本书）
 export function newProject(name) {
@@ -52,6 +176,8 @@ export function newProject(name) {
     styleBookId: '', // 绑定的文风档案所属书库书籍 id（写法引擎）；空 = 不绑定，写作不注入文风
     ruleIds: null, // 启用的反模板规则 id 列表；null = 全部预设默认启用（见 activeStyleRules）
     customRules: [], // 自定义反模板规则 [{id, name, text}]，与预设并列注入
+    bible: null, // 小说圣经 {world, powerRules[], truths:[{id,kind,truth,clues,locked}], anchors:[...], mapLayers:[{id,name,summary,truth,rumor,unlockVolume,locked}]}；truths[].truth 与 mapLayers[].truth 永不进写作上下文（真相隔离），powerRules 建书时并入 worldBlocks 规则块
+    chapterSkeleton: [], // 全书章名骨架 [{chapterNo, title, task}]：每章一行的方向锚点，进卷时再细化为完整细纲
     refAnalysisId: '', // 绑定的参考作品拆书资产 id（全局资产、书级可切换/解绑）；空 = 不借鉴
     review: { usedCount: 0, current: null }, // 审核机会计数 + 当前审核结果（持久化，刷新不丢）
   }
@@ -101,6 +227,29 @@ function outlineHeads(outline) {
 export function outlineMaxChapter(outline) {
   const heads = outlineHeads(outline)
   return heads.length ? Math.max(...heads.map((h) => h.no)) : 0
+}
+
+// 逐场景扩写拼接去重：模型偶尔会把前文复述进新段（整段重复的生成事故），分两层兜底：
+// 1) 新段开头的段落若已出现在已有正文里（哪怕只是短句衔接），视为复述丢弃；
+// 2) 新段中部与已有正文完全相同的长段落（≥30 字）也剔除——重复只发生在段首之外时同样拦下。
+export function dedupeScenePiece(base, piece) {
+  const text = String(piece || '').trim()
+  if (!base || !text) return text
+  const paras = text.split(/\n+/).filter(Boolean)
+  let i = 0
+  while (i < paras.length) {
+    const t = paras[i].trim()
+    if (t.length >= 12 && base.includes(t)) i++
+    else break
+  }
+  const kept = []
+  for (; i < paras.length; i++) {
+    const t = paras[i].trim()
+    if (t.length >= 30 && base.includes(t)) continue
+    kept.push(paras[i])
+  }
+  const out = kept.join('\n\n').trim()
+  return out || text
 }
 
 // 细纲按需注入：把细纲按"第N章"拆段，只取本章及后续 windowSize 章，避免百万字细纲全量进上下文
@@ -156,8 +305,53 @@ export function volumeStrategyText(project, chapterNo) {
   const v = currentVolume(project, chapterNo)
   if (!v || !v.strategy) return ''
   const parts = [`第${v.volumeNo}卷《${v.name}》`, v.strategy]
+  if (v.arcStory) parts.push(`本卷故事（本章围绕它推进，不写跨卷主线）：${v.arcStory}`)
+  if (v.theme) parts.push(`本卷主题：${v.theme}`)
+  if (v.conflict) parts.push(`本卷核心冲突：${v.conflict}`)
+  if (v.gain) parts.push(`本卷收获：${v.gain}`)
+  if (v.endHook) parts.push(`卷末大悬念（仅卷末允许落在其上）：${v.endHook}`)
+  if (v.location) parts.push(`本卷主舞台：${v.location}`)
+  const mapCtx = mapContextFor(project, chapterNo)
+  if (mapCtx) parts.push(mapCtx)
   if (v.arc) parts.push(`起承转合结构：${v.arc}`)
   if (v.emotion) parts.push(`情感走向：${v.emotion}`)
+  // 本卷禁回收清单：圣经流程为每卷圈定长线伏笔，写作与场景规划必须尊重（抢收另有归档硬拦截兜底）
+  const ids = new Set(v.forbiddenForeshadowIds || [])
+  const banned = (project.foreshadows || []).filter((f) => ids.has(f.id)).map((f) => f.content)
+  if (banned.length) parts.push(`本卷绝对不回收的长线伏笔（只许铺垫渲染）：${banned.map((b) => `「${b}」`).join('、')}`)
+  return parts.join('\n')
+}
+
+// 本卷故事注入（长篇续纲用）：给定章号区间涵盖的各卷，汇总其 arcStory，提醒续纲围绕“每卷一个独立故事”展开而非拉长同一件事
+export function volumeStoryForRange(project, from, to) {
+  if (!from || to < from) return ''
+  const seen = new Set()
+  const lines = []
+  for (let n = from; n <= to; n++) {
+    const v = currentVolume(project, n)
+    if (!v || seen.has(v.volumeNo) || !v.arcStory) continue
+    seen.add(v.volumeNo)
+    lines.push(`第${v.volumeNo}卷《${v.name || ''}》本卷故事：${v.arcStory}`)
+  }
+  return lines.join('\n')
+}
+
+// ---------- 世界地图分层·传闻级隔离（根治"世界观困死一城"） ----------
+// 圣经登记地图阶梯 [{name, summary, truth, rumor, unlockVolume}]：
+// 写作上下文只能看到「已解锁层的正式设定 + 下一层的传闻」（rumor 短引），更高层与所有 truth 一律不进上下文；
+// truth 仅供审核对照（见 reviewTruths），防 AI 把后续卷的大世界提前写死。
+export function mapContextFor(project, chapterNo) {
+  const layers = (project.bible?.mapLayers || []).filter((m) => m && m.name)
+  if (!layers.length) return ''
+  const v = currentVolume(project, chapterNo)
+  const unlocked = (v && Number(v.unlockLayer) > 0 && Number(v.unlockLayer) <= layers.length ? Number(v.unlockLayer) : 1)
+  const parts = []
+  const open = layers.slice(0, unlocked).map((m, i) => `${i + 1}. ${m.name}：${m.summary || ''}`).filter(Boolean)
+  if (open.length) parts.push(`世界地图·已解锁区域（可正式展开场景与细节）：\n${open.join('\n')}`)
+  const nextL = layers[unlocked]
+  if (nextL) parts.push(`世界地图·远方传闻（本章只允许以传闻/口耳相传/向往的形式提及，禁止展开细节与实地场景）：「${nextL.rumor || nextL.name}」`)
+  const beyond = layers.slice(unlocked + 1).map((m) => m.name)
+  if (beyond.length) parts.push(`世界地图·禁区（尚未进入故事，禁止提及任何细节）：${beyond.join('、')}`)
   return parts.join('\n')
 }
 
@@ -244,6 +438,11 @@ export function arcTextForRange(project, from, to) {
 // AI 规划新卷：基于梗概/细纲开头/滚动摘要/故事线生成卷名与卷战略（手动建档与自动断卷共用）
 export async function planVolume({ apiKey, project, startChapter }) {
   const volumeNo = (project.volumes || []).length + 1
+  // 前面各卷已讲过的故事（供 AI 避免本卷重复同类事件/同一对手，保障“每卷一个新故事”）
+  const prevVolumes = (project.volumes || [])
+    .map((v) => `第${v.volumeNo}卷《${v.name || ''}》：${v.arcStory || v.theme || v.strategy || ''}`)
+    .filter((s) => s.length > 6)
+    .join('\n')
   const res = await chatJSON({
     apiKey,
     messages: volumePlanMessages({
@@ -252,6 +451,7 @@ export async function planVolume({ apiKey, project, startChapter }) {
       outline: outlineForChapter(project.outline, startChapter, 8),
       rollingSummary: project.rollingSummary,
       storylines: project.storylines || [],
+      prevVolumes,
     }),
     temperature: 0.5,
   })
@@ -260,6 +460,7 @@ export async function planVolume({ apiKey, project, startChapter }) {
     id: uid(),
     volumeNo,
     name: String(res.title || `第${volumeNo}卷`).slice(0, 20),
+    arcStory: String(res.arc_story || ''),
     strategy: String(res.strategy),
     arc: String(res.arc || ''),
     emotion: String(res.emotion || ''),
@@ -424,7 +625,7 @@ export function keywordsOf(instruction, characters) {
   const names = []
   for (const c of characters || []) {
     if (c.name) names.push(c.name)
-    if (Array.isArray(c.aliases)) names.push(...c.aliases.filter(Boolean))
+    names.push(...aliasesOf(c))
   }
   const words = (instruction || '')
     .split(/[\s,，。、;；:：!！?？\n"'“”‘’（）()【】]+/)
@@ -478,7 +679,7 @@ function pendingVolumeChapters(project, currentChapterNo, currentSummary) {
 // 检查点：传 checkpointId（书 id）时每完成一路就落盘一次，刷新/中断后可从断点续跑（见 loadArchiveCheckpoint）；
 // lanes：续跑时带上已完成的步骤结果，只重跑缺失部分；
 // policy：质量策略，'strict'（质量优先）时单路失败自动重试一次，'fast'（连续推进）失败直接降级不回头。
-export async function runPostChapter({ apiKey, project, chapterNo, text, onStep, checkpointId = null, title = '', lanes = null, policy = 'fast' }) {
+export async function runPostChapter({ apiKey, project, chapterNo, text, onStep, checkpointId = null, title = '', lanes = null, policy = 'fast', instruction = '', scenePlan = '' }) {
   const report = {
     summary: '',
     rolling: project.rollingSummary || '',
@@ -543,6 +744,9 @@ export async function runPostChapter({ apiKey, project, chapterNo, text, onStep,
         outline: outlineForChapter(project.outline, chapterNo),
         foreshadows: active,
         text,
+        chapterNo,
+        instruction,
+        scenePlan,
       }),
       temperature: 0.2,
     }),
@@ -577,7 +781,8 @@ export async function runPostChapter({ apiKey, project, chapterNo, text, onStep,
   } else report.degraded.push('伏笔检测')
   if (cR.status === 'fulfilled') {
     const res = cR.value
-    report.issues = Array.isArray(res.issues) ? res.issues : []
+    // severity 归一：旧数据/模型漏填时默认 hard（宁红勿漏），soft 仅当模型明确标注
+    report.issues = Array.isArray(res.issues) ? res.issues.map((it) => ({ ...it, severity: it?.severity === 'soft' ? 'soft' : 'hard' })) : []
     report.drift = res.outline_drift || ''
   } else report.degraded.push('一致性校验')
   if (slR.status === 'fulfilled') {
@@ -608,6 +813,14 @@ export async function runPostChapter({ apiKey, project, chapterNo, text, onStep,
   return report
 }
 
+// 人物别名归一：档案里 aliases 可能是数组（手动登记）也可能是逗号分隔字符串（成书/导入时写入），统一转数组供匹配使用；
+// 不统一的写法曾在重写归档时抛 "c.aliases.some is not a function"（字符串没有 some）
+export function aliasesOf(c) {
+  if (Array.isArray(c?.aliases)) return c.aliases.map((a) => String(a).trim()).filter(Boolean)
+  if (typeof c?.aliases === 'string' && c.aliases.trim()) return c.aliases.split(/[,，、]/).map((s) => s.trim()).filter(Boolean)
+  return []
+}
+
 // 归档检查点：保存章节前开启、每完成一路归档落盘一次，刷新/中断后可从断点续跑，不必重跑全部请求。
 export function loadArchiveCheckpoint(projectId) {
   try {
@@ -636,7 +849,7 @@ export function applyReport(project, { chapterNo, title, text }, report) {
       wordCount: countWords(text),
       summary: report.summary,
       pov: report.pov || '',
-      issueCount: report.issues.length,
+      issueCount: report.issues.filter((i) => i.severity !== 'soft').length,
       issues: report.issues,
       createdAt: Date.now(),
     },
@@ -671,7 +884,7 @@ export function applyReport(project, { chapterNo, title, text }, report) {
     if (!u || !u.name || !u.change) continue
     const uname = String(u.name).trim()
     const i = characters.findIndex(
-      (c) => (c.name || '').trim() === uname || (c.aliases || []).some((a) => String(a).trim() === uname),
+      (c) => (c.name || '').trim() === uname || aliasesOf(c).some((a) => a === uname),
     )
     if (i >= 0) {
       const segs = [...(characters[i].status || '').split('；').filter(Boolean), u.change].slice(-3)
@@ -723,6 +936,7 @@ export function applyReport(project, { chapterNo, title, text }, report) {
       content: nf.content,
       relatedChars: Array.isArray(nf.related_chars) ? nf.related_chars : [],
       importance,
+      tier: '短', // 归档自动登记的多为短线伏笔；四层伏笔（短/中/长/终极）由圣经流程显式登记（见 TIER_GAP）
       plantedChapter: chapterNo,
       minResolveChapter: chapterNo + (PROTECT_GAP[importance] || 5),
       status: '未回收',
@@ -745,7 +959,7 @@ export function reapplyReport(project, chapterNo, report) {
           ...c,
           summary: report.summary || c.summary,
           pov: report.pov || c.pov,
-          issueCount: report.issues.length,
+          issueCount: report.issues.filter((i) => i.severity !== 'soft').length,
           issues: report.issues,
         }
       : c,
@@ -760,7 +974,7 @@ export function reapplyReport(project, chapterNo, report) {
     if (!u?.name || !u.change) continue
     const uname = String(u.name).trim()
     const i = characters.findIndex(
-      (c) => (c.name || '').trim() === uname || (c.aliases || []).some((a) => String(a).trim() === uname),
+      (c) => (c.name || '').trim() === uname || aliasesOf(c).some((a) => a === uname),
     )
     if (i < 0) continue
     const segs = [...(characters[i].status || '').split('；').filter(Boolean)]
@@ -802,6 +1016,7 @@ export function reapplyReport(project, chapterNo, report) {
       content: nf.content,
       relatedChars: Array.isArray(nf.related_chars) ? nf.related_chars : [],
       importance,
+      tier: '短', // 归档自动登记默认短线；圣经流程显式登记的伏笔带完整分层与线索计划，此处不覆盖（按 content 去重已跳过）
       plantedChapter: chapterNo,
       minResolveChapter: chapterNo + (PROTECT_GAP[importance] || 5),
       status: '未回收',
@@ -835,6 +1050,90 @@ export async function rerunArchive({ apiKey, project, chapterNo, onStep }) {
   const report = await runPostChapter({ apiKey, project, chapterNo, text: ch.content, onStep })
   const { project: next, blocked } = reapplyReport(project, chapterNo, report)
   return { project: next, blocked, report }
+}
+
+// 级联复查：重写第 N 章后，后续已写章节是基于重写前上下文写的，可能与新版脱节（人物状态/伏笔层级/细节连续）；
+// 对后续每章只跑一致性校验一路（每章一次轻量调用）刷新其 issues，不动其他归档路避免重复记账；单章失败降级跳过不阻断
+export async function recheckFollowing({ apiKey, project, fromChapter, onStep }) {
+  const sorted = [...(project.chapters || [])].sort((a, b) => a.chapterNo - b.chapterNo)
+  const targets = sorted.filter((c) => c.chapterNo > fromChapter)
+  let next = project
+  const results = []
+  for (const c of targets) {
+    onStep?.(`正在复查第 ${c.chapterNo} 章与重写后前文的连贯性…`)
+    try {
+      const active = (next.foreshadows || []).filter((f) => f.status === '未回收' || f.status === '已提及')
+      const res = await chatJSON({
+        apiKey,
+        messages: consistencyCheckMessages({
+          world: next.world,
+          characters: next.characters,
+          outline: outlineForChapter(next.outline, c.chapterNo),
+          foreshadows: active,
+          text: c.content,
+          chapterNo: c.chapterNo,
+        }),
+        temperature: 0.2,
+      })
+      const issues = Array.isArray(res.issues) ? res.issues : []
+      next = { ...next, chapters: next.chapters.map((x) => (x.chapterNo === c.chapterNo ? { ...x, issues, issueCount: issues.length } : x)) }
+      results.push({ chapterNo: c.chapterNo, issues })
+    } catch {
+      results.push({ chapterNo: c.chapterNo, issues: null })
+    }
+  }
+  next.updatedAt = Date.now()
+  return { project: next, results }
+}
+
+// 章号校正：模型若把卷内章号从第 1 章起编（而非全局章号），顺延重编为该卷起始章号，保证全书不断号不重号
+export function renumberPart(text, startNo) {
+  const lines = String(text).split('\n')
+  if (lines.some((l) => l.trim().startsWith(`第${startNo}章`))) return text
+  let n = startNo
+  return lines
+    .map((l) => (/^第\s*[0-9〇零一二三四五六七八九十百两]+\s*章/.test(l.trim()) ? l.replace(/第\s*[0-9〇零一二三四五六七八九十百两]+\s*章/, `第${n++}章`) : l))
+    .join('\n')
+}
+
+// 章骨架文本 → 结构化：每行「第N章 章名｜任务：本章唯一任务」
+export function parseSkeleton(text) {
+  const out = []
+  for (const line of String(text || '').split('\n')) {
+    const m = line.trim().match(/^第\s*([0-9〇零一二三四五六七八九十百两]+)\s*章[：:\s]*(.+)$/)
+    if (!m) continue
+    const no = cnToNumber(m[1])
+    if (!Number.isFinite(no)) continue
+    let rest = m[2].trim()
+    let task = ''
+    const idx = rest.search(/[｜|]\s*任务[：:]|^任务[：:]/)
+    if (idx >= 0) {
+      task = rest.slice(idx).replace(/^[｜|]?\s*任务[：:]\s*/, '').trim()
+      rest = rest.slice(0, idx).trim()
+    }
+    out.push({ chapterNo: no, title: rest, task })
+  }
+  return out
+}
+
+// 圣经字段缺失判定：部分模型（如 Qwen）会漏掉数组字段，power_rules/map_layers 缺一即视为不合格
+export const bibleMissingFields = (r) =>
+  !(Array.isArray(r?.power_rules) && r.power_rules.filter(Boolean).length) || !(Array.isArray(r?.map_layers) && r.map_layers.filter((m) => m?.name).length)
+
+// 圣经缺字段兜底：首次产出缺 power_rules/map_layers 时追加纠正消息重试一次；重试仍缺则返回原结果不阻塞流程（用户可在向导手动补）
+export async function bibleJsonWithRetry({ apiKey, messages, temperature = 0.7 }) {
+  let res = await chatJSON({ apiKey, messages, temperature })
+  if (!bibleMissingFields(res)) return res
+  const retry = await chatJSON({
+    apiKey,
+    messages: [
+      ...messages,
+      { role: 'assistant', content: JSON.stringify(res) },
+      { role: 'user', content: '上次输出缺少必填字段 power_rules / map_layers（或为空数组）。请重新输出完整 JSON：power_rules 至少 2 条、map_layers 至少 3 层，其余字段一并保留，不得省略任何字段。' },
+    ],
+    temperature,
+  })
+  return bibleMissingFields(retry) ? res : retry
 }
 
 // ---------- 拆书工作台：参考资产 → 写作上下文 ----------
@@ -1031,6 +1330,91 @@ export function chronicleContext(project, maxChars = 3000, onlyNames = null) {
   return lines.join('\n')
 }
 
+// ---------- 四层伏笔：回收章锚定（根治"只有短埋点"） ----------
+// 圣经流程登记的伏笔带 tier 与 plannedVolume（回收卷号）；卷结构确认后把回收卷换算成具体回收章锚点，
+// 保护期由此生成——模型写作时看到的不再是"别急着收"的劝告，而是"第 X 章前禁止回收"的硬边界。
+// 终极层锚到最后一卷起始章（全书最大秘密只在大结局区间回收）；无卷档案或卷号对不上时按 TIER_GAP 兜底。
+export function anchorForeshadowResolve(project, foreshadow) {
+  const base = foreshadow.plantedChapter || 1
+  if (foreshadow.tier === '终极') {
+    const vols = project.volumes || []
+    const last = vols[vols.length - 1]
+    return last ? Math.max(base + 20, last.startChapter) : base + (TIER_GAP['长'] || 150)
+  }
+  const gap = TIER_GAP[foreshadow.tier] ?? 10
+  const v = (project.volumes || []).find((x) => x.volumeNo === foreshadow.plannedVolume)
+  if (!v) return base + gap
+  // 回收锚点 = 计划回收卷的中后段（卷内 70% 位置），卷内坐标再换算回全书章号；开放式末卷按 20 章估算，可人工微调
+  const len = v.length || 20
+  return Math.max(base + gap, v.startChapter + Math.max(0, Math.floor(len * 0.7) - 1))
+}
+
+// 卷结构确认后批量锚定：只处理「已选回收卷但尚未锚定」的伏笔，已锚定的不动（尊重人工微调）
+export function anchorForeshadows(project) {
+  const next = { ...project }
+  next.foreshadows = (project.foreshadows || []).map((f) =>
+    (f.tier === '终极' || (f.tier && f.plannedVolume)) && !f.resolveAnchored
+      ? { ...f, minResolveChapter: anchorForeshadowResolve(project, f), resolveAnchored: true }
+      : f,
+  )
+  next.updatedAt = Date.now()
+  return next
+}
+
+// 本章核心任务（来自全书章名骨架，圣经流程产物）：注入写章与场景规划，硬约束"每章只完成一个任务"；
+// 无骨架（旧书）时返回空不注入。返回格式：章名 + 任务。
+export function chapterTaskOf(project, chapterNo) {
+  const s = (project.chapterSkeleton || []).find((x) => Number(x.chapterNo) === Number(chapterNo))
+  if (!s) return ''
+  return [s.title && `章名：${s.title}`, s.task && `任务：${s.task}`].filter(Boolean).join('\n')
+}
+
+// ---------- 导入分章：按「第N章」章头把整段文本切成章节（长篇页导入与新手写作导入共用） ----------
+// 兼容中文/阿拉伯数字章号（复用 cnToNumber）；识别不到章头时降级为单章，由调用方提示手动处理。
+export function splitChapters(text) {
+  const lines = String(text || '').split('\n')
+  const heads = []
+  lines.forEach((line, i) => {
+    const m = line.trim().match(/^第\s*([0-9〇零一二三四五六七八九十百两]+)\s*章[：:\s]*(.*)$/)
+    if (m) {
+      const no = cnToNumber(m[1])
+      if (Number.isFinite(no)) heads.push({ index: i, no, title: m[2].trim() })
+    }
+  })
+  if (!heads.length) {
+    const body = String(text || '').trim()
+    return body ? [{ no: 1, title: '', text: body }] : []
+  }
+  const chapters = []
+  heads.forEach((h, idx) => {
+    const end = idx + 1 < heads.length ? heads[idx + 1].index : lines.length
+    const body = lines.slice(h.index + 1, end).join('\n').trim()
+    if (body) chapters.push({ no: h.no, title: h.title, text: body })
+  })
+  // 章号不连续或重复时重排为 1..N（导入后章号必须连续，否则保护期/审核窗口等按章计数的机制全部错位）
+  return chapters.map((c, i) => ({ ...c, no: i + 1 }))
+}
+
+// 导入章节轻量归档：只做章节摘要 + 伏笔检测两路（各自容错），供导入流程逐章建档；
+// cur 必须传累积后的项目，前文伏笔才能在后续章节被检测为"提及/回收"
+export async function archiveImportedChapter({ apiKey, project: cur, chapterNo, title, text }) {
+  let summary = ''
+  try {
+    summary = (await chatJSON({ apiKey, messages: chapterSummaryMessages({ text }), temperature: 0.3 })).summary || ''
+  } catch {
+    /* 摘要失败不阻塞导入，该章摘要留空可后续补跑 */
+  }
+  let hook = { new_foreshadows: [], resolved: [], mentioned: [] }
+  try {
+    hook = await chatJSON({ apiKey, messages: foreshadowMessages({ active: (cur.foreshadows || []).filter((f) => f.status === '未回收' || f.status === '已提及'), text }), temperature: 0.2 })
+  } catch {
+    /* 伏笔检测失败降级跳过 */
+  }
+  const report = { summary, updates: [], newCharacters: [], events: [], pov: '', newForeshadows: Array.isArray(hook.new_foreshadows) ? hook.new_foreshadows : [], resolved: Array.isArray(hook.resolved) ? hook.resolved : [], mentioned: Array.isArray(hook.mentioned) ? hook.mentioned : [], issues: [], drift: '', storylines: [], rolling: '' }
+  const { project: next, blocked } = applyReport(cur, { chapterNo, title, text }, report)
+  return { project: next, blocked, summary }
+}
+
 // 应用伏笔节奏规划结果：只延长保护期，不缩短（防止规划反而导致抢收）
 export function applyForeshadowPlans(project, plans) {
   const next = { ...project }
@@ -1071,7 +1455,7 @@ export function properNounScan(text, characters = [], minLength = 2) {
   const known = new Set()
   for (const c of characters || []) {
     if (c.name) known.add(String(c.name).trim())
-    for (const a of c.aliases || []) if (a) known.add(String(a).trim())
+    for (const a of aliasesOf(c)) known.add(a)
   }
   const names = [...known].filter((n) => n.length >= minLength)
   if (!names.length) return []
@@ -1110,7 +1494,32 @@ export function settlementReport(project, overdueChapters = 20) {
     const entries = project.chronicles?.[c.name] || []
     return entries.length > 0 && current - entries[entries.length - 1].chapter > 15
   })
-  return { current, overdueHooks, staleStorylines, dormantChars }
+  // 四层伏笔健康度：按层分组统计，未分层（旧数据/归档自动登记）归入"未分层"，长时未动的分层伏笔单独提醒（防死伏笔）
+  const byTier = {}
+  for (const f of active) {
+    const key = f.tier || '未分层'
+    byTier[key] = (byTier[key] || 0) + 1
+  }
+  const dormantTiered = active.filter((f) => f.tier && f.tier !== '短' && (f.plantedChapter || 0) > 0 && current - f.plantedChapter > overdueChapters * 2)
+  return { current, overdueHooks, staleStorylines, dormantChars, byTier, dormantTiered }
+}
+
+// 圣经真相层 → 审核对照表：只供审核判断终极秘密是否被提前揭示（写作上下文永远拿不到，真相隔离）；
+// 揭示红线默认取终卷起始章（终极伏笔的回收区间），无卷档案时不带章号约束。
+// 地图分层真相层同样进对照表（红线 = 解锁卷起始章），防写作方地图越界提前写死大世界。
+export function reviewTruths(project) {
+  const out = []
+  const vols = project.volumes || []
+  const last = vols[vols.length - 1]
+  for (const t of project.bible?.truths || []) {
+    if (t.truth) out.push({ kind: t.kind, truth: t.truth, minResolveChapter: last?.startChapter || null })
+  }
+  for (const m of project.bible?.mapLayers || []) {
+    if (!m.truth) continue
+    const v = vols.find((x) => x.volumeNo === m.unlockVolume)
+    out.push({ kind: `地图分层真相·${m.name}`, truth: m.truth, minResolveChapter: v?.startChapter || null })
+  }
+  return out
 }
 
 // ---------- 10. 抽章交叉审核：随机抽 2 个早期章 + 最近 3 章送审，专查跨窗口矛盾 ----------
@@ -1141,6 +1550,7 @@ export function buildCrossReviewInput(project) {
     beforeSummary: chs.filter((c) => c.chapterNo < startNo).slice(-6).map((c) => `第${c.chapterNo}章：${c.summary || ''}`).join('\n'),
     chapters: window,
     positions: window.map((c) => ({ chapterNo: c.chapterNo, position: '' })),
+    truths: reviewTruths(project),
     cross: true,
     sampled: samples.map((c) => c.chapterNo),
   }
@@ -1205,6 +1615,8 @@ export function buildReviewInput(project) {
     chapters: window,
     // 各章起承转合定位（供结构错位检查；旧细纲无标签时为空，审核自动跳过该项）
     positions: window.map((c) => ({ chapterNo: c.chapterNo, position: outlinePositionFor(project.outline, c.chapterNo) })),
+    // 圣经真相对照表（有圣经才注入；只用于判断终极秘密是否被提前揭示）
+    truths: reviewTruths(project),
   }
 }
 
@@ -1287,21 +1699,3 @@ export function restoreChapter(project, chapterNo) {
   return next
 }
 
-// 重写后刷新派生档案：重新生成该章摘要与叙事视角（两次轻量请求，各自容错）
-export async function refreshChapterMeta({ apiKey, project, text, onStep }) {
-  const meta = {}
-  onStep?.('更新章节摘要…')
-  try {
-    meta.summary = (await chatJSON({ apiKey, messages: chapterSummaryMessages({ text }), temperature: 0.3 })).summary || ''
-  } catch {
-    /* 摘要失败降级跳过，保留旧摘要 */
-  }
-  onStep?.('重新识别叙事视角…')
-  try {
-    const res = await chatJSON({ apiKey, messages: stateUpdateMessages({ characters: project.characters, text }), temperature: 0.2 })
-    if (typeof res.pov === 'string' && res.pov.trim()) meta.pov = res.pov.trim()
-  } catch {
-    /* 视角识别失败降级跳过 */
-  }
-  return meta
-}

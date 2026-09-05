@@ -8,7 +8,7 @@ import { REVIEW_WINDOW, reviewOpportunity, buildReviewInput, buildCrossReviewInp
 import ChapterRewriter from './ChapterRewriter.jsx'
 import Ic from './Ic.jsx'
 
-export default function ReviewPanel({ project, saveProject, apiKey, glmKey, onNeedGlmKey, busy: globalBusy }) {
+export default function ReviewPanel({ project, saveProject, apiKey, glmKey, onNeedGlmKey, busy: globalBusy, onRewriteDone }) {
   const [reviewing, setReviewing] = useState(false)
   const [err, setErr] = useState('')
 
@@ -55,7 +55,7 @@ export default function ReviewPanel({ project, saveProject, apiKey, glmKey, onNe
           </p>
         </div>
         <button
-          onClick={runReview}
+          onClick={() => runReview(false)}
           disabled={busy || !opp.available}
           className="rounded-full bg-stone-800 px-5 py-2 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
         >
@@ -120,6 +120,7 @@ export default function ReviewPanel({ project, saveProject, apiKey, glmKey, onNe
                       fixPrompt={s.fixPrompt}
                       label={`一键修改第 ${s.chapterNo} 章`}
                       disabled={busy || !apiKey}
+                      onDone={onRewriteDone}
                     />
                   </div>
                 )}

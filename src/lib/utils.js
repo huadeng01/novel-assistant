@@ -39,16 +39,16 @@ export async function copyText(text) {
   }
 }
 
-// 控制并发数的异步 map：最多同时跑 limit 个任务，保证顺序与结果一一对应
+// 并发受限的 map：最多同时跑 limit 个，返回与 items 同序的结果数组
 export async function mapLimit(items, limit, fn) {
   const results = new Array(items.length)
   let next = 0
-  async function worker() {
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
     while (next < items.length) {
       const i = next++
       results[i] = await fn(items[i], i)
     }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  })
+  await Promise.all(workers)
   return results
 }
