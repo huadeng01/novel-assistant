@@ -1,0 +1,45 @@
+# 墨语 · 部署到 GitHub Pages（普通 push / 手动触发）
+#
+# 分工：本 workflow 处理 main 分支 push 与手动触发的构建部署；
+# 每日榜单快照由 fetch-ranks.yml 负责（它自包含地提交 ranks.json 后直接部署，
+# 因为 GITHUB_TOKEN 的提交不会触发本 workflow —— GitHub 防递归机制）。
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

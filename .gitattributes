@@ -1,0 +1,2 @@
+# 统一 LF 换行：仓库内文本一律 LF，防止 Windows/CI 间 CRLF 漂移
+* text=auto eol=lf

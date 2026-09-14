@@ -1,0 +1,9 @@
+node_modules
+dist
+.DS_Store
+*.local
+.vercel
+.vercel-tmp
+*-preview.png
+
+__MACOSX

@@ -1,0 +1,72 @@
+# 墨语 · 每日小说榜单抓取 + 部署（自包含 workflow）
+#
+# 为什么自包含：用 GITHUB_TOKEN 提交的代码不会触发其它 workflow（GitHub 防递归机制），
+# 因此本 job 在提交 ranks.json 后直接 build + 部署 Pages，不依赖独立的 deploy.yml。
+# 与 deploy.yml 的分工：deploy.yml 处理普通 push 的构建部署；本 workflow 处理每日榜单快照。
+# 两者 concurrency group 不同，不会互相取消。
+#
+# 时间：cron '0 18 * * *' = UTC 18:00 = 北京时间【次日 02:00】，每日尽力抓取；也可手动 workflow_dispatch 触发。
+#   注：GitHub 定时任务在平台高峰期可能延迟数分钟至数十分钟，属平台特性；北京凌晨 2 点为低峰，通常准点。
+# 行为：任一平台成功即视为成功（见 fetch-ranks.mjs：全部失败才 exit 1）；单平台失败保留 ok:false 占位，不阻塞部署。
+# 合规红线：只抓榜单元数据（排名/书名/作者/封面/简介/分类/频道/官方链接），不抓正文，透明 UA，运行时校验 robots.txt。
+name: Fetch Ranks Daily
+
+on:
+  schedule:
+    - cron: '0 18 * * *' # UTC 18:00 = 北京时间 02:00
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # 提交回写 public/ranks.json
+  pages: write # 部署 GitHub Pages
+  id-token: write # Pages 部署所需 OIDC
+
+concurrency:
+  group: fetch-ranks
+  cancel-in-progress: true
+
+jobs:
+  fetch-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180 # 全量抓取（含番茄逐本详情页兜底）约 60~80 分钟，留足余量
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Fetch rank snapshots
+        run: npm run fetch-ranks
+
+      - name: Commit snapshot if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/ranks.json
+          if git diff --cached --quiet; then
+            echo "ranks.json unchanged, skipping commit"
+          else
+            git commit -m "chore(ranks): update daily snapshot [skip ci]"
+            git pull --rebase --autostash origin "${{ github.ref_name }}" || true
+            git push || true
+            echo "Snapshot committed and pushed"
+          fi
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

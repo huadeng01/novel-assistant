@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "单章写作请求的上下文组装",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [940, 520],
+    "views": [
+      { "id": "sources", "label": "三路本地资产", "focus": ["prev_text", "state", "world"], "note": "全部来自本地已归档资产，写章前按章号有界截取。" },
+      { "id": "assembly", "label": "有界拼装", "focus": ["prev_text", "world", "assembly", "draft"], "note": "canonical context 按固定顺序与长度上限拼装，规则块永不省略。" },
+      { "id": "settlement", "label": "产出与结算", "focus": ["draft", "scan", "archive"], "note": "初稿经本地 AI 味扫描后保存，触发五路归档供下一章复用。" }
+    ]
+  },
+  "stages": [
+    { "label": "上下文来源（本地资产）" },
+    { "label": "有界拼装" },
+    { "label": "初稿生成" },
+    { "label": "结算" }
+  ],
+  "nodes": [
+    { "id": "prev_text", "type": "database", "label": "前文与结构", "sublabel": "尾部 2000 字 + 细纲 + 卷战略", "stage": 0, "row": 0 },
+    { "id": "state", "type": "database", "label": "人物与连续性账本", "sublabel": "出场档案 + 伏笔 / 时间线", "stage": 0, "row": 1 },
+    { "id": "world", "type": "database", "label": "世界 · 文风 · 召回", "sublabel": "规则块 + 文风档案 + 召回片段", "stage": 0, "row": 2 },
+    { "id": "assembly", "type": "backend", "label": "canonical context", "sublabel": "固定顺序 · 长度上限", "stage": 1, "row": 1, "tag": "有界" },
+    { "id": "draft", "type": "cloud", "label": "初稿请求", "sublabel": "DeepSeek · 逐场景扩写", "stage": 2, "row": 1, "tag": "唯一外发" },
+    { "id": "scan", "type": "security", "label": "AI 味扫描", "sublabel": "本地规则 · 零请求", "stage": 3, "row": 0 },
+    { "id": "archive", "type": "database", "label": "保存即归档", "sublabel": "五路并发结算", "stage": 3, "row": 2 }
+  ],
+  "flows": [
+    { "from": "prev_text", "to": "assembly", "label": "衔接与结构", "variant": "emphasis", "labelAt": [100, 214] },
+    { "from": "state", "to": "assembly", "label": "人物与伏笔", "variant": "emphasis", "route": "straight", "labelAt": [100, 328] },
+    { "from": "world", "to": "assembly", "label": "规则 · 文风 · 召回", "variant": "default", "labelAt": [100, 442] },
+    { "from": "assembly", "to": "draft", "label": "拼装完成的上下文", "variant": "emphasis", "labelDy": -12 },
+    { "from": "draft", "to": "scan", "label": "初稿全文", "variant": "emphasis", "labelDy": -12 },
+    { "from": "scan", "to": "archive", "label": "保存章节", "variant": "emphasis", "labelAt": [745, 200] }
+  ],
+  "cards": [
+    { "dot": "emerald", "title": "有界上下文", "items": ["前文只带上一章末尾 2000 字与滚动摘要", "细纲取本章窗口 3 章，含起承转合定位与卷弧线", "人物按场景清单圈定，不带入无关角色"] },
+    { "dot": "cyan", "title": "单一外发请求", "items": ["三路来源全部来自本地已归档资产", "拼装结果一次发给模型，无多轮检索", "伏笔保护期警告随账本注入，防止过早回收"] },
+    { "dot": "rose", "title": "写完即结算", "items": ["世界手册规则块永不省略，文风带反模板规则与 AI 味禁令", "AI 味扫描是本地规则，不消耗请求", "保存即触发五路归档，本章结算就是下一章的来源"] }
+  ]
+}
