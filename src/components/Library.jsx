@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import Ic from './Ic.jsx'
+import { READ_ACCEPT } from '../lib/docio.js'
 
 // 书库侧边栏：导入设备上的小说、选择参考书、查看与编辑文风档案
 // 电脑 / 平板统一走系统文件选择器（iPad 从「文件」App 选择）
@@ -65,9 +66,9 @@ export default function Library({ lib, apiKey, onNeedKey }) {
           >
             + 导入小说
           </button>
-          <input ref={fileRef} type="file" accept=".txt,.md" className="hidden" onChange={onPick} />
+          <input ref={fileRef} type="file" accept={READ_ACCEPT} className="hidden" onChange={onPick} />
         </div>
-        <p className="mt-2 text-xs text-stone-400">支持 .txt / .md 文件，电脑从磁盘选择，平板从「文件」App 选择。</p>
+        <p className="mt-2 text-xs text-stone-400">支持 .txt / .md / .docx 文件，电脑从磁盘选择，平板从「文件」App 选择。（老式 .doc 请先用 Word / WPS 另存为 .docx）</p>
 
         {err && <p className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{err}</p>}
 

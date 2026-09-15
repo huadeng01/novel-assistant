@@ -128,3 +128,29 @@ button:active:not(:disabled) {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* 下拉选择框统一美化：抹掉各浏览器默认的死板箭头，换成墨色细箭头；
+   统一悬停/聚焦反馈（朱砂描边 + 柔光），让散落各页的 <select> 观感一致。
+   仅覆盖 appearance / 箭头 / 右内边距 / 交互态，尺寸与圆角仍交给各处的 Tailwind 类，避免打架。 */
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235d5649' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 0.55rem center;
+  background-size: 0.95rem 0.95rem;
+  padding-right: 1.9rem !important;
+  cursor: pointer;
+}
+select:hover:not(:disabled) {
+  border-color: var(--color-stone-400);
+}
+select:focus {
+  border-color: var(--color-amber-500);
+  box-shadow: 0 0 0 3px rgb(194 64 42 / 0.12);
+  outline: none;
+}
+select:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}

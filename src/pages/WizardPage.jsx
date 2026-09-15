@@ -773,7 +773,7 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
             <button
               onClick={() => setShowInspire(true)}
               className="flex shrink-0 items-center gap-1 rounded-full bg-stone-800 px-4 py-1.5 text-xs font-medium text-white hover:bg-stone-700"
-              title="联网热梗 + AI 构思 5 个开局选题"
+              title="AI 构思 5 个爽文开局选题（主角开挂·打脸极快）"
             >
               <Ic n="sparkle" /> 灵感
             </button>

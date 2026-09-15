@@ -12,9 +12,13 @@ import {
   chapterOutlineBatchMessages,
   worldviewVolumeText,
   inspirationMessages,
+  inspirationExpandMessages,
+  inspirationSeed,
+  POWER_FANTASY_STANCES,
+  POWER_FANTASY_DRIVES,
   bookWorldviewMessages,
 } from '../prompts.js'
-import { worldviewText, worldviewTropeBlock, getWorldview } from '../worldviews/index.js'
+import { worldviewText, getWorldview } from '../worldviews/index.js'
 
 const all = (msgs) => msgs.map((m) => m.content).join('\n')
 const userOf = (msgs) => msgs.find((m) => m.role === 'user').content
@@ -492,26 +496,105 @@ describe('世界观两档注入的落点措辞', () => {
     expect(full).not.toBe(brief)
   })
 
-  it('inspirationMessages 收到套路清单时把它变成硬约束，收不到时保持原有措辞（旧数据降级）', () => {
-    const withTropes = all(inspirationMessages('玄幻', worldviewText(wv, 'brief'), '发散骰：一座会走的城', worldviewTropeBlock(wv)))
-    const without = all(inspirationMessages('玄幻', worldviewText(wv, 'brief'), '发散骰：一座会走的城', ''))
-    // 有套路清单：从「让模型自己在心里列套路」升级为「照单规避，一条都不得出现」
-    expect(withTropes).toContain('3. 反套路（照单规避，硬约束）')
-    expect(withTropes).toContain('清单里的套路一个都不得出现，换皮改名也不行')
-    expect(withTropes).toContain('可用的反套路切口')
-    expect(withTropes).toContain('高频套路清单是硬约束，一条都不得出现')
-    expect(withTropes).toContain(worldviewTropeBlock(wv))
-    // 无套路清单（旧数据 / 自定义题材未填）：退回原有措辞，让模型自己列高频开局
-    expect(without).toContain('3. 反套路：先在心里列出该题材最高频')
-    expect(without).not.toContain('照单规避')
-    expect(without).not.toContain('可用的反套路切口')
-    expect(without).not.toContain('高频套路清单是硬约束')
+  it('inspirationMessages 走爽文机制：注入元素库(驱动/爽点/流派/金手指)+升级链参考，套路作爽点素材注入', () => {
+    const tropes = getWorldview('玄幻').tropes
+    expect(tropes).toBeTruthy()
+    const seedStr = '主打爽点=装逼打脸；流派=词条流；金手指=签到系统'
+    const stance = POWER_FANTASY_STANCES[0] // 系统开挂流
+    const withTropes = all(inspirationMessages('玄幻', worldviewText(wv, 'brief'), tropes, { mode: 'guided', stance, seed: seedStr }))
+    const without = all(inspirationMessages('玄幻', worldviewText(wv, 'brief'), '', { mode: 'free', seed: seedStr }))
+    // 爽文基调(参考,非强制)+元素库注入
+    expect(withTropes).toContain('开局快给爽点')
+    expect(withTropes).toContain('情绪宣泄优先')
+    expect(withTropes).toContain('爽文元素库（参考素材，自主取用，非硬约束）')
+    // 主驱动与升级链注入(8 驱动)
+    for (const d of POWER_FANTASY_DRIVES.map((x) => x.name)) {
+      expect(withTropes).toContain(d)
+    }
+    expect(withTropes).toContain('升级链参考')
+    expect(withTropes).toContain('反派梯队')
+    // 12 爽点逐个注入(含新增非打脸类)
+    for (const b of ['装逼打脸', '扮猪吃虎', '逆天改命', '获得奇遇', '以弱胜强', '众人震惊', '报仇雪恨', '突破升级', '获得收集', '躺赢锦鲤', '团宠被爱', '揭秘探奇']) {
+      expect(withTropes).toContain(b)
+    }
+    // 流派清单注入
+    expect(withTropes).toContain('系统流·签到')
+    expect(withTropes).toContain('词条流')
+    expect(withTropes).toContain('御兽流')
+    // 金手指清单注入
+    expect(withTropes).toContain('签到系统')
+    // 有套路清单：作为参考素材注入(软化措辞)
+    expect(withTropes).toContain(tropes)
+    expect(withTropes).toContain('可照用/强化/叠加')
+    expect(withTropes).not.toContain('一个都不得出现')
+    // 参考种子(软化,非必须命中)
+    expect(withTropes).toContain('本批参考种子（随机，优先参考，可微调）')
+    expect(withTropes).not.toContain('必须命中')
+    // 立意倾向注入(软参考)+主驱动
+    expect(withTropes).toContain('用户倾向立意（软参考，可采纳可突破）')
+    expect(withTropes).toContain('系统开挂流')
+    expect(withTropes).toContain('主驱动：打脸（反派梯队）')
+    // 无套路清单：该块跳过,但元素库照常
+    expect(without).not.toContain('高频爽点套路')
+    expect(without).toContain('爽文元素库')
+    // 自由模式无倾向块
+    expect(without).not.toContain('用户倾向立意')
   })
 
-  it('灵感选题注入的是 brief 档（低权重参考，约几百字而不是上千字）', () => {
-    const t = all(inspirationMessages('玄幻', worldviewText(wv, 'brief'), '', ''))
+  it('爽文选题注入的是 brief 档（背景低权重参考，约几百字而不是上千字）', () => {
+    const t = all(inspirationMessages('玄幻', worldviewText(wv, 'brief'), '', { mode: 'free' }))
     expect(t).toContain(worldviewText(wv, 'brief'))
     expect(t).not.toContain(worldviewText(wv, 'full'))
     expect(worldviewText(wv, 'brief').length).toBeLessThan(worldviewText(wv, 'full').length)
+  })
+
+  it('常规小说模式：不注入爽文元素库，按正常叙事构思', () => {
+    const t = all(inspirationMessages('玄幻', worldviewText(wv, 'brief'), '', { mode: 'normal' }))
+    // 常规分支不含爽文元素库与基调
+    expect(t).not.toContain('爽文元素库')
+    expect(t).not.toContain('开局快给爽点')
+    expect(t).not.toContain('主驱动与升级链')
+    expect(t).not.toContain('用户倾向立意')
+    // 常规分支强调正常叙事：动机合理/冲突循序渐进/反派有立场
+    expect(t).toContain('人物动机合理')
+    expect(t).toContain('冲突循序渐进')
+    expect(t).toContain('反派也有自己的立场与逻辑')
+  })
+
+  it('inspirationSeed 无参纯随机：每批抽 3~4 个爽文要素轴作参考种子', () => {
+    for (let i = 0; i < 30; i++) {
+      const n = inspirationSeed().split('；').length
+      expect(n === 3 || n === 4).toBe(true)
+    }
+    // 轴名来自 4 轴(主打爽点/流派/金手指/开局对手目标)
+    const s = inspirationSeed()
+    expect(/主打爽点=|流派=|金手指=|开局对手\/目标=/.test(s)).toBe(true)
+  })
+
+  it('inspirationExpandMessages 扩充：注入 full 世界模板 + 境界硬校准 + JSON 协议；userNote 走迭代修改', () => {
+    const fullWv = worldviewText(getWorldview('仙侠'), 'full')
+    const brief = '我想写一部仙侠爽文，主角顾长生，开局签到得大乘期修为，前期突破化神境。'
+    const stance = POWER_FANTASY_STANCES[0]
+    const t = all(inspirationExpandMessages({ brief, genre: '仙侠', worldview: fullWv, stance }))
+    // 注入完整世界模板（full 档）与待扩充选题
+    expect(t).toContain(fullWv)
+    expect(t).toContain(brief)
+    // 境界硬校准是重点：开局低段、升级链递增、修正倒挂
+    expect(t).toContain('境界硬校准')
+    expect(t).toContain('不得开局即巅峰')
+    expect(t).toContain('逐级严格递增')
+    expect(t).toContain('境界倒挂')
+    // 立意倾向软参考注入
+    expect(t).toContain('本书立意倾向（软参考）')
+    expect(t).toContain(stance.name)
+    // 输出协议：JSON {brief}
+    expect(t).toContain('{"brief":"扩充后的完整初始提问文本（一段话）"}')
+    // 无 userNote：走初次扩充
+    expect(t).not.toContain('用户的修改想法')
+    // userNote 非空：注入修改想法块，走迭代
+    const t2 = all(inspirationExpandMessages({ brief, genre: '仙侠', worldview: fullWv, userNote: '把金手指改成签到暴击' }))
+    expect(t2).toContain('用户的修改想法（必须落实）')
+    expect(t2).toContain('把金手指改成签到暴击')
+    expect(t2).toContain('按用户想法修改并扩充')
   })
 })

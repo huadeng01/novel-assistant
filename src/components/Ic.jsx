@@ -1,7 +1,7 @@
 // 统一图标组件：全站以 lucide 线条图标替代 emoji，
 // 颜色跟随 currentColor（自动适配墨黑/朱砂主题），尺寸跟随字号。
 import {
-  Activity, Archive, Ban, BookOpen, Bookmark, Check, ChartColumn, CircleCheck,
+  Activity, Archive, Ban, BookOpen, Bookmark, Check, ChartColumn, ChevronDown, CircleCheck,
   Clapperboard, ClipboardList, Download, Feather, FileInput, FileText, Flame, Globe,
   KeyRound, Library, Lightbulb, Map, MessageCircle, Mountain, PartyPopper, Pencil, PenLine, Hourglass,
   RefreshCw, Rocket, RotateCcw, Route, Scroll, Search, Settings, Shield, Shuffle,
@@ -57,6 +57,7 @@ const MAP = {
   chat: MessageCircle,   // 💬 剧情讨论
   shuffle: Shuffle,      // 🔀 引擎切换 / 交叉审核
   flame: Flame,          // 🔥 热门榜单
+  chevron: ChevronDown,  // 🔽 折叠 / 展开
 }
 
 export default function Ic({ n, className = '', ...rest }) {
