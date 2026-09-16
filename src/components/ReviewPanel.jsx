@@ -45,7 +45,7 @@ export default function ReviewPanel({ project, saveProject, apiKey, glmKey, onNe
   const fixed = current?.fixed || []
 
   return (
-    <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+    <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-base font-bold"><Ic n="search" /> 章节审核（GLM-4.7-Flash）</h2>

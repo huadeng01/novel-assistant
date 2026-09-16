@@ -44,13 +44,13 @@ export default function App() {
 
   return (
     <div className="min-h-screen text-stone-800">
-      <header className="sticky top-0 z-20 border-b border-stone-200/70 bg-[#fbf8ef]/85 backdrop-blur">
+      <header className="sticky top-0 z-20 glass border-b border-stone-200/70 bg-paper/85 backdrop-blur">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-2 px-4 py-3">
           <h1 className="flex shrink-0 items-center gap-2 text-lg font-bold tracking-wide">
             {/* 朱砂印章：产品的签名元素 */}
             <span
               aria-hidden
-              className="flex h-8 w-8 rotate-[-3deg] items-center justify-center rounded-[0.3rem] bg-amber-600 text-base text-[#fbf8ef] shadow-sm"
+              className="flex h-8 w-8 rotate-[-3deg] items-center justify-center rounded-[0.3rem] bg-amber-600 text-base text-paper shadow-sm"
             >
               墨
             </span>

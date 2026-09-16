@@ -57,7 +57,7 @@ export default function Library({ lib, apiKey, onNeedKey }) {
   return (
     <div className="space-y-4">
       {/* 书库 */}
-      <section className="rounded-2xl bg-[#fbf8ef] p-4 shadow-sm">
+      <section className="glass-card rounded-2xl bg-paper p-4 shadow-sm">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-bold"><Ic n="library" /> 我的书库</h3>
           <button
@@ -104,7 +104,7 @@ export default function Library({ lib, apiKey, onNeedKey }) {
 
       {/* 文风档案 */}
       {selectedBook && (
-        <section className="rounded-2xl bg-[#fbf8ef] p-4 shadow-sm">
+        <section className="glass-card rounded-2xl bg-paper p-4 shadow-sm">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-bold"><Ic n="style" /> 文风档案</h3>
             {style && (

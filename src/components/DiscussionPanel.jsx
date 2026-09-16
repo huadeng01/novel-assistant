@@ -80,7 +80,7 @@ export default function DiscussionPanel({ project, saveProject, apiKey, onNeedKe
   }
 
   return (
-    <div className="fixed bottom-4 right-4 z-40 flex h-[70vh] w-[min(480px,calc(100vw-2rem))] flex-col overflow-hidden rounded-2xl border border-stone-200 bg-[#fbf8ef] shadow-xl">
+    <div className="fixed bottom-4 right-4 z-40 flex h-[70vh] w-[min(480px,calc(100vw-2rem))] flex-col overflow-hidden glass-panel rounded-2xl border border-stone-200 bg-paper shadow-xl">
       <div className="flex items-center justify-between border-b border-stone-200 px-4 py-3">
         <h3 className="text-sm font-bold"><Ic n="thread" /> 剧情讨论（AI 熟悉本书全部档案）</h3>
         <div className="flex items-center gap-2">

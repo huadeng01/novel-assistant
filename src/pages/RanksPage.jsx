@@ -7,7 +7,7 @@ import { rankInsightMessages } from '../lib/prompts.js'
 // 榜单区（顶栏「榜单」页）：展示各平台【每日热门榜快照】。
 // 数据来自同源静态 public/ranks.json（由 scripts/fetch-ranks.mjs 每日抓取生成），
 // 本页运行时【不发起任何跨域抓取】——只显示最新元数据；点击书名 → 外链跳转平台官方阅读页，
-// 本应用不存储、不展示、不缓存任何正文章节（合规红线，见 docs/榜单抓取_GitHubActions_交接文档.md）。
+// 本应用不存储、不展示、不缓存任何正文章节（合规红线，见 docs/ranks-crawler-github-actions.md）。
 
 const RANK_STYLE = {
   1: 'bg-amber-500 text-white',
@@ -59,7 +59,7 @@ export default function RanksPage() {
   return (
     <div className="space-y-4">
       {/* 头部：标题 + 快照时间 + 概览 + 刷新 */}
-      <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+      <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <h2 className="flex items-center gap-2 text-lg font-bold text-stone-800">
@@ -97,13 +97,13 @@ export default function RanksPage() {
 
       {/* 加载 / 错误 / 空态 */}
       {state.loading && !state.data && (
-        <section className="rounded-2xl bg-[#fbf8ef] p-10 text-center text-sm text-stone-400 shadow-sm">
+        <section className="glass-card rounded-2xl bg-paper p-10 text-center text-sm text-stone-400 shadow-sm">
           <span className="mr-2 inline-block animate-spin align-[-0.125em]"><Ic n="rolling" /></span>
           正在加载榜单快照…
         </section>
       )}
       {!state.loading && state.error && !state.data && (
-        <section className="rounded-2xl bg-[#fbf8ef] p-10 text-center shadow-sm">
+        <section className="glass-card rounded-2xl bg-paper p-10 text-center shadow-sm">
           <p className="text-sm text-stone-500"><Ic n="alert" className="mr-1 text-amber-600" />{state.error}</p>
           <p className="mt-2 text-xs leading-relaxed text-stone-400">
             运行 <code className="rounded bg-stone-100 px-1 py-0.5">node scripts/fetch-ranks.mjs</code> 生成快照，或等待 GitHub Actions 每日定时抓取。
@@ -114,7 +114,7 @@ export default function RanksPage() {
       {/* 平台切换 + 榜单 */}
       {state.data && state.data.sources.length > 0 && (
         <>
-          <nav className="flex gap-2 overflow-x-auto rounded-2xl bg-[#fbf8ef] p-3 shadow-sm">
+          <nav className="glass-card flex gap-2 overflow-x-auto rounded-2xl bg-paper p-3 shadow-sm">
             {state.data.sources.map((s) => (
               <button
                 key={s.platform}
@@ -130,7 +130,7 @@ export default function RanksPage() {
           </nav>
 
           {source && !source.ok && (
-            <section className="rounded-2xl bg-[#fbf8ef] p-8 text-center shadow-sm">
+            <section className="glass-card rounded-2xl bg-paper p-8 text-center shadow-sm">
               <p className="text-sm text-stone-500">
                 <Ic n="ban" className="mr-1 text-stone-400" />
                 {source.platformName} 今日不可用
@@ -145,7 +145,7 @@ export default function RanksPage() {
           )}
 
           {source && source.ok && (
-            <section className="rounded-2xl bg-[#fbf8ef] p-4 shadow-sm">
+            <section className="glass-card rounded-2xl bg-paper p-4 shadow-sm">
               {/* 频道过滤（全部 / 男频 / 女频）——仅当该平台有 >1 个频道时显示 */}
               {platformGenders.length > 1 && (
                 <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -288,7 +288,7 @@ function RankInsight({ platformName, listName, books }) {
   const items = data && Array.isArray(data.books) ? data.books : []
 
   return (
-    <section className="rounded-2xl bg-[#fbf8ef] p-4 shadow-sm">
+    <section className="glass-card rounded-2xl bg-paper p-4 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="flex items-center gap-2 text-sm font-bold text-stone-800">
           <span className="text-amber-600"><Ic n="sparkle" /></span>

@@ -11,8 +11,12 @@ import DarkThreadPanel from '../components/DarkThreadPanel.jsx'
 import CompliancePanel from '../components/CompliancePanel.jsx'
 import SceneSimPanel from '../components/SceneSimPanel.jsx'
 import ChapterRewriter from '../components/ChapterRewriter.jsx'
+import ChapterReviewDrawer from '../components/ChapterReviewDrawer.jsx'
+import WritersRoomPanel from '../components/WritersRoomPanel.jsx'
+import ActGateDrawer from '../components/ActGateDrawer.jsx'
 import DiscussionPanel from '../components/DiscussionPanel.jsx'
 import Ic from '../components/Ic.jsx'
+import { showrunnerAgent, pacerAgent, writerAgent, archivistAgent, planGenScope } from '../lib/agents/index.js'
 import { chatStream, chatJSON, embeddingEnabled, ANTI_REPETITION } from '../lib/llm.js'
 import { getAll, getById, put, del } from '../lib/db.js'
 import {
@@ -44,7 +48,7 @@ import {
 } from '../lib/prompts.js'
 import WorldviewEditor from '../components/WorldviewEditor.jsx'
 import { allGenres, saveWorldview, EMPTY_WORLDVIEW } from '../lib/worldviews/index.js'
-import { newProject, searchChapters, semanticPassages, runPostChapter, applyReport, applyForeshadowPlans, parseDetailScenes, outlineLeakScan, outlineLeakContextFor, mainlineSliceFor, outlineMaxChapter, outlinePositionFor, expandKeywords, povStreak, reviewOpportunity, rerunArchive, chronicleContext, restoreChapter, loadArchiveCheckpoint, clearArchiveCheckpoint, buildWorldBlockText, splitWorldToBlocks, activeStyleRules, trialWrite, referenceContext, needNewVolume, currentVolume, volumeStrategyText, planVolume, arcTextForRange, volumeStoryForRange, refSimilarityReport, aiFlavorScan, aiToneScan, hookCheck, properNounScan, settlementReport, exportBookText, PROTECT_GAP, chapterTaskOf, splitChapters, archiveImportedChapter, recheckFollowing, dedupeScenePiece, dedupeChapterTail, dedupeChapterSentences, findRepeatedPhrases, dedupeRepeatedClauses, singleTokenCap, sceneWordBudget, tokenCapForWords, trimTruncatedScene, residualRepeats, consistencyCarryover, deriveFactLedger, blendStyles, resolveStyleRec, selectSamplesForContext, verbatimLeakScan, dashScan, codeLayerAudit, continuityGate, reviewTruths, truncateAfterAnchor, aliasesOf, fallbackVolumeEmotion, normalizeRunOnPunctuation, applyRepeatFixes, distillStyleBand, styleDriftScan, STYLE_METRIC_LABELS, hybridPassages, polishWholeBook, applyPolishResults, setMemoryEntry, removeMemoryEntry } from '../lib/longform.js'
+import { newProject, searchChapters, semanticPassages, runPostChapter, applyReport, applyForeshadowPlans, parseDetailScenes, outlineLeakScan, outlineLeakContextFor, mainlineSliceFor, outlineMaxChapter, outlinePositionFor, expandKeywords, povStreak, reviewOpportunity, rerunArchive, chronicleContext, restoreChapter, loadArchiveCheckpoint, clearArchiveCheckpoint, buildWorldBlockText, splitWorldToBlocks, activeStyleRules, trialWrite, referenceContext, needNewVolume, currentVolume, volumeStrategyText, planVolume, arcTextForRange, volumeStoryForRange, refSimilarityReport, aiFlavorScan, hookCheck, properNounScan, settlementReport, exportBookText, PROTECT_GAP, chapterTaskOf, splitChapters, archiveImportedChapter, recheckFollowing, dedupeScenePiece, dedupeChapterTail, dedupeChapterSentences, findRepeatedPhrases, dedupeRepeatedClauses, singleTokenCap, sceneWordBudget, tokenCapForWords, trimTruncatedScene, residualRepeats, consistencyCarryover, deriveFactLedger, blendStyles, resolveStyleRec, selectSamplesForContext, verbatimLeakScan, dashScan, codeLayerAudit, continuityGate, reviewTruths, truncateAfterAnchor, aliasesOf, fallbackVolumeEmotion, normalizeRunOnPunctuation, formatNovelParagraphs, applyRepeatFixes, distillStyleBand, hybridPassages, polishWholeBook, applyPolishResults, setMemoryEntry, removeMemoryEntry } from '../lib/longform.js'
 import { countWords, uid, downloadText } from '../lib/utils.js'
 import { detectSettingDiff, diffImpact } from '../lib/impact.js'
 import { PRESET_STYLES } from '../corpus/presetStyles.js'
@@ -53,6 +57,7 @@ import { PRESET_STYLES } from '../corpus/presetStyles.js'
 // 章节写作（上下文组装 + 章后档案流水线）、伏笔账本（保护期）、设定与人物活档案、事件级时间线、诊断看板
 const SUBTABS = [
   { id: 'chapters', label: '章节写作', icon: 'book' },
+  { id: 'room', label: '编剧团队', icon: 'scene' },
   { id: 'worldview', label: '世界观', icon: 'globe' },
   { id: 'foreshadow', label: '伏笔账本', icon: 'hook' },
   { id: 'settings', label: '设定与人物', icon: 'gear' },
@@ -137,12 +142,23 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
   const [analysisBookId, setAnalysisBookId] = useState('')
   const [analyzing, setAnalyzing] = useState('')
   // 整本自动连写：目标剩余章数、运行状态、循环内停止信号；待确认提案（自动模式遇到剧情分支暂停等拍板）
-  const [autoCount, setAutoCount] = useState(3)
+  const [genScope, setGenScope] = useState('act') // 生成粒度：chapter 单章 / act 一幕（默认）/ volume 一卷（§6 突破 10 章上限）
   const [autoStatus, setAutoStatus] = useState('')
   const autoStopRef = useRef(false)
   const [pendingDecision, setPendingDecision] = useState(null)
   const [decisionInput, setDecisionInput] = useState('')
   const [autoDoneMsg, setAutoDoneMsg] = useState('')
+  const [reviewChapterNo, setReviewChapterNo] = useState(null) // 逐章「意见/修订」抽屉（§7）
+  const [actGate, setActGate] = useState(null) // 幕末确认门 {from, to, label}（§7）
+  const autoScopeRef = useRef(null) // 本次自动连写的粒度计划，幕末确认门据此展示本幕范围
+  const traceRef = useRef([])
+  const [, setTraceTick] = useState(0)
+  // 运行轨迹收集器（替代 makeProgress）：push 时 bump setTraceTick 触发重渲染，编剧团队面板据 snapshot() 实时刷新（§8）
+  const progress = useMemo(() => ({
+    push(evt = {}) { const e = { t: Date.now(), ...evt }; traceRef.current.push(e); setTraceTick((n) => n + 1); return e },
+    snapshot() { return traceRef.current.slice() },
+    clear() { traceRef.current = []; setTraceTick((n) => n + 1) },
+  }), [])
   // 归档检查点：保存章节途中被刷新/中断时，重进可从断点续跑，不必重跑全部请求
   // 补跑归档进度（降级补救 / 手改正文后重新建档）
   const [rerunning, setRerunning] = useState('')
@@ -215,10 +231,6 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
   // 注意：依赖 form/libStyles/draft/project，必须放在四者声明之后（const 暂时性死区；project 在此行上方才声明）
   const boundStyleRec = useMemo(() => resolveStyleRec(form?.styleBookId ?? project?.styleBookId, libStyles), [form?.styleBookId, project?.styleBookId, libStyles])
   const flavorHits = useMemo(() => (draft.trim() ? aiFlavorScan(draft, boundStyleRec.forbidden || []) : []), [draft, boundStyleRec.forbidden])
-  // P1-3 lieflat 去AI味算子（小说适配子集）软门自检：剥离对白只扫旁白的论说文腔/翻译腔（纯前端零费用，只报警不阻断，不接判官）
-  const aiToneResult = useMemo(() => (draft.trim() ? aiToneScan(draft) : null), [draft])
-  // P1-1R 文风漂移门：草稿量化指纹 vs 绑定书专属指纹的 Z-score 相对偏差（Burrows' Delta 思路）；纯前端零费用，只报警不阻断。绑定档案无指纹时自动跳过。
-  const driftResult = useMemo(() => (draft.trim() && boundStyleRec && boundStyleRec.metrics ? styleDriftScan(draft, boundStyleRec) : null), [draft, boundStyleRec])
   // 章末钩子检查 / 专名错字扫描 / 完稿对账 / 写作统计：纯前端计算零费用，只提醒不阻断
   const hookResult = useMemo(() => (draft.trim() ? hookCheck(draft) : null), [draft])
   const nounHits = useMemo(() => (draft.trim() && project ? properNounScan(draft, project.characters || []) : []), [draft, project])
@@ -587,44 +599,11 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
         consistencyCarryover: consistencyCarryover(project, nextNo),
         factLedger: sceneLedger, // 手动路径读 sceneLedger state（由 planScene 的 setSceneLedger 落定）
         outlineDriven: driven, // 细纲驱动：提示词侧砍掉 synopsis/longTerm/rollingSummary/prevChapterSummary/storylines/passages/reference 与 world 全文，规则 3 升级为「详纲是唯一剧情依据」并追加规则 13
+        genre: project.genre, // 题材语域护栏：前现代题材禁现代科技语汇（prompts.genreRegisterRule）
       }
       // 逐场景扩写：场景清单 ≥2 个时每场景一次请求（字数预算 = 本章字数/场景数，随已写字数自适应），根治单次生成后段压缩；无场景清单退回单次生成（旧行为）
-      const scenes = String(scenePlan || '').split('\n').map((s) => s.trim()).filter(Boolean)
-      // Fix B（Round-5）：按本章字数预算折算每场景 max_tokens 硬上限，并把同一预算写进提示词，
-      // 使「生成端指令」与「解码端上限」同源；预算随已写字数自适应（超支则压缩后续场景），整章收敛到目标 ±20% 内
-      const singleCap = singleTokenCap(project.chapterWords)
-      let full = ''
-      if (scenes.length >= 2) {
-        let base = ''
-        for (let i = 0; i < scenes.length; i++) {
-          const budget = sceneWordBudget(project.chapterWords, scenes.length, i, countWords(base))
-          const piece = await chatStream({
-            apiKey,
-            ...ANTI_REPETITION,
-            messages: longFormDraftMessages({ ...draftArgs, scenePlan: scenes[i], upcoming: scenes.slice(i + 1).join('\n'), multiScene: true, withTitle: i === 0, lastScene: i === scenes.length - 1, tail: base ? base.slice(-(driven ? 800 : 2000)) : draftArgs.tail, chapterWords: project.chapterWords, sceneCount: scenes.length, sceneWords: budget }),
-            temperature: 0.9,
-            signal: abortRef.current?.signal,
-            maxTokens: tokenCapForWords(budget),
-            onDelta: (t) => setDraft(base + t),
-          })
-          // 触顶截断兜底：残句回退到最后一个完整句末，不把半句交给下游去重/自检
-          const pieceM = trimTruncatedScene(piece, budget)
-          base += (base ? '\n\n' : '') + dedupeScenePiece(base, pieceM.text)
-        }
-        full = base
-      } else {
-        full = await chatStream({
-          apiKey,
-          ...ANTI_REPETITION,
-          messages: longFormDraftMessages({ ...draftArgs, chapterWords: project.chapterWords, sceneCount: 1 }),
-          temperature: 0.9,
-          signal: abortRef.current?.signal,
-          maxTokens: singleCap,
-          onDelta: (t) => setDraft(t),
-        })
-        const singleM = trimTruncatedScene(full, project.chapterWords)
-        if (singleM.flagged) full = singleM.text
-      }
+      const singleCap = singleTokenCap(project.chapterWords) // Fix B（Round-5）：每场景 max_tokens 上限，本节扩写与后段去AI味重写共用
+      let full = await writerAgent.draft({ draftArgs, sceneText: scenePlan, chapterWords: project.chapterWords, driven, apiKey, signal: abortRef.current?.signal, onDelta: (t) => setDraft(t) })
       // A2 确定性去重：整章尾部近似重复（复读机事故）自动裁掉，零成本、不依赖 LLM 自查
       const dd = dedupeChapterTail(full)
       if (dd.flagged) full = dd.text
@@ -674,7 +653,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
         }
         if (autoTitle && firstIdx >= 0) {
           // 把标题行从正文中剥离，标题填入标题输入框（仍可修改）
-          setDraft(lines.slice(firstIdx + 1).join('\n').replace(/^\s+/, ''))
+          setDraft(formatNovelParagraphs(lines.slice(firstIdx + 1).join('\n').replace(/^\s+/, '')).text)
           if (!hadTitle) setDraftTitle(autoTitle)
         } else if (!hadTitle) {
           try {
@@ -685,6 +664,9 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
           }
         }
       }
+      // 排版归一：段落之间空一行 + 行首两个全角空格。正文的主工作面是 textarea，
+      // CSS 的 text-indent 只对块级元素首行生效，textarea 里每行都是首行，所以只能把缩进落到字符层。
+      setDraft((prev) => formatNovelParagraphs(prev).text)
     } catch (e) {
       if (e.name === 'AbortError') setErr('已停止生成。已生成的部分保留在下方编辑框，可继续修改或重新生成。')
       else setErr(e.message)
@@ -865,6 +847,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
             synopsis: proj.synopsis,
             outline: detailText,
             outlineDriven: driven,
+            genre: proj.genre,
             rollingSummary: proj.rollingSummary,
             prevChapterSummary: proj.chapters[proj.chapters.length - 1]?.summary || '',
             storylines: proj.storylines || [],
@@ -946,33 +929,12 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
       consistencyCarryover: consistencyCarryover(proj, chapterNo),
       factLedger,
       outlineDriven: driven,
+      genre: proj.genre,
+      actGoal: pacerAgent.actContext({ project: proj, chapterNo }).actGoal,
     }
     // 逐场景扩写（与手动路径同机制）：场景 ≥2 个时每场景一次请求，根治后段压缩；无场景清单退回单次生成
-    const scenes = String(sceneText || '').split('\n').map((s) => s.trim()).filter(Boolean)
-    // Fix B（Round-5）：每场景 max_tokens 硬上限与提示词字数预算同源（与手动路径同机制）
-    const singleCap = singleTokenCap(proj.chapterWords)
-    let full = ''
-    if (scenes.length >= 2) {
-      let base = ''
-      for (let i = 0; i < scenes.length; i++) {
-        const budget = sceneWordBudget(proj.chapterWords, scenes.length, i, countWords(base))
-        const piece = await chatStream({
-          apiKey,
-          ...ANTI_REPETITION,
-          messages: longFormDraftMessages({ ...draftArgs, scenePlan: scenes[i], upcoming: scenes.slice(i + 1).join('\n'), multiScene: true, withTitle: i === 0, lastScene: i === scenes.length - 1, tail: base ? base.slice(-(driven ? 800 : 2000)) : draftArgs.tail, chapterWords: proj.chapterWords, sceneCount: scenes.length, sceneWords: budget }),
-          temperature: 0.9,
-          maxTokens: tokenCapForWords(budget),
-          onDelta: onDelta ? (t) => onDelta(base + t) : undefined,
-        })
-        const pieceM = trimTruncatedScene(piece, budget)
-        base += (base ? '\n\n' : '') + dedupeScenePiece(base, pieceM.text)
-      }
-      full = base
-    } else {
-      full = await chatStream({ apiKey, ...ANTI_REPETITION, messages: longFormDraftMessages({ ...draftArgs, chapterWords: proj.chapterWords, sceneCount: 1 }), temperature: 0.9, maxTokens: singleCap, onDelta })
-      const singleM = trimTruncatedScene(full, proj.chapterWords)
-      if (singleM.flagged) full = singleM.text
-    }
+    const singleCap = singleTokenCap(proj.chapterWords) // Fix B（Round-5）：每场景 max_tokens 上限，本节扩写与后段去AI味重写共用
+    let full = await writerAgent.draft({ draftArgs, sceneText, chapterWords: proj.chapterWords, driven, apiKey, onDelta })
     // A2 确定性去重：落库前裁掉章末复读尾巴 + 中段散落近重复句，自检拿到的即去重稿
     const ddTail = dedupeChapterTail(full)
     if (ddTail.flagged) full = ddTail.text
@@ -1056,6 +1018,8 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
     if (autoFixParts.length) setDedupNote(`第 ${chapterNo} 章已自动删除${autoFixParts.join('、')}。`)
     if (detailNote) setDedupNote((n) => (n ? n + ' ' : '') + detailNote)
     if (countWords(text) < 100) throw new Error(`第 ${chapterNo} 章生成过短（${countWords(text)} 字），疑似异常`)
+    // 排版归一：段落之间空一行 + 行首两个全角空格（saveChapterText 入库前还会再跑一次，幂等）
+    text = formatNovelParagraphs(text).text
     return { text, title, proposals, sceneText, proj }
   }
 
@@ -1074,7 +1038,8 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
 
   // 保存一章并跑章后档案流水线，返回新书对象供循环接棒（检查点照常逐步落盘，中断可续跑）
   const saveChapterText = async ({ proj, chapterNo, text, title, instruction = '', scenePlan = '' }) => {
-    const rep = await runPostChapter({
+    text = formatNovelParagraphs(text).text // 入库前排版归一（幂等：已排好版的再跑一次不变）
+    const rep = await archivistAgent.archive({
       apiKey,
       project: proj,
       chapterNo,
@@ -1103,17 +1068,20 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
 
   // 自动连写循环：场景清单 → 初稿 → 存档 → 下一章；暂停条件：
   // 待确认提案 / 细纲将尽 / 生成或存档报错 / 用户停止 / 达到目标章数。已完成的章都已安全落库。
-  const autoContinue = async (remaining, startInstruction = '') => {
+  const autoContinue = async (remaining, startInstruction = '', stopAtChapter = null) => {
     let cur = await getById('projects', project.id)
     let left = remaining
     let dir = startInstruction
     try {
-      while (left > 0) {
+      progress.push({ agent: 'showrunner', phase: 'start' })
+      while (true) {
         if (autoStopRef.current) {
           setAutoStatus('')
           return
         }
         const no = (cur.chapters || []).reduce((m, c) => Math.max(m, c.chapterNo), 0) + 1
+        // 幕/卷自然边界终点（stopAtChapter 模式，突破旧 Math.min(10) 十章硬上限）；未给边界则按剩余章数（单章/自定义）
+        if (stopAtChapter != null ? no > stopAtChapter : left <= 0) break
         const maxNo = outlineMaxChapter(cur.outline)
         if (maxNo && no > maxNo - 2) {
           setAutoStatus('')
@@ -1128,26 +1096,38 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
           cur = { ...cur, volumes: [...(cur.volumes || []), vol] }
           await saveProject(cur)
         }
+        progress.push({ agent: 'writer', phase: 'start', chapterNo: no })
+        const chapProgress = { push: (evt = {}) => progress.push({ ...evt, chapterNo: no }), snapshot: () => progress.snapshot(), clear: () => progress.clear() }
         const gen = await generateChapterBody({ proj: cur, chapterNo: no, dir, onDelta: (t) => setDraft(t) })
         cur = gen.proj || cur // 本章详纲是在 generateChapterBody 内生成并落库的，必须接棒最新书对象，否则存档时会把 outlineDetail 覆盖回旧版
         if (gen.proposals.length) {
           // 遇到需要拍板的剧情分支：已生成的初稿保留在编辑框，暂停等用户决策（决策后自动续跑）
-          setPendingDecision({ chapterNo: no, proposals: gen.proposals, remaining: left })
+          setPendingDecision({ chapterNo: no, proposals: gen.proposals, remaining: left, stopAtChapter })
           setDraft(gen.text)
           setDraftTitle(gen.title)
           setAutoStatus(`自动连写暂停：第 ${no} 章遇到待确认的剧情分支`)
           return
         }
-        cur = await saveChapterText({ proj: cur, chapterNo: no, text: gen.text, title: gen.title, instruction: dir, scenePlan: gen.sceneText })
+        // 单章 critic 循环（Showrunner 编排）：Logic 确定性硬门 + Editor GLM 语义合并裁决，未过交 Polisher 带 fixPrompt 定点重写，最多 N 轮（默认1/strict 2）；随后交 Archivist 落库
+        const styleRec = resolveStyleRec(cur.styleBookId, libStyles)
+        const crit = await showrunnerAgent.criticChapter({ draft: gen, project: cur, chapterNo: no, apiKey, glmKey, styleRec, qualityPolicy: cur.qualityPolicy, splitTitle: stripTitle, onRewriteDelta: (t) => setDraft(t), progress: chapProgress })
+        if (!crit.passed) setDedupNote((n) => (n ? n + ' ' : '') + `第 ${no} 章经 ${crit.rounds} 轮审修仍有 ${crit.verdict.blockers.length} 处硬门提示（已尽力定点重写），建议事后用「定点重写」复查。`)
+        progress.push({ agent: 'archivist', phase: 'start', chapterNo: no })
+        cur = await saveChapterText({ proj: cur, chapterNo: no, text: crit.draft.text, title: crit.draft.title || gen.title, instruction: dir, scenePlan: gen.sceneText })
+        progress.push({ agent: 'archivist', phase: 'done', chapterNo: no })
         setDraft('')
         setDraftTitle('')
         dir = ''
         left -= 1
       }
       setAutoStatus('')
+      progress.push({ agent: 'showrunner', phase: 'done' })
       setErr('')
       setAutoDoneMsg(`已自动连写 ${remaining} 章，每章均走完整档案流水线（摘要/状态/伏笔/校验），可在章节列表回看。`)
+      const _sc = autoScopeRef.current
+      if (_sc && _sc.scope !== 'chapter') setActGate({ from: _sc.from, to: _sc.stopAtChapter, label: _sc.label })
     } catch (e) {
+      progress.push({ agent: 'showrunner', phase: 'error', error: e && e.message ? e.message : String(e) })
       setAutoStatus('')
       setSavingMsg('')
       setErr(`自动连写已停止：${e.message}。已完成的章节均已安全存档，可检查后再启动自动连写继续。`)
@@ -1156,13 +1136,16 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
 
   const startAuto = () => {
     if (!apiKey) return onNeedKey()
-    const n = Math.min(10, Math.max(1, Number(autoCount) || 1))
-    setAutoCount(n)
+    const plan = planGenScope(project, { scope: genScope, fromChapter: nextNo })
+    const span = Math.max(1, plan.stopAtChapter - nextNo + 1)
     setErr('')
     setAutoDoneMsg('')
     setLastReport(null)
     autoStopRef.current = false
-    autoContinue(n)
+    progress.clear()
+    autoScopeRef.current = { ...plan, from: nextNo }
+    setActGate(null)
+    autoContinue(span, '', plan.stopAtChapter)
   }
 
   // 提案拍板：自动模式下把决策并入本章方向并继续剩余章数；手动模式下只把决策写进写作方向输入框，后续照常手动操作。
@@ -1175,7 +1158,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
       setDraft('')
       setDraftTitle('')
       autoStopRef.current = false
-      autoContinue(cur.remaining, `${choice}（本章必须按此方向推进）`)
+      autoContinue(cur.remaining, `${choice}（本章必须按此方向推进）`, cur.stopAtChapter)
     } else {
       setInstruction((prev) => (prev ? `${prev}；${choice}` : choice))
     }
@@ -1214,6 +1197,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
           synopsis: project.synopsis,
           outline: detailText,
           outlineDriven: driven,
+          genre: project.genre,
           rollingSummary: project.rollingSummary,
           prevChapterSummary: lastChapter?.summary || '',
           storylines: project.storylines || [],
@@ -1256,11 +1240,12 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
     }
     setErr('')
     try {
+      const bodyText = formatNovelParagraphs(draft).text // 排版归一后再归档/入库/跑连贯性硬门
       const rep = await runPostChapter({
         apiKey,
         project,
         chapterNo: nextNo,
-        text: draft,
+        text: bodyText,
         title: draftTitle.trim(),
         checkpointId: project.id,
         policy: project.qualityPolicy === 'strict' ? 'strict' : 'fast',
@@ -1269,9 +1254,9 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
         onStep: setSavingMsg,
       })
       // applyReport 返回拦截信息：保护期内的伏笔被 AI 抢收时不会真的标记回收，而是提示用户。
-      const { project: next, blocked } = applyReport(project, { chapterNo: nextNo, title: draftTitle.trim(), text: draft }, rep)
+      const { project: next, blocked } = applyReport(project, { chapterNo: nextNo, title: draftTitle.trim(), text: bodyText }, rep)
       // 机制三软接入：入库前跑连贯性硬门；blockers 不阻断保存 → 汇入待修正队列（注入下一章）+ amber 提示
-      const gate = continuityGate(project, nextNo, draft)
+      const gate = continuityGate(project, nextNo, bodyText)
       if (gate.blockers.length) {
         next.pendingConsistency = [...(Array.isArray(next.pendingConsistency) ? next.pendingConsistency.filter((p) => Number(p.chapterNo) !== nextNo - 1) : []), { chapterNo: nextNo, issues: gateToIssues(gate.blockers) }].slice(-3)
         setDedupNote((n) => (n ? n + ' ' : '') + gateNotice(nextNo, gate.blockers))
@@ -1324,7 +1309,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
         policy: project.qualityPolicy === 'strict' ? 'strict' : 'fast',
         onStep: setSavingMsg,
       })
-      const { project: next, blocked } = applyReport(project, { chapterNo: cp.chapterNo, title: cp.title || '', text: cp.text }, rep)
+      const { project: next, blocked } = applyReport(project, { chapterNo: cp.chapterNo, title: cp.title || '', text: formatNovelParagraphs(cp.text).text }, rep)
       // 机制三软接入：断点续跑同样过连贯性硬门（不阻断保存）
       const gate = continuityGate(project, cp.chapterNo, cp.text)
       if (gate.blockers.length) {
@@ -1937,7 +1922,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
       <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
         {/* 项目侧边栏 */}
         <div className="space-y-4">
-          <section className="rounded-2xl bg-[#fbf8ef] p-4 shadow-sm">
+          <section className="glass-card rounded-2xl bg-paper p-4 shadow-sm">
             <h3 className="text-sm font-bold"><Ic n="library" /> 我的长篇项目</h3>
             <p className="mt-2 text-xs leading-relaxed text-stone-400">
               每本书独立维护设定、章节摘要链、伏笔账本与时间线，让 AI 在有限上下文里保持剧情统一。
@@ -1972,7 +1957,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                 >
                   <div className="min-w-0">
                     <p className="truncate font-medium">{p.name}</p>
-                    <p className={`text-xs ${selectedId === p.id ? 'text-stone-300' : 'text-stone-400'}`}>
+                    <p className={`text-xs tabular-nums ${selectedId === p.id ? 'text-stone-300' : 'text-stone-400'}`}>
                       {(p.chapters || []).length} 章 · {(p.chapters || []).reduce((s, c) => s + c.wordCount, 0)} 字
                     </p>
                   </div>
@@ -1991,7 +1976,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
           </section>
 
           {project && (
-            <section className="rounded-2xl bg-[#fbf8ef] p-4 text-xs text-stone-500 shadow-sm">
+            <section className="glass-card rounded-2xl bg-paper p-4 text-xs text-stone-500 shadow-sm">
               <p className="font-bold text-stone-700"><Ic n="chart" /> 总览</p>
               <ul className="mt-2 space-y-1.5">
                 <li>全书 {totalWords} 字 · {(project.chapters || []).length} 章</li>
@@ -2023,7 +2008,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
         {/* 主区域 */}
         <div className="min-w-0 space-y-4">
           {!project ? (
-            <section className="rounded-2xl bg-[#fbf8ef] p-10 text-center shadow-sm">
+            <section className="glass-card rounded-2xl bg-paper p-10 text-center shadow-sm">
               <p className="text-4xl text-stone-300"><Ic n="mountain" /></p>
               <p className="mt-3 text-sm font-medium text-stone-600">新建或选择一本书，开始长篇写作</p>
               <p className="mt-2 text-xs text-stone-400">
@@ -2032,7 +2017,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
             </section>
           ) : (
             <>
-              <nav className="flex gap-2 overflow-x-auto rounded-2xl bg-[#fbf8ef] p-3 shadow-sm">
+              <nav className="glass-card flex gap-2 overflow-x-auto rounded-2xl bg-paper p-3 shadow-sm">
                 {SUBTABS.map((t) => (
                   <button key={t.id} onClick={() => setSubtab(t.id)} className={`relative shrink-0 ${chip(subtab === t.id)}`}>
                     <Ic n={t.icon} /> {t.label}
@@ -2090,7 +2075,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                   )}
                   {/* 无章节时：导入已有文本开局 */}
                   {project.chapters.length === 0 && (
-                    <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+                    <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
                       <h2 className="text-base font-bold"><Ic n="import" /> 用已有正文开局（可选）</h2>
                       <p className="mt-1 text-xs leading-relaxed text-stone-400">
                         粘贴或导入已经写好的正文：按「第N章」章头自动分章（章号重排连续），逐章生成摘要并检测伏笔入帐，再从结尾处继续写新章节。未带章头时按单章导入。全新开书可跳过此步，先去「设定与人物」生成梗概与细纲。
@@ -2135,17 +2120,18 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
 
                   {/* 滚动摘要展示 */}
                   {project.rollingSummary && (
-                    <details className="rounded-2xl bg-[#fbf8ef] p-4 shadow-sm">
+                    <details className="glass-card rounded-2xl bg-paper p-4 shadow-sm">
                       <summary className="cursor-pointer text-xs font-semibold text-stone-500"><Ic n="rolling" /> 全书滚动摘要（每次保存章节后自动更新，写新章时自动注入）</summary>
                       <p className="novel-text mt-2 text-sm leading-relaxed text-stone-600 whitespace-pre-wrap">{project.rollingSummary}</p>
                     </details>
                   )}
 
                   {/* 写作器 */}
-                  <section ref={composerRef} className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+                  <section ref={composerRef} className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-2">
                         <h2 className="text-base font-bold"><Ic n="pen" /> 撰写第 {nextNo} 章</h2>
+                        <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] text-amber-700" title="本面板由编剧团队协作驱动：详纲→初稿→审校→精修→归档">Outliner 详纲 · Writer 初稿 · Logic/Editor 审 · Polisher 修 · Archivist 归档</span>
                         <span
                           className={`rounded-full px-3 py-1 text-xs ${outlineMax === 0 || outlineMax < nextNo ? 'bg-red-100 text-red-600' : outlineLow ? 'bg-amber-100 text-amber-700' : 'bg-stone-100 text-stone-500'}`}
                           title="细纲剩余章数 = 细纲规划到的最大章号 − 下一章章号 + 1"
@@ -2234,16 +2220,26 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                       ) : (
                         <>
                           <span>连续写</span>
-                          <input
-                            type="number"
-                            min={1}
-                            max={10}
-                            value={autoCount}
-                            onChange={(e) => setAutoCount(Math.max(1, Math.min(10, Number(e.target.value) || 1)))}
-                            disabled={busy}
-                            className="w-14 rounded-lg border border-stone-200 px-2 py-1 text-xs focus:border-stone-500 focus:outline-none"
-                          />
-                          <span>章（每章照走场景清单→初稿→档案流水线；遇剧情分支提案会暂停等你拍板）</span>
+                          <span className="flex items-center gap-1">
+                              {[['chapter', '单章'], ['act', '一幕'], ['volume', '一卷']].map(([k, lab]) => (
+                                <button
+                                  key={k}
+                                  type="button"
+                                  onClick={() => setGenScope(k)}
+                                  disabled={busy}
+                                  className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${genScope === k ? 'bg-stone-800 text-white' : 'border border-stone-300 text-stone-600 hover:bg-stone-100'}`}
+                                >
+                                  {lab}
+                                </button>
+                              ))}
+                            </span>
+                            <span className="text-stone-500">
+                              {(() => {
+                                const p = planGenScope(project, { scope: genScope, fromChapter: nextNo })
+                                const cnt = Math.max(1, p.stopAtChapter - nextNo + 1)
+                                return `本次生成到 ${p.label}（约 ${cnt} 章；每章照走场景清单→初稿→审校→归档，遇剧情分支提案会暂停等你拍板）`
+                              })()}
+                            </span>
                           <button onClick={startAuto} disabled={busy || !apiKey} className="rounded-full bg-stone-800 px-4 py-1.5 text-xs font-medium text-white hover:bg-stone-700 disabled:opacity-50">
                             <Ic n="rocket" /> 开始自动连写
                           </button>
@@ -2266,7 +2262,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                     />
                     {/* 逐章详纲面板：详纲是本章唯一写作依据（500~700 字，[任务]/[场景N]/[边界]/[钩子]/[字数]）。
                         写章入口在本章没有详纲时会自动生成并落库、弹在这里等作者确认，采用后才走场景清单 → 扩写。 */}
-                    <div className={`mt-3 rounded-xl border p-3 ${detail ? 'border-stone-400 bg-[#fdfbf4]' : 'border-stone-200 bg-white'}`}>
+                    <div className={`mt-3 rounded-xl border p-3 ${detail ? 'border-stone-400 bg-paper' : 'border-stone-200 bg-white'}`}>
                       <div className="flex flex-wrap items-center gap-2">
                         <button onClick={() => setDetailOpen(!detailOpen)} className="flex items-center gap-1 text-xs font-semibold text-stone-600 hover:text-stone-800">
                           <Ic n="map" /> 本章详纲（第 {detail?.chapterNo || nextNo} 章）
@@ -2535,44 +2531,6 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                         <p className="mt-1 text-amber-700">扫描范围：预设禁词表 + 绑定文风的自定义禁用词 + 结构模式（过渡句/时间速写/解说式心理）。</p>
                       </div>
                     )}
-                    {/* P1-3 lieflat 去AI味算子（小说适配子集）：剥离对白后旁白命中论说文腔/翻译腔时提醒（纯前端零费用，只报警不阻断，不接判官） */}
-                    {aiToneResult && aiToneResult.count > 0 && (
-                      <div className="mt-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs leading-relaxed text-rose-800">
-                        <p className="font-semibold">
-                          <Ic n="alert" /> 叙述腔自检：旁白命中 {aiToneResult.count} 处论说文腔/翻译腔（对白已豁免）
-                        </p>
-                        <ul className="mt-1.5 space-y-1">
-                          {aiToneResult.hits.map((h, i) => (
-                            <li key={`tone-h-${i}`} className="rounded-lg border border-rose-200 bg-white px-2.5 py-1 text-rose-700">
-                              <span className="font-medium">Rule {h.rule}</span> {h.name} ×{h.count}
-                              {h.samples && h.samples.length ? <span className="ml-1 text-rose-500">（{h.samples.join('、')}）</span> : null}
-                            </li>
-                          ))}
-                          {aiToneResult.denseEnum.map((d, i) => (
-                            <li key={`tone-d-${i}`} className="rounded-lg border border-rose-200 bg-white px-2.5 py-1 text-rose-700">
-                              <span className="font-medium">Rule 2</span> 顿号罗列过密（{d.dun} 个顿号）<span className="ml-1 text-rose-500">（{d.text}…）</span>
-                            </li>
-                          ))}
-                        </ul>
-                        <p className="mt-1 text-rose-700">口径：lieflat-less-ai-tone 白名单规则的小说适配子集（翻案腔/禁用起手式/段首零主语评论/前置话题壳/翻译腔复述句/顿号罗列），只扫旁白、对白豁免；作者判断，不阻断保存。</p>
-                      </div>
-                    )}
-                    {/* P1-1R 文风漂移门：草稿量化指纹偏离绑定书专属指纹（Z-score）时提醒；纯前端零费用，只报警不阻断，不接判官 */}
-                    {driftResult && driftResult.drifted && driftResult.drifts.length > 0 && (
-                      <div className="mt-2 rounded-xl border border-violet-200 bg-violet-50 p-3 text-xs leading-relaxed text-violet-800">
-                        <p className="font-semibold">
-                          <Ic n="alert" /> 文风漂移提醒：草稿有 {driftResult.drifts.length} 项文体指标偏离本书指纹（|Z| &gt; 2.5，最大 {driftResult.maxAbsZ}）
-                        </p>
-                        <div className="mt-1.5 flex flex-wrap gap-1.5">
-                          {driftResult.drifts.slice(0, 8).map((d, i) => (
-                            <span key={`drift-${i}`} className="rounded-lg border border-violet-200 bg-white px-2.5 py-1 text-violet-700">
-                              <span className="font-medium">{STYLE_METRIC_LABELS[d.key] || d.key}</span> Z={d.z}（草稿 {d.val} / 基准 {d.mean}）
-                            </span>
-                          ))}
-                        </div>
-                        <p className="mt-1 text-violet-700">口径：以绑定书蒸馏指纹为基准的 Z-score 相对偏差（Burrows' Delta 思路），{driftResult.reliable ? '指纹样本充足' : '指纹样本偏少，仅供参考'}；作者判断，不阻断保存。</p>
-                      </div>
-                    )}
                     {/* 章末钩子检查：结尾平铺直叙时提醒（不强制），鼓励落在悬念/反转/未解问题上 */}
                     {hookResult && !hookResult.ok && (
                       <div className="mt-2 rounded-xl border border-stone-200 bg-stone-50 p-3 text-xs leading-relaxed text-stone-600">
@@ -2643,7 +2601,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
 
                   {/* 上次保存的档案更新报告 */}
                   {lastReport && (
-                    <section className="rounded-2xl border border-stone-200 bg-[#fbf8ef] p-5 shadow-sm">
+                    <section className="glass-card rounded-2xl border border-stone-200 bg-paper p-5 shadow-sm">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <h3 className="text-sm font-bold"><Ic n="box" /> 档案已更新（下一章的上下文将自动包含本章摘要、人物状态与伏笔）</h3>
                         <button
@@ -2749,7 +2707,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
 
                   {/* 章节列表（摘要链） */}
                   {project.chapters.length > 0 && (
-                    <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+                    <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <h3 className="text-sm font-bold"><Ic n="library" /> 已写章节（{project.chapters.length}）</h3>
                         <div className="flex flex-wrap gap-2">
@@ -2781,10 +2739,10 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                       {showStats && stats && (
                         <div className="mt-3 rounded-xl border border-stone-200 bg-white p-4">
                           <div className="grid grid-cols-2 gap-3 text-center sm:grid-cols-4">
-                            <div><p className="text-lg font-bold text-stone-800">{stats.total}</p><p className="text-xs text-stone-400">总字数</p></div>
-                            <div><p className="text-lg font-bold text-stone-800">{project.chapters.length}</p><p className="text-xs text-stone-400">章节数</p></div>
-                            <div><p className="text-lg font-bold text-stone-800">{stats.avg}</p><p className="text-xs text-stone-400">章均字数</p></div>
-                            <div><p className="text-lg font-bold text-stone-800">{stats.recent.reduce((acc, r) => acc + r[1], 0)}</p><p className="text-xs text-stone-400">近 7 个写作日字数</p></div>
+                            <div><p className="text-lg font-bold text-stone-800 tabular-nums">{stats.total}</p><p className="text-xs text-stone-400">总字数</p></div>
+                            <div><p className="text-lg font-bold text-stone-800 tabular-nums">{project.chapters.length}</p><p className="text-xs text-stone-400">章节数</p></div>
+                            <div><p className="text-lg font-bold text-stone-800 tabular-nums">{stats.avg}</p><p className="text-xs text-stone-400">章均字数</p></div>
+                            <div><p className="text-lg font-bold text-stone-800 tabular-nums">{stats.recent.reduce((acc, r) => acc + r[1], 0)}</p><p className="text-xs text-stone-400">近 7 个写作日字数</p></div>
                           </div>
                           {stats.recent.length > 0 && (
                             <div className="mt-3 space-y-1">
@@ -2830,7 +2788,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                               <span className="text-sm font-medium">
                                 第{c.chapterNo}章 {c.title?.replace(/^第\s*[0-9〇零一二三四五六七八九十百两]+\s*章[\s:：]*/, '') || ''}
                               </span>
-                              <span className="flex items-center gap-2 text-xs text-stone-400">
+                              <span className="flex items-center gap-2 text-xs text-stone-400 tabular-nums">
                                 {c.wordCount} 字
                                 {c.pov && <span>POV {c.pov}</span>}
                                 {(() => {
@@ -2881,7 +2839,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                                     </div>
                                   )
                                 })()}
-                                <div className="novel-text max-h-56 overflow-y-auto whitespace-pre-wrap rounded-lg bg-stone-50 p-3 text-xs text-stone-600">{c.content}</div>
+                                <div className="novel-text max-h-56 overflow-y-auto whitespace-pre-wrap rounded-lg bg-stone-50 p-3 text-xs text-stone-600">{formatNovelParagraphs(c.content).text}</div>
                                 {/* 剧情讨论·按我的想法重写：作者给修改意见，走与一键重写同一条链路（预览→确认→重跑归档） */}
                                 <ChapterRewriter
                                   project={project}
@@ -2894,6 +2852,13 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                                   onDone={handleRewriteDone}
                                 />
                                 <div className="flex flex-wrap gap-2">
+                                  <button
+                                    onClick={() => setReviewChapterNo(c.chapterNo)}
+                                    disabled={busy}
+                                    className="rounded-full bg-stone-800 px-3 py-1 text-xs font-medium text-white hover:bg-stone-700 disabled:opacity-50"
+                                  >
+                                    <Ic n="chat" /> 意见 / 修订
+                                  </button>
                                   <button
                                     onClick={() => rerunChapter(c.chapterNo)}
                                     disabled={busy || !apiKey}
@@ -2926,6 +2891,11 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                     </section>
                   )}
                 </div>
+              )}
+
+              {/* ============ 编剧团队可视化面板（§8）============ */}
+              {subtab === 'room' && (
+                <WritersRoomPanel project={project} trace={progress.snapshot()} busy={busy} />
               )}
 
               {/* ============ 世界观库 ============ */}
@@ -2973,7 +2943,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                 <div className="space-y-4">
                   {/* 完稿对账：决定"这卷怎么收"之前的总账（超期伏笔 / 休眠支线 / 失联人物），纯前端计算零请求 */}
                   {settlement && settlement.current > 0 && (
-                    <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+                    <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
                       <h2 className="text-base font-bold"><Ic n="clipboard" /> 完稿对账（当前至第 {settlement.current} 章）</h2>
                       <p className="mt-1 text-xs leading-relaxed text-stone-400">
                         收卷前先对账：埋设超 20 章未回收的伏笔、超 10 章未推进的支线、超 15 章无经历沉淀的人物——收卷章该优先处理谁，一目了然。
@@ -3034,7 +3004,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                       </div>
                     </section>
                   )}
-                  <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+                  <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
                     <h2 className="text-base font-bold"><Ic n="hook" /> 伏笔账本</h2>
                     <p className="mt-1 text-xs leading-relaxed text-stone-400">
                       每章保存时自动登记新伏笔、检测回收；新伏笔自带保护期（主线埋后 {PROTECT_GAP['主线']} 章、支线 {PROTECT_GAP['支线']} 章内禁止回收），写新章时保护期会注入提示词，AI 抢收会被拦截。埋设超过 {OVERDUE_CHAPTERS} 章未回收会提醒催更。
@@ -3074,7 +3044,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                     const list = project.foreshadows.filter((f) => f.status === status)
                     if (!list.length) return null
                     return (
-                      <section key={status} className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+                      <section key={status} className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
                         <h3 className="text-sm font-bold">
                           {status}（{list.length}）
                         </h3>
@@ -3128,7 +3098,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
               {/* ============ 设定与人物 ============ */}
               {subtab === 'settings' && form && (
                 <div className="space-y-4">
-                  <section className="space-y-4 rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+                  <section className="glass-card space-y-4 rounded-2xl bg-paper p-5 shadow-sm">
                     <div className="flex items-center justify-between">
                       <h2 className="text-base font-bold"><Ic n="gear" /> 全书设定（活档案）</h2>
                       <button onClick={saveSettings} disabled={genBusy !== ''} className={`rounded-full px-5 py-2 text-xs font-medium text-white disabled:opacity-50 ${settingsSaved ? 'bg-emerald-600' : 'bg-stone-800 hover:bg-stone-700'}`}>
@@ -3515,7 +3485,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                   </section>
 
                   {/* 人物活档案 */}
-                  <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+                  <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
                     <h3 className="text-sm font-bold"><Ic n="user" /> 人物档案（{form.characters.length}）</h3>
                     <p className="mt-1 text-xs text-stone-400">「当前状态」由每章保存时自动回写（位置 / 伤势 / 关系等），写新章时注入提示词。</p>
                     {/* 防照搬算法兜底：人物特点与参考作品功能位的文本相似度（纯前端，零费用）；只报可疑项不阻断 */}
@@ -3623,7 +3593,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
               {subtab === 'timeline' && (
                 <div className="space-y-4">
                   {/* 故事线面板：主线/支线进展随每章自动回写，写新章时注入提示词 */}
-                  <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+                  <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
                     <h2 className="text-base font-bold"><Ic n="thread" /> 故事线面板（{(project.storylines || []).length}）</h2>
                     <p className="mt-1 text-xs text-stone-400">每章保存时自动检测本章推进了哪些故事线、是否新开支线；写新章时注入提示词，约束 AI 只推进不擅自完结。</p>
                     {(project.storylines || []).length === 0 ? (
@@ -3644,7 +3614,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                     )}
                   </section>
 
-                  <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+                  <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
                   <h2 className="text-base font-bold"><Ic n="hourglass" /> 事件级时间线</h2>
                   <p className="mt-1 text-xs text-stone-400">每章保存时自动追加本章关键事件；导入既有正文时由故事线梳理生成。</p>
                   {project.events.length === 0 ? (
@@ -3670,7 +3640,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
               {/* ============ 拆书工作台：拆出全局参考资产，书级可切换绑定，去专名防照搬 ============ */}
               {subtab === 'analysis' && (
                 <div className="space-y-4">
-                  <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+                  <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
                     <h3 className="text-sm font-bold"><Ic n="search" /> 拆书工作台</h3>
                     <p className="mt-1 text-xs leading-relaxed text-stone-400">
                       先在「改写润色」导入参考小说进书库，AI 一次拆解会同时产出两层资产：【结构层】功能位、关系模式、爽点推进模式等叙事功能（不含原作任何专名，只借鉴结构、明禁复用与谐音改写），以及【文风层】可照着写的笔触模仿指令 + 原文范例（few-shot，只学“怎么写”不抄“写什么”）。两层拆完都默认自动绑定当前书，写作时同时注入——既借鉴叙事结构，又模仿行文笔触；写其他书时在各自设定页切换，互不影响。
@@ -3699,7 +3669,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                     </div>
                   </section>
 
-                  <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+                  <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
                     <h3 className="text-sm font-bold"><Ic n="box" /> 参考资产（{analyses.length}）</h3>
                     {analyses.length === 0 ? (
                       <p className="mt-2 text-xs text-stone-400">还没有拆解资产。选一本你想借鉴的参考小说开始拆解。</p>
@@ -3799,7 +3769,7 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
                   <PolishPanel project={project} saveProject={saveProject} apiKey={apiKey} busy={busy} />
                   <SceneSimPanel project={project} apiKey={apiKey} busy={busy} />
                   {project.memory?.length > 0 && (
-                    <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+                    <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
                       <h3 className="text-sm font-bold"><Ic n="scroll" /> 卷级长时记忆（{project.memory.length} 卷）</h3>
                       <p className="mt-1 text-xs text-stone-400">每 20 章自动把章节摘要链压缩成卷志，写新章时自动注入，防止早期剧情被遗忘。AI 压缩可能失真或漏关键伏笔，可在此人工修订或删除。</p>
                       <div className="mt-3 space-y-2">
@@ -3840,6 +3810,14 @@ export default function LongFormPage({ apiKey, glmKey, onNeedKey }) {
       {/* 剧情讨论面板：绑定本书上下文的自由对话，悬浮固定布局，记录随书落库 */}
       {discOpen && project && (
         <DiscussionPanel project={project} saveProject={saveProject} apiKey={apiKey} onNeedKey={onNeedKey} onClose={() => setDiscOpen(false)} />
+      )}
+      {/* 幕末确认门（§7）：一幕/一卷生成完毕后逐章复查，可拉起单章意见/修订抽屉 */}
+      {actGate && project && (
+        <ActGateDrawer project={project} range={actGate} busy={busy} onClose={() => setActGate(null)} onReviewChapter={(no) => setReviewChapterNo(no)} />
+      )}
+      {/* 逐章意见/修订抽屉（§7）：critic 报告 + 正文阅读态 + userNotes + 定向重写 */}
+      {reviewChapterNo != null && project && (
+        <ChapterReviewDrawer project={project} saveProject={saveProject} apiKey={apiKey} chapterNo={reviewChapterNo} busy={busy} onClose={() => setReviewChapterNo(null)} onRewriteDone={handleRewriteDone} />
       )}
     </div>
   )

@@ -89,10 +89,10 @@ describe('detailOutlineFor 本章详纲取值', () => {
     expect(detailOutlineFor(p, 12)).toContain('林昭夜访档案库。')
   })
 
-  it('newProject 出厂就带 outlineDetail 与 outlineDriven，且驱动开关默认关闭', () => {
+  it('newProject 出厂就带 outlineDetail 与 outlineDriven，且驱动开关默认开启（防剧透最强档）', () => {
     const p = newProject('新书')
     expect(p.outlineDetail).toEqual({})
-    expect(p.outlineDriven).toBe(false)
+    expect(p.outlineDriven).toBe(true) // 方案§9：默认开启=防剧透最强档
   })
 })
 

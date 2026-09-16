@@ -50,7 +50,7 @@ export default function PolishPanel({ project, saveProject, apiKey, busy: global
   const origOf = (no) => (chapters.find((c) => Number(c.chapterNo) === Number(no)) || {}).content || ''
 
   return (
-    <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+    <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-base font-bold"><Ic n="pencil" /> 全书润色终 pass</h2>

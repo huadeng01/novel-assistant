@@ -14,7 +14,7 @@ export default function CompliancePanel({ project, saveProject }) {
   const p = scan.platform
 
   return (
-    <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+    <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
       <div className="min-w-0">
         <h2 className="text-base font-bold"><Ic n="shield" /> 平台合规叠加扫描</h2>
         <p className="mt-1 text-xs leading-relaxed text-stone-400">

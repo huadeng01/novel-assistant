@@ -17,6 +17,13 @@ import {
   POWER_FANTASY_STANCES,
   POWER_FANTASY_DRIVES,
   bookWorldviewMessages,
+  NO_AI_FLAVOR_RULE,
+  TEMPLATE_RULES,
+  styleAnalyzeMessages,
+  genreRegisterRule,
+  fullSynopsisMessages,
+  storylineMessages,
+  volumesPlanMessages,
 } from '../prompts.js'
 import { worldviewText, getWorldview } from '../worldviews/index.js'
 
@@ -596,5 +603,158 @@ describe('世界观两档注入的落点措辞', () => {
     expect(t2).toContain('用户的修改想法（必须落实）')
     expect(t2).toContain('把金手指改成签到暴击')
     expect(t2).toContain('按用户想法修改并扩充')
+  })
+})
+
+describe('文风蒸馏去硬编码：蒸语言指纹，不再全局强制排比句式', () => {
+  const noTriad = TEMPLATE_RULES.find((r) => r.id === 'no-triad')
+  const habitLanding = TEMPLATE_RULES.find((r) => r.id === 'habit-landing')
+
+  it('NO_AI_FLAVOR_RULE 不再把《剑来》式排比当作全局招牌强制照用', () => {
+    expect(NO_AI_FLAVOR_RULE).not.toContain('可搬山')
+    expect(NO_AI_FLAVOR_RULE).not.toContain('应当照用')
+    // 改为：仅当本书风格确有排比才自然使用、不配额、不强造
+    expect(NO_AI_FLAVOR_RULE).toContain('本书风格不含排比时')
+  })
+
+  it('TEMPLATE_RULES 任何一条都不再硬编码排比签名或每章配额', () => {
+    for (const r of TEMPLATE_RULES) {
+      expect(r.text, `${r.id} 不应硬编码「可搬山」签名`).not.toContain('可搬山')
+      expect(r.text, `${r.id} 不应发排比配额`).not.toContain('每章 2~3 处')
+    }
+    // no-triad：具象罗列改为「仅本书风格确有才自然使用、不配额」
+    expect(noTriad.text).toContain('不设配额')
+    expect(noTriad.text).toContain('本书风格不含排比时')
+    // habit-landing (a)：改为条件式，删去「罗列五个以上/以感叹号收束」的全局强制
+    expect(habitLanding.text).not.toContain('罗列五个以上')
+    expect(habitLanding.text).not.toContain('以感叹号收束')
+    expect(habitLanding.text).toContain('仅当清单中确有')
+  })
+
+  it('STYLE_SYSTEM 蒸的是语言习惯指纹（口头禅/语气词/标志性用词），并禁止把修辞套路写成配额硬指标', () => {
+    const t = all(styleAnalyzeMessages(['一段原著采样文本']))
+    // 语言指纹维度
+    expect(t).toContain('口头禅')
+    expect(t).toContain('语气词')
+    expect(t).toContain('标志性用词')
+    // 明确禁止「排比/感叹号/每章 N 处」这类句式配额 habit
+    expect(t).toContain('严禁把修辞套路写成硬指标')
+    expect(t).toContain('每章至少 N 处')
+  })
+})
+
+// 题材语域护栏：前现代背景的书不能满纸现代科技语汇（实例：修仙世界的金手指被写成「编辑权限」「开源」「沙盒」，读者直接脱戏）。
+// 关键是「不一刀切」——都市/科幻/游戏等本就活在现代语汇里的题材必须完全不干预。
+describe('genreRegisterRule · 题材语域护栏按题材条件启用', () => {
+  it('前现代题材（玄幻/仙侠/修真/武侠/古代言情/历史/奇幻）都启用', () => {
+    for (const g of ['玄幻', '仙侠', '修真', '武侠', '古代言情', '历史', '奇幻']) {
+      const r = genreRegisterRule(g)
+      expect(r, `${g} 应启用语域护栏`).toContain(`【题材语域·${g}】`)
+    }
+  })
+
+  it('组合题材按包含匹配，如「玄幻奇幻」同样启用', () => {
+    expect(genreRegisterRule('玄幻奇幻')).toContain('【题材语域·玄幻奇幻】')
+  })
+
+  it('现代语汇本就合法的题材一律返回空串，不干预', () => {
+    for (const g of ['都市', '现实', '科幻', '末世', '悬疑', '推理', '游戏', '无限流', '竞技', '轻小说', '']) {
+      expect(genreRegisterRule(g), `${g || '空题材'} 不应注入护栏`).toBe('')
+    }
+  })
+
+  it('点名禁掉现代科技/工程语汇，但金手指机制本身不禁止，只要求世界内包装', () => {
+    const r = genreRegisterRule('玄幻')
+    for (const w of ['权限', '开源', '沙盒', '代码']) expect(r).toContain(w)
+    expect(r).toContain('不必回避') // 面板/词条/签到/抽卡等流派设定照用
+    expect(r).toContain('依本书设定自取') // 命名不由提示词代劳，避免又变成一套固定模板
+  })
+
+  it('留了例外口子，不一刀切：穿越者内心联想 / 中性抽象词 / 实为现代社会的世界观', () => {
+    const r = genreRegisterRule('仙侠')
+    expect(r).toContain('允许的例外，不要一刀切')
+    expect(r).toContain('穿越者')
+    expect(r).toContain('本条不适用')
+  })
+
+  it('长篇正文提示词按 genre 注入护栏，现代题材不注入', () => {
+    expect(all(longFormDraftMessages({ ...draftBase(), genre: '玄幻' }))).toContain('【题材语域·玄幻】')
+    expect(all(longFormDraftMessages({ ...draftBase(), genre: '都市' }))).not.toContain('【题材语域·')
+    expect(all(longFormDraftMessages(draftBase()))).not.toContain('【题材语域·') // 漏传 genre 时与改造前一致
+  })
+
+  it('场景清单提示词同样按 genre 注入（场景清单会被逐场景扩写成正文）', () => {
+    const base = { chapterNo: 1, chapterWords: 3000, characters: [] }
+    expect(all(scenePlanMessages({ ...base, genre: '修真' }))).toContain('【题材语域·修真】')
+    expect(all(scenePlanMessages({ ...base, genre: '科幻' }))).not.toContain('【题材语域·')
+  })
+
+  it('灵感选题（常规/爽文两档）与灵感扩充都注入护栏', () => {
+    expect(all(inspirationMessages('玄幻', '世界模板', '', { mode: 'normal' }))).toContain('【题材语域·玄幻】')
+    expect(all(inspirationMessages('仙侠', '世界模板', ''))).toContain('【题材语域·仙侠】')
+    expect(all(inspirationMessages('都市', '世界模板', '', { mode: 'normal' }))).not.toContain('【题材语域·')
+    expect(all(inspirationExpandMessages({ brief: '某选题', genre: '玄幻', worldview: '世界模板' }))).toContain('【题材语域·玄幻】')
+  })
+
+  // 全书梗概/故事线/分卷规划是用户看到「里程碑一~四」那类文本的直接来源，三处插入点都在模板字面量内，逐个验真
+  it('全书梗概、故事线、分卷规划三处都确实渲染出护栏文本（不是死在模板外的字面量）', () => {
+    const bible = { world: '九州', powerRules: ['筑基→金丹'], anchors: [], truths: [], mapLayers: [] }
+    expect(all(fullSynopsisMessages({ genre: '玄幻', bible, brief: '一句话', totalWords: 1000000, volumeCount: 4 }))).toContain('【题材语域·玄幻】')
+    expect(all(fullSynopsisMessages({ genre: '都市', bible, brief: '一句话' }))).not.toContain('【题材语域·')
+    expect(all(storylineMessages({ genre: '修真', segment: { id: 'opening', label: '开局', span: '1~2卷', guide: '写开局' }, bible }))).toContain('【题材语域·修真】')
+    expect(all(volumesPlanMessages({ genre: '仙侠', bible, mainline: '主线', volumeCount: 3 }))).toContain('【题材语域·仙侠】')
+    expect(all(volumesPlanMessages({ genre: '游戏', bible, mainline: '主线', volumeCount: 3 }))).not.toContain('【题材语域·')
+  })
+})
+
+// 去强暗示/固定写作：提示词里不得写死某一本参考书的实测句长与逗号密度，也不得规定固定的台词模板或引出句式。
+// 这类硬指标会把所有书推成同一副腔调（旧版曾写死「≥60 字台词后必须自嘲+闭嘴动作」并附上原句示例）。
+describe('提示词不含单本参考书的实测数值与固定句式公式', () => {
+  const noRunon = TEMPLATE_RULES.find((r) => r.id === 'no-runon')
+  const habitLanding = TEMPLATE_RULES.find((r) => r.id === 'habit-landing')
+  // 必须带 style 才会拼出【作者文风档案】块（styleBlockOf），否则那一段的硬指标测不到
+  const draftSys = all(longFormDraftMessages({ ...draftBase(), style: '长短句错落，对白多用短句。', habits: ['口头禅：也罢'] }))
+  const corpus = [noRunon.text, habitLanding.text, draftSys].join('\n')
+
+  it('不再有均句长/句长区间/逗号密度这类实测硬指标', () => {
+    for (const dead of ['41.9', '28.6~65.8', '30~45 字', '40~80 字', '不超过 12 字', '6~8 处', '原著均句长约 40 字']) {
+      expect(corpus, `不应写死 ${dead}`).not.toContain(dead)
+    }
+  })
+
+  it('治 run-on 的唯一硬数字保留：相邻标点之间不得超过 40 字', () => {
+    expect(noRunon.text).toContain('任何相邻标点之间不得超过 40 字')
+  })
+
+  it('文风档案块确实被拼进了正文提示词（上面的硬指标断言不是空跑）', () => {
+    expect(draftSys).toContain('【作者文风档案')
+    expect(draftSys).toContain('【长句照写】')
+  })
+
+  it('不再有写死的自嘲台词示例与「某某心声问道」固定引出公式', () => {
+    expect(corpus).not.toContain('不说了不说了')
+    expect(corpus).not.toContain('某某心声问道')
+    expect(corpus).not.toContain('心中默念')
+    expect(habitLanding.text).toContain('严禁另立一套固定的台词模板或引出句式')
+  })
+
+  it('招牌动作类习惯仍要求落地，但一律以文风清单本身为准，不设字数触发线', () => {
+    expect(habitLanding.text).toContain('仅当清单中确有')
+    expect(habitLanding.text).not.toContain('≥60字')
+    expect(habitLanding.text).not.toContain('不得改写成')
+  })
+})
+
+// 成稿无缩进无换行的提示词侧配合：正文明确要求按自然段落分行、段间空行，禁序号/markdown 分段。
+describe('longFormDraftMessages · 正文分段要求', () => {
+  it('带标题与不带标题两档都写明了分段要求', () => {
+    expect(all(longFormDraftMessages(draftBase()))).toContain('正文按自然段落分行，段与段之间空一行')
+    expect(all(longFormDraftMessages({ ...draftBase(), withTitle: false }))).toContain('正文按自然段落分行，段与段之间空一行')
+  })
+
+  it('禁掉用序号/小标题/markdown 代替分段，也禁把整章挤成一整块', () => {
+    const t = all(longFormDraftMessages(draftBase()))
+    expect(t).toContain('不要用序号、小标题或 markdown 标记来分段')
+    expect(t).toContain('严禁把整章挤成一整块不换行的文字')
   })
 })

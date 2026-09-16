@@ -60,7 +60,7 @@ export default function DiagnosePanel({ apiKey, text, context, disabled, cacheKe
   const suggestions = Array.isArray(result?.suggestions) ? result.suggestions : []
 
   return (
-    <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+    <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h2 className="text-base font-bold"><Ic n="doctor" /> AI 全局诊断看板</h2>

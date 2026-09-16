@@ -10,12 +10,12 @@ const STYLE_SYSTEM = `你是一位资深小说编辑，擅长把一位作者的�
 3. 节奏与分段：段落平均长度、切换快慢、场景转换手法、留白与停顿的使用；
 4. 对话风格：对话占比高不高、提示语用法（是否常省略“某某说”）、对话是否带动作/神态、口语化程度；
 5. 描写取舍：环境/心理/动作三者比重，偏白描还是偏铺陈，感官调用偏好（视觉/听觉/触觉）；
-6. 用词与修辞：词汇雅俗、比喻密度与取材方向、标点习惯（破折号/省略号/短句号的用法）。
+6. 用词指纹与语言习惯：词汇雅俗与标志性用词、高频词与口头禅、语气词偏好（么/呢/罢/啊/嘛）、人物称呼习惯、特征动词与搭配、整体语气基调（冷峻/诙谐/克制/抒情/痞气），以及比喻取材方向、标点习惯（破折号/省略号/短句号的用法）——重点是这位作者独有、换个题材也认得出的遣词与语气指纹（如有人爱写「吃了么」有人爱写「你吃饭了么」），而非某种固定修辞句式。
 另外从采样片段中挑出 3 段最能代表该作者笔触的原文段落原样留存（作为后续写作的模仿范例）。
 
 严格按以下 JSON 格式输出，不要输出任何其他内容：
 {"style_profile": "对作者写作习惯的完整描述，700~1000 字，逐维度展开、每个维度都给出采样中的具体依据与可执行的模仿要点（要具体到‘句长偏短、对话多省略提示语、段落多在3行内’这种可照做的程度，而非‘文笔优美’这类空话）", "habits": ["可执行模仿指令1（动宾结构，照着做即可，如‘动作戏用不超过15字的短句连缀，一段最多3句’）", "可执行模仿指令2", "可执行模仿指令3", "可执行模仿指令4", "可执行模仿指令5", "可执行模仿指令6", "可执行模仿指令7", "可执行模仿指令8"], "samples": ["从采样片段中原样摘录的典型段落1（150~300字）", "原样摘录的典型段落2", "原样摘录的典型段落3"]}
-habits 必须是能直接指导落笔的模仿指令，不是抽象评价，且 8 条中至少 2 条必须是「节奏平衡」类硬指令（如「长短句错落：铺陈背景与心理可用 40~80 字的长句，但长句内部必须逗号密集；动作戏与对话用不超过 15 字的短句」「禁止为模仿而堆砌生僻字与文白夹杂——模仿笔触不等于牺牲叙事节奏与张力」）；【节奏平衡≠压句长】严禁写出「长句必须切碎为短句」「一律改用短句」这类反向指令——若原著均句长在 30 字以上，节奏平衡类 habit 必须写成「保留原著的长句节奏，长句内部用逗号/顿号切开小句」，否则蒸馏档案会把整本书推成一片短句（Round-5 浏览器冒烟实测：粘贴 233 字原著正文蒸馏，模型照抄旧示例产出「长句必须用逗号切碎为短句节奏」，与写作端【长句照写】直接冲突）；【标点约束】habits 中严禁出现任何「省略标点/不用逗号/长句不断开/无引号无标点混排」类指令；凡涉及长句铺陈、排比或罗列多项的习惯，必须同时写明「项与项之间用顿号或逗号分隔」——原著的长句是逗号密集的长句（实测约 6~8 个逗号/百字），不是无标点的长串；samples 必须是给定采样片段里逐字存在的原文，不得改写、拼接或自创，且仅供内化笔触——后续写作严禁照抄其原句、人物、专名或情节。`
+habits 必须是能直接指导落笔的模仿指令，不是抽象评价，且应聚焦【可复用的语言习惯指纹】——作者偏爱哪些词、什么语气基调、对话与叙述的口头禅、称呼与语气词习惯、特征动词与搭配——即换个情节也照用的遣词造句习惯，而非规定固定句式结构；【严禁把修辞套路写成硬指标】不得写出「必须用排比」「以感叹号收束」「每章至少 N 处排比/意象罗列」这类句式配额或强制修辞——风格是语言习惯指纹，不是句式模板；若原著确有具象罗列/排比笔法，只客观描述为「作者偶用以顿号或逗号分隔的具象罗列增强气势」的倾向，不规定数量、不强制感叹号、不作为每章必写项；且 8 条中至少 2 条必须是「节奏平衡」类硬指令（如「长短句错落：铺陈背景与心理处照原著本来的节奏写长句，但长句内部必须逗号密集；动作戏与对话用短句」「禁止为模仿而堆砌生僻字与文白夹杂——模仿笔触不等于牺牲叙事节奏与张力」）；【节奏平衡≠压句长】严禁写出「长句必须切碎为短句」「一律改用短句」这类反向指令——若原著以长句为主，节奏平衡类 habit 必须写成「保留原著的长句节奏，长句内部用逗号/顿号切开小句」，否则蒸馏档案会把整本书推成一片短句（Round-5 浏览器冒烟实测：粘贴 233 字原著正文蒸馏，模型照抄旧示例产出「长句必须用逗号切碎为短句节奏」，与写作端【长句照写】直接冲突）；【标点约束】habits 中严禁出现任何「省略标点/不用逗号/长句不断开/无引号无标点混排」类指令；凡涉及长句铺陈、排比或罗列多项的习惯，必须同时写明「项与项之间用顿号或逗号分隔」——原著的长句是逗号密集的长句，不是无标点的长串；samples 必须是给定采样片段里逐字存在的原文，不得改写、拼接或自创，且仅供内化笔触——后续写作严禁照抄其原句、人物、专名或情节。`
 
 export function styleAnalyzeMessages(samples) {
   const body = samples.map((s, i) => `【片段${i + 1}】\n${s}`).join('\n\n')
@@ -40,7 +40,7 @@ export function continueStyleMessages({ text }) {
 // 不依赖也不检查用户自己的文章。
 export const NO_AI_FLAVOR_RULE = `【去除 AI 味】请像一位真实的作者一样自然书写，严禁使用"AI 腔"套路表达：
 1. 禁用"宛如、仿佛画卷、空气仿佛凝固、嘴角勾起一抹弧度、眸光微闪、眼神闪过一丝、嘴角扬起、不禁、不由、瞬间、犹如、恰似、如诗如画、意味深长、眼底闪过、眸中闪过、心中暗想、心中五味杂陈"等空洞修饰；
-2. 禁止形容词堆砌、"XX 的 XX"式空洞排比、每句都叠加修饰语（注意：此条禁的是抽象修饰语的空洞堆叠；凡按下方文风清单要求、以顿号或逗号分隔的【具象意象或动作罗列】——如「可搬山、倒海、降妖、镇魔」——属原著招牌笔法，不在禁止之列，应当照用）；
+2. 禁止形容词堆砌、"XX 的 XX"式空洞排比、每句都叠加修饰语（此条针对抽象修饰语的空洞堆叠；若本书文风档案或模仿清单里确有具象意象罗列的笔法，可照该书风格自然使用，但不得凭空硬造、不设固定配额、更不得以感叹号强行拔高气势；本书风格不含排比时，一律不要插入）；
 3. 用具体的动作、对话、细节和场景推进叙事，让读者自己感受情绪，而不是替读者总结感受；禁止用"他意识到/他明白了"式旁白直接陈述人物心理，用动作与对话呈现。`
 
 // 文风习惯的标点护栏（确定性净化）：蒸馏出的 habits 会照抄原著的「长句铺陈/多项排比」习惯，
@@ -61,7 +61,7 @@ const HABIT_PATCH_TAIL = '（项与项之间用顿号或逗号分隔，不得连
 // 这类指令与写作端【长句照写】直接冲突，会把整本书推成一片短句（Round-5 实测：均句长 21.9~29.3，
 // 低于原著区间 28.6~65.8）。同样在注入端（choke point）纠偏，存量档案也一并生效；幂等（已含「纠偏」的不重补）。
 const HABIT_SHORTEN_RE = /(切碎为短句|切成短句|拆成短句|一律改用短句|全部改用短句|都用短句|改成一片短句)/
-const HABIT_SHORTEN_TAIL = '（纠偏：此处「短句节奏」指长句内部用小句切开、逗号密集，不是把全书写成一片短句；铺陈背景与心理仍保留 40~80 字长句）'
+const HABIT_SHORTEN_TAIL = '（纠偏：此处「短句节奏」指长句内部用小句切开、逗号密集，不是把全书写成一片短句；铺陈背景与心理仍保留原著本来的长句节奏）'
 export function sanitizeHabits(habits) {
   const list = Array.isArray(habits) ? habits.filter((h) => typeof h === 'string' && h.trim()) : []
   const out = []
@@ -92,7 +92,7 @@ export function sanitizeHabits(habits) {
 // 范例是 few-shot 层：模仿效果显著强于纯描述；样本在文风分析时从原书留存。
 function styleBlockOf({ style, habits, forbidden, rules, samples }) {
   let block = ''
-  if (style) block += `\n\n【作者文风档案 — 这是本次写作的笔触标杆，必须逐条落实到字里行间】\n${style}\n落笔要求：主动模仿上述句式长短、对话密度与提示语用法、段落节奏、描写取舍与用词修辞，让成文的“笔触感”与档案一致；但内容、人物、情节必须完全原创，只学“怎么写”，不抄“写什么”。【度约束】模仿笔触不等于牺牲叙事节奏与张力：长短句必须错落，动作戏用短句，严禁为形似而堆砌长句、生僻字或文白夹杂导致节奏拖沓；宁可形似七分而节奏流畅，不要形似十分而神散。【标点纪律·硬要求】原著的长句之所以能读，靠的是逗号/顿号/分号把小句切开，而不是不用标点：【长句照写】原著均句长约 40 字、长句占比近四成，这是本书应有的节奏，不要为了“安全”而改写成一片短句；全章平均句长宜落在 30~45 字（原著 10 个窗口实测均值 41.9、区间 28.6~65.8），铺陈背景与心理时用 40~80 字的长句、动作与对话用不超过 12 字的短句，两者必须交错；但长句内部必须逗号密集（全篇约 6~8 处逗号/百字，原著实测水位），任何相邻标点之间不得超过 40 字；排比或罗列三个以上同类项时，项与项之间必须用顿号或逗号分隔（如「可搬山、倒海、降妖、镇魔」），严禁写成无分隔的字串；内心独白/心声同样适用本纪律，不得因为不用引号就连标点一并省掉。【对白引号·硬要求】凡角色开口说出的话（有声对白）必须用中文双引号“”完整包裹，严禁把说出口的话不加引号直接混进叙述；但角色没说出口的内心独白/心声沿用原著笔法，可以不用引号，以「某某心声问道」等引出或直接融入叙事段落——区分标准只有一个：说给别人听的必须加引号，只在心里想的可不加。本条只规范引号有无，绝不改变句长、逗号密度或任何其他文风特征（防止重蹈旧版把引号与长句纪律捆绑后的过度矫正）。【防原文】文风范例仅供内化笔触，严禁在正文照抄其原句、人物、专名或情节，连续 15 字以上与范例雷同即视为抄袭。`
+  if (style) block += `\n\n【作者文风档案 — 这是本次写作的笔触标杆，必须逐条落实到字里行间】\n${style}\n落笔要求：主动模仿上述句式长短、对话密度与提示语用法、段落节奏、描写取舍与用词修辞，让成文的“笔触感”与档案一致；但内容、人物、情节必须完全原创，只学“怎么写”，不抄“写什么”。【度约束】模仿笔触不等于牺牲叙事节奏与张力：长短句必须错落，动作戏用短句，严禁为形似而堆砌长句、生僻字或文白夹杂导致节奏拖沓；宁可形似七分而节奏流畅，不要形似十分而神散。【标点纪律·硬要求】原著的长句之所以能读，靠的是逗号/顿号/分号把小句切开，而不是不用标点：【长句照写】句长节奏一律以本书文风档案蒸馏出的语言指纹为准，不要为了“安全”而把全书改写成一片短句；档案里写明长句占比高的，铺陈背景与心理处就照它本来的节奏写长句，动作与对话处用短句，两者必须交错；但长句内部必须逗号密集，任何相邻标点之间不得超过 40 字；若本书文风确有排比或罗列同类项的笔法，项与项之间必须用顿号或逗号分隔，严禁写成无分隔的字串（本书风格不含排比时不必强造）；内心独白/心声同样适用本纪律，不得因为不用引号就连标点一并省掉。【对白引号·硬要求】凡角色开口说出的话（有声对白）必须用中文双引号“”完整包裹，严禁把说出口的话不加引号直接混进叙述；但角色没说出口的内心独白/心声沿用原著笔法，可以不用引号，按其原有的引出方式或直接融入叙事段落——区分标准只有一个：说给别人听的必须加引号，只在心里想的可不加。本条只规范引号有无，绝不改变句长、逗号密度或任何其他文风特征（防止重蹈旧版把引号与长句纪律捆绑后的过度矫正）。【防原文】文风范例仅供内化笔触，严禁在正文照抄其原句、人物、专名或情节，连续 15 字以上与范例雷同即视为抄袭。`
   // habits 注入前过一道确定性标点净化：存量档案里的「长句不断/排比罗列」习惯是 run-on 的提示词级根因
   const safeHabits = sanitizeHabits(habits).habits
   if (safeHabits.length) block += `\n\n【可执行模仿清单 — 已把上述文风档案拆成“照着就能落笔”的具体动作，本章每一段都要逐条执行到位；这是文风模仿真正生效的关键，优先级高于你自身的默认写作习惯（但本清单与上方【标点纪律】冲突时，以标点纪律为准）】\n` + safeHabits.map((h, i) => `${i + 1}. ${h}`).join('\n')
@@ -113,13 +113,15 @@ export const TEMPLATE_RULES = [
   // 模型会以后者为准→排比被一律压死。实测代价：独立判官给 styled-ch1 9/16，评语明确写「缺…排比气势」；
   // 且长句%(≥40字) 15.9~24.4 低于原著区间 18.1~55.3。本条真正要治的是 AI 腔的「空洞结构性三连」
   // （不是…而是… / 这是…这是…），而不是具象意象罗列这一文学手法，故按「禁形式、不禁手法」重写。
-  { id: 'no-triad', name: '禁空洞三连排比（具象罗列可用）', text: '禁止空洞的结构性三连排比：如「不是…而是…」「这是…，这是…，这是…」，或三个结构相同的抽象短句连排造势、拿排比句充当情绪高潮。但具象意象的并列罗列属原著笔法，允许且应当使用——各项必须是具体动作或物件、以顿号或逗号分隔（如「可搬山、倒海、降妖、镇魔」），每章 2~3 处为宜，不得连篇堆叠。' },
+  // 【去硬编码·纠偏】旧版把「具象罗列」写成全局强制并配额（每章 2~3 处），源于对单一测试书《剑来》的过拟合，
+  // 结果每本书——不论原著是否有排比笔法——都被塞进「能裂地、穿石、断金、碎骨、斩天！」式刻意排比。文风应来自每本书自蒸馏的语言指纹（见 STYLE_SYSTEM），故改为「仅本书风格确有排比才自然使用、不配额、不强造」。
+  { id: 'no-triad', name: '禁空洞三连排比', text: '禁止空洞的结构性三连排比：如「不是…而是…」「这是…，这是…，这是…」，或三个结构相同的抽象短句连排造势、拿排比句充当情绪高潮。具象意象的并列罗列不在本条禁列，但只在本书文风档案确有此笔法时，才照其风格与分量自然使用：不设配额、不刻意堆叠、不以感叹号强行造势；本书风格不含排比时，严禁凭空插入具象罗列。' },
   { id: 'no-explainer', name: '设定不自问自答', text: '世界观与设定通过人物行动、对话与后果自然呈现，禁止旁白自问自答式地讲解规则来历与原理。' },
   { id: 'vary-sentence', name: '句式长短错落', text: '段落内句式长短错落，禁止连续多个“他+动词”开头的主谓句；动作戏多用短句，抒情处可舒展。' },
-  { id: 'no-runon', name: '禁大段无标点长句', text: '严禁大段无标点的长句（run-on）：一个句子若含多个动作或从句，必须在自然停顿处用逗号、分号断开；量化标准：任何相邻标点之间不得超过 40 字，全篇逗号密度约 6~8 处/百字（人类原著实测水位）；排比或罗列三个以上同类项时，项与项之间必须用顿号或逗号分隔（如「可搬山、倒海、降妖、镇魔」），严禁连成无分隔的字串；内心独白/心声同样适用。注意：本条禁的是「无标点」，不是「长句」——原著均句长约 40 字，该长就长，只要逗号跟得上；不得为避开本条而把全书写成一片短句。' },
+  { id: 'no-runon', name: '禁大段无标点长句', text: '严禁大段无标点的长句（run-on）：一个句子若含多个动作或从句，必须在自然停顿处用逗号、分号断开；量化标准：任何相邻标点之间不得超过 40 字；若本书文风含排比或罗列同类项的笔法，项与项之间必须用顿号或逗号分隔，严禁连成无分隔的字串；内心独白/心声同样适用。注意：本条禁的是「无标点」，不是「长句」——原著句长偏长的书该长就长，只要逗号跟得上；不得为避开本条而把全书写成一片短句。' },
   // Fix11（Round-5 #10）：runB 独立判官 styled 仅 8/16，H5(动作/施法步骤拆解)、H7(长篇大论后自嘲停顿)、H8(≥5意象排比+感叹号) 三条招牌动作全 0 分——habit 虽注入却整章未落地。本条在 habits 之后注入（recency 显著），把"每条习惯至少一处可指认字句证据"升为硬约束，并按类点名最易漏写的招牌动作；用"凡清单含同类习惯者"的条件式表述保持跨题材通用（不 hardcode 修真），且重申标点纪律与去 AI 味，避免抬分反伤已达标的 #3/#5/#6。
   // Fix11b（Round-5 #10 runC 复测精修，度量不动）：runC styledMean 未升反 A/B 回归（比喻过密）、H8 排比落内心戏暗示未回收伏笔被 draftSelfCheckMessages 检查项3 删、H3 改用心想丢失原著心声问道公式——故 (a) 补落点约束与总量节制、新增 (d) 内心独白式；H5 属 ch1 度量盲区（投宿章无动作戏），prompt 端保留 (b) 不强追绝对分。
-  { id: 'habit-landing', name: '文风清单逐条落地（招牌动作不得整章缺失）', text: '上方【可执行模仿清单】里的每一条习惯，本章都必须找到至少一处明确可指认的字句证据，不得整章一条都不体现。尤其下列"招牌动作"类最易被整章漏写，凡清单中含同类习惯者务必各至少落地一次：(a) 排比造势——用顿号或逗号分隔、罗列五个以上具象同类意象或动作，以感叹号收束拉升气势（如「可搬山、倒海、降妖、镇魔、敕神！」），严禁连成无标点字串；排比须落在环境、气势或外部动作描写上，不得用于揭示或暗示未回收伏笔的答案（那会被落库前自检删去）；每章排比至多 1~2 处，且不得与密集明喻/暗喻叠加，保持原著白描克制；(b) 动作步骤拆解——动作、打斗或施法场面按时间顺序拆解，写出具体身体部位与兵器、法器或器物的交互轨迹，不得一笔带过；(c) 节奏停顿——凡本章任一人物连续≥60字的独白/训话/盘问/数落之后，必须由【该说话人自己】紧跟一句【可指认的出声自嘲台词】（是自己自嘲，不是嘲讽他人），再接一个【闭嘴/收束动作】（如收起笑意、摆手、敲一下桌沿）或一声叹息，形成节奏停顿；不得以『本章没有长篇大论』为由免写，只要有≥60字连续台词就触发；每章1~2处为限，防套路化。示例：『……不说了不说了，跟个半大孩子废什么话。』；(d) 内心独白式——凡清单含「心声/内心独白」类习惯者，用「某某心声问道」「心中默念」式引出，不得改写成「心想/心里念着」而丢失原著公式。落地时仍须遵守【标点纪律】与去 AI 味要求：具象、克制、服务叙事，绝不为凑数而堆砌。' },
+  { id: 'habit-landing', name: '文风清单逐条落地（招牌动作不得整章缺失）', text: '上方【可执行模仿清单】里的每一条习惯，本章都必须找到至少一处明确可指认的字句证据，不得整章一条都不体现。尤其下列"招牌动作"类最易被整章漏写，凡清单中含同类习惯者务必落地，且一律以清单原本的描述与频次为准，严禁另立一套固定的台词模板或引出句式：(a) 具象罗列——仅当清单中确有「具象意象/动作罗列」类习惯时才落地，照该书习惯原本的密度与语气自然写即可，不硬凑数量、不以感叹号强行拔高气势；罗列各项用顿号或逗号分隔、严禁连成无标点字串，只落在环境、气势或外部动作描写上，不得用于揭示或暗示未回收伏笔的答案（那会被落库前自检删去），也不得与密集明喻/暗喻叠加；清单中没有这类习惯的书，严禁凭空插入排比；(b) 动作步骤拆解——仅当清单中确有此类习惯时，把动作、打斗或施法场面按时间顺序拆解，写出具体身体部位与兵器、法器或器物的交互轨迹，不得一笔带过；(c) 节奏停顿——仅当清单中确有「长篇独白/训话之后自嘲收束」一类习惯时，照该书习惯原本的写法与出现频次自然落地，不设字数触发线、不规定每章处数，更不得由本条代劳编出固定台词；(d) 内心独白式——仅当清单中确有「心声/内心独白」类习惯时，沿用清单里记下的那种引出方式，不要换成别的说法而丢失原著笔法。落地时仍须遵守【标点纪律】与去 AI 味要求：具象、克制、服务叙事，绝不为凑数而堆砌。' },
 ]
 
 // 写法引擎试写：用当前文风绑定与反模板规则写一段小片段，验证写法效果后再正式开写（只出正文，不带标题/解释）
@@ -199,6 +201,24 @@ export function polishChapterMessages({ text, before, after, setting, style, hab
 // ---------- 模块二：新手写作四步向导 ----------
 export const GENRES = ['玄幻', '仙侠', '修真', '都市', '现实', '科幻', '末世', '奇幻', '悬疑', '推理', '恐怖', '言情', '古代言情', '历史', '武侠', '军事', '游戏', '无限流', '竞技', '轻小说']
 export const TONES = ['轻松幽默', '热血燃向', '细腻治愈', '暗黑沉重', '悬疑烧脑']
+
+// ---------- 题材语域护栏 ----------
+// 背景不属于现代工业社会的题材（玄幻/仙侠/修真/武侠/古代言情/历史/奇幻），叙事与对白的语汇必须长在那个世界自己的认知里——
+// 现代科技与互联网/软件工程词汇一冒头读者就脱戏（实例：给修仙世界的金手指起名「万物词条编辑器」，正文里出现「编辑权限」「开源」「沙盒」）。
+// 只对前现代题材启用：都市/科幻/游戏/无限流/末世/竞技/轻小说本就活在现代语汇里，返回空串不干预（不一刀切）。
+// 策划层的流派名与金手指名（系统流、词条流、抽奖面板…）是给我们看的选题标签，允许保留；本条约束的是它们在正文与设定里的说法。
+const PRE_MODERN_GENRES = ['玄幻', '仙侠', '修真', '武侠', '古代言情', '历史', '奇幻']
+
+export function genreRegisterRule(genre) {
+  const g = String(genre || '').trim()
+  if (!g || !PRE_MODERN_GENRES.some((k) => g.includes(k))) return ''
+  return `
+【题材语域·${g}】本书世界不属于现代工业社会，叙事与对白的语汇必须长在那个世界自己的认知里，现代科技词一出现读者就脱戏。
+1. 不要把现代科技/互联网/软件工程的说法当作世界内的事实来写：例如把功法、法宝、阵法、天道说成「代码」「程序」「接口」「权限」「版本」「数据」「参数」「配置」「服务器」「终端」「屏幕」「进度条」「加载」「缓存」「沙盒」「日志」「管理员」「开发者工具」，或用「开源」「系统清理」「漏洞修复」这类工程口吻描述天地法则；
+2. 金手指机制本身可以很「外挂」（面板、词条、签到、抽卡等流派设定不必回避），但它在正文里的名字、界面与提示语必须用这个世界自己的说法包装，具体叫什么依本书设定自取（不要沿用本条里的任何字样）；人物也只能用其时代与见识范围内的词汇去理解它；
+3. 允许的例外，不要一刀切：① 穿越者/重生者/系统宿主在内心偶尔冒出一两处现代联想，可作反差与趣味，但不要变成贯穿全书的口癖；② 叙述层为讲清机制可用中性抽象词（规则、次序、代价、感应一类），只要不携带现代技术意象；③ 若本书世界观实为现代社会（都市异能、现代修真等），以世界观设定为准，本条不适用；
+4. 同理，器物、度量、称谓、货币、官制、饮食与礼仪都按本书既有设定写，不要混入现代品牌、现代计量单位与现代制度名词。`
+}
 
 // 开书导演模式：一句话灵感 → 3 个差异化开书方向候选（用户拍板后链式生成全套开书资产）
 export function directorAnglesMessages({ idea }) {
@@ -508,7 +528,7 @@ export function worldviewVolumeText(bible, volumeNo, totalVolumes) {
 }
 
 // Step 2 全书梗概 5000 字：主线里程碑式全景大纲 + 副线 + 四层伏笔（每条带回收卷规划，根治"只有短埋点"）
-export function fullSynopsisMessages({ bible, brief, totalWords, volumeCount, chapterWords }) {
+export function fullSynopsisMessages({ bible, brief, totalWords, volumeCount, chapterWords, genre = '' }) {
   const anchors = (bible?.anchors || []).map((a) => a.name).join('、') || '（暂无）'
   const clues = (bible?.truths || []).flatMap((t) => (t.clues || []).map((c) => `- ${t.kind}的线索：${c}`)).join('\n') || '（暂无）'
   const mapText = (bible?.mapLayers || []).filter((m) => m?.name).map((m, i) => `第${i + 1}层 ${m.name}（第${m.unlockVolume}卷解锁）：${m.summary || ''}`).join('\n') || '（暂无）'
@@ -529,7 +549,7 @@ export function fullSynopsisMessages({ bible, brief, totalWords, volumeCount, ch
    每条含 content（伏笔内容）/tier/related_chars（相关人物）/planned_volume（计划回收卷号，终极层填 ${volumeCount}）/hints（2~3 个线索露出时机：{chapter: 大致章号, clue: 露什么蛛丝马迹}，长/终极层必填）；
 5. 伏笔必须与圣经终极真相和主线里程碑呼应，回收节奏错开，不得扎堆；
 6. 严格基于圣经设定，不得与之矛盾；不得提前揭示真相层内容；
-7. 里程碑与伏笔须遵守世界势力盘的登场卷号：未到登场卷的势力只能以传闻形式露出，冲突线不得提前引爆，由你负责把它们编排到合适的里程碑上；
+7. 里程碑与伏笔须遵守世界势力盘的登场卷号：未到登场卷的势力只能以传闻形式露出，冲突线不得提前引爆，由你负责把它们编排到合适的里程碑上；${genreRegisterRule(genre)}
 8. 若为爽文（初始提问含流派/爽点/升级链），全书梗概应参考其主驱动编排：升级链的前/中/后期目标对应故事起承转合，爽点节奏贯穿全书，避免开局爽完后期乏力（参考非强制）。
 【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容：
 {"mainline": "主线里程碑链全文", "subplots": [{"name": "副线名", "theme": "主题", "start_volume": 1, "end_volume": 2}], "foreshadows": [{"content": "伏笔内容", "tier": "短|中|长|终极", "related_chars": ["人物"], "planned_volume": 3, "hints": [{"chapter": 30, "clue": "露出什么"}]}]}`,
@@ -537,6 +557,49 @@ export function fullSynopsisMessages({ bible, brief, totalWords, volumeCount, ch
     {
       role: 'user',
       content: `【小说圣经·世界观】\n${bible?.world || '（暂无）'}\n\n【力量体系绝对规则】\n${(bible?.powerRules || []).join('\n') || '（暂无）'}\n\n【人物锚点】\n${anchors}\n\n【世界地图分层（主线里程碑须沿此阶梯扩张）】\n${mapText}\n\n${worldviewPlanText(bible)}\n\n【圣经已埋线索（长线伏笔须围绕它们展开）】\n${clues}\n\n【用户初始诉求】\n${brief || '（无）'}\n\n请撰写全书全景大纲。`,
+    },
+  ]
+}
+
+// 故事线作家（Storyliner）专用：把「整个故事」当成一篇详尽的剧情通稿一次性讲完（5000-8000 字）。
+// 与 fullSynopsisMessages 的区别：后者产出【结构化】里程碑链(mainline)+副线+伏笔(JSON)，供卷/幕/章拆分；
+// storyline 产出【叙事性】的完整故事走向(纯文本)，像给主编看的「这本书到底讲了个什么故事」全文，
+// 供长篇写作层(Showrunner/Pacer/Writer)随时把握全局走向、防止写着写着偏离主线。
+// 分 5 段生成(开局/发展/中盘/高潮/结局)再拼合：避免单次超长导致质量下降或截断，每段 1000~1600 字。
+export const STORYLINE_SEGMENTS = [
+  { id: 'opening', label: '开局', span: '约前 15%', guide: '主角的初始处境与匮乏、世界开局之地、打破日常的契机、金手指/能力的初现、第一个不得不踏出的理由。写清「故事从谁、在哪、缺什么、被什么打破」开始。' },
+  { id: 'development', label: '发展', span: '约 15%~45%', guide: '主角走出开局之地、能力与视野的第一轮成长、结识的核心伙伴与树立的对手、第一层世界真相的揭开、中段第一个大转折（势力盘第一次扩张）。' },
+  { id: 'midgame', label: '中盘', span: '约 45%~70%', guide: '世界逐级变大后的多方博弈、主角遭遇的最大挫败与信念动摇、金手指的第二层秘密、幕后黑手浮出水面的线索、副线与主线在此交汇纠缠。' },
+  { id: 'climax', label: '高潮', span: '约 70%~90%', guide: '终极真相逼近、各方势力总爆发、主角的终极抉择与最大代价、与终极反派的正面决战、四层伏笔在此集中回收。' },
+  { id: 'ending', label: '结局', span: '约 90%~100%', guide: '决战的余波、主角终极宿命的落点、世界格局的重新洗牌、各条副线与人物弧光的收束、留白或续作钩子。给整个故事一个有分量的句号。' },
+]
+
+// 生成故事线的某一段：传入本段定义 + 已写段落全文(保证连贯) + 圣经/主线背景。
+// prevText 为已拼合的前序段落(首段为空)；返回纯文本叙事(非 JSON)，每段 wordsRange 字。
+export function storylineMessages({ segment, brief, genre, bible, mainline = '', prevText = '', totalWords, volumeCount, wordsRange = '1000~1600' }) {
+  const seg = segment || STORYLINE_SEGMENTS[0]
+  const anchors = (bible?.anchors || []).map((a) => `${a.name}（${a.identity || ''}）`).join('、') || '（暂无）'
+  const mapText = (bible?.mapLayers || []).filter((m) => m?.name).map((m, i) => `第${i + 1}层 ${m.name}（第${m.unlockVolume}卷解锁）：${m.summary || ''}`).join('\n') || '（暂无）'
+  const idx = STORYLINE_SEGMENTS.findIndex((s) => s.id === seg.id)
+  const isLast = idx === STORYLINE_SEGMENTS.length - 1
+  return [
+    {
+      role: 'system',
+      content: `你是一位擅长讲完整故事的小说家。现在要为这本书撰写一份【完整故事线】——像一篇详尽的剧情通稿，把从第 1 章到大结局的整个故事连贯地讲完，供创作团队随时把握全局走向。
+全书规划体量约 ${totalWords || '数十万'} 字、共 ${volumeCount || '若干'} 卷。故事线分 5 段撰写（开局 / 发展 / 中盘 / 高潮 / 结局），你现在只负责其中的【${seg.label}】段（${seg.span}）。
+【本段任务】${seg.guide}${genreRegisterRule(genre)}
+【规则】
+1. 本段写 ${wordsRange} 字的连贯叙事散文（不是大纲条目、不是 JSON），用第三人称讲述剧情走向，可写关键场景、转折、人物动机与情感；
+2. 严格基于小说圣经与已写段落，不得与设定矛盾，不得提前揭示圣经「真相层」里被封锁的终极秘密（除非本段已是高潮/结局且剧情确有需要）；
+3. ${prevText ? '承接已写段落的结尾，保持人物、伏笔、势力状态的连续，不要重复前文已讲的内容，只推进本段该讲的部分；' : '作为开篇，交代清楚故事的起点；'}
+4. ${isLast ? '作为收尾，要收束主要伏笔与人物弧光，给整个故事一个有分量、不仓促的结局；' : '段落结尾留一个自然的悬念或转折，引向下一段，但不要写成「欲知后事」的说书腔；'}
+5. 遵守世界势力盘的登场卷号：未到登场时机的势力只以传闻/伏笔形式露出；
+6. 语言具体、有画面感，避免空泛的「经历了种种磨难」式概括，多写「发生了什么、谁做了什么、导致什么」。
+【输出】直接输出本段叙事正文，不要标题、不要分段编号、不要任何解释性文字。`,
+    },
+    {
+      role: 'user',
+      content: `【题材】${genre || '（未定）'}\n\n【小说圣经·世界观】\n${bible?.world || '（暂无）'}\n\n【力量体系绝对规则】\n${(bible?.powerRules || []).join('\n') || '（暂无）'}\n\n【人物锚点】\n${anchors}\n\n【世界地图分层（故事须沿此阶梯逐级扩张）】\n${mapText}\n\n${worldviewPlanText(bible)}\n\n【全书主线里程碑（已规划，供对齐）】\n${mainline || '（暂无，请据圣经自行铺陈）'}\n\n【用户初始诉求】\n${brief || '（无）'}\n\n${prevText ? `【已写段落（承接它，勿重复）】\n${prevText.slice(-2500)}\n\n` : ''}请撰写【${seg.label}】段（${seg.span}），${wordsRange} 字。`,
     },
   ]
 }
@@ -560,7 +623,7 @@ export function volumesPlanMessages({ bible, mainline, volumeCount, lengths, rol
 6. 必须与主线里程碑、地图分层对齐，不得与圣经设定矛盾；不得提前安排终极真相的揭示；情感走向须符合题材与基调的气质（如暗黑基调不得出现圆满收尾节拍）；
 7. 第 ${volumeCount} 卷为终卷：arc_story 可为各卷暗线与主线总爆发的收束故事，end_hook 填大结局的余韵而非悬念；
 8. 世界势力盘与冲突线是硬约束：每个势力应在其登场卷成为该卷 arc_story/conflict 的主角之一，未到登场卷只能以传闻带过；各卷主打的冲突线应按其 start_volume/end_volume 阶段轮换，不得每卷都打同一条冲突线，不得提前引爆后期冲突；
-9. 若为爽文，分卷应参考其升级链：把前/中/后期目标分配到对应卷，每卷给出该阶段的爽点节奏与升级目标，使各卷爽点递进、不重复同层级套路（参考非强制）。
+9. 若为爽文，分卷应参考其升级链：把前/中/后期目标分配到对应卷，每卷给出该阶段的爽点节奏与升级目标，使各卷爽点递进、不重复同层级套路（参考非强制）。${genreRegisterRule(genre)}
 【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容：
 {"volumes": [{"volume_no": 1, "name": "卷名", "theme": "主题", "conflict": "核心冲突", "arc_story": "本卷具体故事", "gain": "本卷收获", "location": "主舞台", "unlock_layer": 1, "strategy": "本卷战略", "end_hook": "卷末大悬念", "emotion": "情感走向"}]}`,
     },
@@ -854,12 +917,13 @@ function continueSystem(angle) {
   return `你是一位职业小说作者。请根据用户提供的原文与设定，以「${angle.title}」的要求续写接下来的内容。
 【本版本要求】${angle.desc}
 【规则】
-1. 严格紧接原文结尾的最后一个场景/时间点开始续写，不要重复、复述或回顾原文内容。
-2. 保持原文的叙事视角、人称和文风。
-3. 只使用用户提供的世界观、人物卡和大纲中出现的设定与人物；如用户未提供，则只基于原文已出现的人物和设定，不要凭空捏造新人物或新世界观。
-4. 四个版本内容必须各不相同，本版本要在叙述方式、节奏或细节处理上与其他版本拉开差异。
-5. 续写长度约 1500 字。
-6. 直接输出续写正文，不要输出任何解释性文字、标题、前缀或"以下是续写"等引导语。`
+1. 续写起点只有一个：下方原文的最后一句、最后一个场景。严格从那里接着写，不要重复、复述或回顾原文内容。
+2. 背景资料（摘要 / 世界观 / 人物卡 / 大纲 / 故事线）只是参考，它们可能滞后于原文；若与原文结尾不一致，一律以原文结尾为准，严禁把资料里记录的旧进展当成起点再写一遍。
+3. 保持原文的叙事视角、人称和文风。
+4. 只使用用户提供的世界观、人物卡和大纲中出现的设定与人物；如用户未提供，则只基于原文已出现的人物和设定，不要凭空捏造新人物或新世界观。
+5. 四个版本内容必须各不相同，本版本要在叙述方式、节奏或细节处理上与其他版本拉开差异。
+6. 续写长度约 1500 字。
+7. 直接输出续写正文，不要输出任何解释性文字、标题、前缀或"以下是续写"等引导语。`
 }
 
 // 前文摘要：原文过长时，先给前文做摘要，再拼上尾部原文发给续写
@@ -883,19 +947,24 @@ export function summarizeMessages({ text }) {
 
 export function continueMessages({ text, summary, world, characters, outline, timeline, style, habits, forbidden, instruction, index }) {
   const angle = CONTINUE_ANGLES[index] || CONTINUE_ANGLES[0]
+  // 背景资料一律放在原文【之前】：原文结尾是唯一的续写起点，必须留在 user 消息的最后（紧邻任务行）。
+  // 旧版把 ctx 拼在原文之后，且故事线标着「原文已写到的情节，续写紧接其后」——它成了模型就近取的锚点，
+  // 而那份梳理停在「分析原文」的时刻：用户点「纳入原文」后再续写，模型仍从旧进展接着写，于是吐出跟上一次几乎相同的内容，
+  // 非得重跑一次「分析原文」刷新 timeline/outline 才正常。
   let ctx = ''
   if (instruction) ctx += `\n\n【用户续写指令（最高优先级，必须遵循）】\n${instruction}`
   if (summary) ctx += `\n\n【前文摘要（原文较长，仅提供摘要作为上下文）】\n${summary}`
   if (world) ctx += `\n\n【世界观设定（用户提供，可作为续写依据）】\n${world}`
   if (characters) ctx += `\n\n【人物卡（用户提供，可作为续写依据）】\n${characters}`
-  if (outline) ctx += `\n\n【故事大纲（用户提供，可作为续写依据）】\n${outline}`
+  if (outline) ctx += `\n\n【故事大纲（用户提供，仅作参考；可能滞后于下方原文）】\n${outline}`
   if (timeline && timeline.length) {
-    ctx += `\n\n【已有故事线（原文已写到的情节，续写紧接其后）】\n`
+    ctx += `\n\n【已有故事线（分析时点的情节梳理，仅作参考；可能滞后于下方原文，情节进展以原文结尾为准）】\n`
     ctx += timeline.map((t, i) => `${i + 1}. ${t.stage}：${t.summary}`).join('\n')
   }
+  const bg = ctx.trim()
   return [
     { role: 'system', content: continueSystem(angle) + NO_AI_FLAVOR_RULE + styleBlockOf({ style, habits, forbidden }) },
-    { role: 'user', content: `以下是小说原文（请紧接结尾续写）：\n\n${text}${ctx}\n\n请以「${angle.title}」的要求续写。` },
+    { role: 'user', content: `${bg ? `${bg}\n\n` : ''}以下是小说原文（续写起点只有一个：这段原文的最后一句）：\n\n${text}\n\n请以「${angle.title}」的要求，紧接上面原文的结尾续写。` },
   ]
 }
 
@@ -913,28 +982,54 @@ function followupSystem(angle) {
   return `你是一位职业小说作者。请根据用户提供的原文，探索「${angle.title}」这一剧情走向，续写接下来的内容。
 【本版本剧情走向】${angle.desc}
 【规则】
-1. 严格紧接原文结尾的最后一个场景/时间点开始续写，不要重复、复述或回顾原文内容。
-2. 保持原文的世界观、人物性格、叙事视角和文风一致。
-3. 本版本必须在剧情走向、事件发展或人物命运上与其他三个版本有本质区别，不能只是叙述方式或措辞不同。
-4. 只使用原文中已出现的人物和设定，不要凭空捏造新人物或全新世界观；可以基于已有伏笔和人物关系合理发展。
-5. 续写长度约 1500 字。
-6. 直接输出续写正文，不要输出任何解释性文字、标题、前缀或"以下是续写"等引导语。`
+1. 续写起点只有一个：下方原文的最后一句、最后一个场景。严格从那里接着写，不要重复、复述或回顾原文内容。
+2. 背景资料（摘要 / 世界观 / 人物卡 / 大纲 / 故事线）只是参考，它们可能滞后于原文；若与原文结尾不一致，一律以原文结尾为准，严禁把资料里记录的旧进展当成起点再写一遍。
+3. 保持原文的世界观、人物性格、叙事视角和文风一致。
+4. 本版本必须在剧情走向、事件发展或人物命运上与其他三个版本有本质区别，不能只是叙述方式或措辞不同。
+5. 只使用原文中已出现的人物和设定，不要凭空捏造新人物或全新世界观；可以基于已有伏笔和人物关系合理发展。
+6. 续写长度约 1500 字。
+7. 直接输出续写正文，不要输出任何解释性文字、标题、前缀或"以下是续写"等引导语。`
 }
 
 export function followupMessages({ text, summary, world, characters, outline, timeline, style, habits, forbidden, index }) {
   const angle = FOLLOWUP_ANGLES[index] || FOLLOWUP_ANGLES[0]
+  // 同 continueMessages：背景资料前置，原文收尾，避免滞后的故事线抢走续写起点
   let ctx = ''
   if (summary) ctx += `\n\n【前文摘要（原文较长，仅提供摘要作为上下文）】\n${summary}`
-  if (world) ctx += `\n\n【世界观设定】\n${world}`
-  if (characters) ctx += `\n\n【人物卡】\n${characters}`
-  if (outline) ctx += `\n\n【故事大纲】\n${outline}`
+  if (world) ctx += `\n\n【世界观设定（仅作参考；可能滞后于下方原文）】\n${world}`
+  if (characters) ctx += `\n\n【人物卡（仅作参考）】\n${characters}`
+  if (outline) ctx += `\n\n【故事大纲（仅作参考；可能滞后于下方原文）】\n${outline}`
   if (timeline && timeline.length) {
-    ctx += `\n\n【已有故事线】\n`
+    ctx += `\n\n【已有故事线（分析时点的情节梳理，仅作参考；可能滞后于下方原文，情节进展以原文结尾为准）】\n`
     ctx += timeline.map((t, i) => `${i + 1}. ${t.stage}：${t.summary}`).join('\n')
   }
+  const bg = ctx.trim()
   return [
     { role: 'system', content: followupSystem(angle) + NO_AI_FLAVOR_RULE + styleBlockOf({ style, habits, forbidden }) },
-    { role: 'user', content: `以下是小说原文（请紧接结尾续写）：\n\n${text}${ctx}\n\n请以「${angle.title}」的剧情走向续写。` },
+    { role: 'user', content: `${bg ? `${bg}\n\n` : ''}以下是小说原文（续写起点只有一个：这段原文的最后一句）：\n\n${text}\n\n请以「${angle.title}」的剧情走向，紧接上面原文的结尾续写。` },
+  ]
+}
+
+// ---------- 纳入原文前的定向修订 ----------
+// 用户在「纳入原文」弹窗里对某个续写版本写下修改想法，只改想法指到的地方，其余一字不动。
+// 与 continueMessages 的区别：这不是续写而是就地改写既有段落，所以待修订正文必须收尾、修改想法前置且标为最高优先级；
+// 上文语境只作衔接依据（保持人称/视角/称谓连续），明确禁止被改写。
+const INCORPORATE_REVISE_SYSTEM = `你是一位职业小说修改编辑。用户会给你一段【待修订正文】和一条【修改想法】，请按想法就地改写这段正文。
+【规则】
+1. 只改想法明确指到的地方：想法没提的句子、段落、措辞与标点一律原样保留，严禁顺手润色、重写或调整未涉及的部分；
+2. 改完仍须与【上文语境】无缝衔接：人称、视角、时态、称谓、语气与既有情节保持连续，不得引入语境里没有的人物、设定或事实；
+3. 保持原有文风与叙事节奏，不要改变篇幅量级（除非想法明确要求扩写或删减）；
+4. 想法含糊或有多种改法时，选最贴近字面、改动最小的那种，不要自行加戏；
+5. 直接输出修订后的完整正文，不要输出解释、标题、修改说明或"以下是修订稿"之类引导语，也不要用序号、小标题或 markdown 标记。`
+
+export function incorporateReviseMessages({ context, text, note, style, habits, forbidden }) {
+  const bg = [
+    context ? `【上文语境（待修订正文紧接其后，仅供保持连贯，不要改写它）】\n${context}` : '',
+    note ? `【修改想法（最高优先级，必须落实）】\n${note}` : '',
+  ].filter(Boolean).join('\n\n')
+  return [
+    { role: 'system', content: INCORPORATE_REVISE_SYSTEM + NO_AI_FLAVOR_RULE + styleBlockOf({ style, habits, forbidden }) },
+    { role: 'user', content: `${bg ? `${bg}\n\n` : ''}【待修订正文】\n${text}\n\n请按上面的修改想法改写这段正文，只动该动的地方，其余原样保留，直接输出修订后的完整正文。` },
   ]
 }
 
@@ -1181,7 +1276,7 @@ export function consistencyCheckMessages({ world, characters, outline, foreshado
 //   这些块里装着全书走向与后续卷信息，是剧情漂移与提前揭示的主要来源；详纲已把本章该写什么写死，留着只会稀释它。
 //   tail 由调用方从 2000 字压到 800 字，worldBlockText/volumeStrategy 由调用方走 rulesOnly/lean 档。
 //   outlineDriven=false（默认）时上下文组装与改造前逐字节一致，可 A/B 对比。
-export function longFormDraftMessages({ chapterNo, synopsis, world, worldBlockText, characters, participants, outline, longTerm, rollingSummary, prevChapterSummary, tail, foreshadows, passages, instruction, forbidden, storylines, povRule, scenePlan, chronicles, style, habits, rules, reference, volumeStrategy, chapterPosition, samples, multiScene, upcoming, withTitle = true, chapterTask, lastScene, consistencyCarryover = [], factLedger = null, chapterWords = 2000, sceneCount = 1, sceneWords = 0, outlineDriven = false }) {
+export function longFormDraftMessages({ chapterNo, synopsis, world, worldBlockText, characters, participants, outline, longTerm, rollingSummary, prevChapterSummary, tail, foreshadows, passages, instruction, forbidden, storylines, povRule, scenePlan, chronicles, style, habits, rules, reference, volumeStrategy, chapterPosition, samples, multiScene, upcoming, withTitle = true, chapterTask, lastScene, consistencyCarryover = [], factLedger = null, chapterWords = 2000, sceneCount = 1, sceneWords = 0, outlineDriven = false, actGoal = '', genre = '' }) {
   const inScene = Array.isArray(participants) && participants.length ? new Set(participants) : null
   const cardOf = (c) => `${c.name}${c.aliases ? `（又名：${c.aliases}）` : ''}：${[c.identity, c.personality, c.status ? `当前状态：${c.status}` : ''].filter(Boolean).join('，')}`
   const chars = (characters || []).filter((c) => !inScene || inScene.has(c.name)).map(cardOf).join('\n')
@@ -1216,6 +1311,9 @@ export function longFormDraftMessages({ chapterNo, synopsis, world, worldBlockTe
   // 细纲驱动模式换标签：这块内容已经是 500~700 字详纲，标签必须跟着升级为「唯一剧情依据」，与规则 3 互相印证
   if (outline) ctx += `\n\n${outlineDriven ? '【本章详纲（本章唯一剧情依据：只写详纲给定场景的过程，详纲未写的事件一律不得出现）】' : '【本章细纲（只写本窗口内的剧情节点，后续章节的剧情节点一律留给后续章节，严禁提前写）】'}\n${outline}`
   if (volumeStrategy) ctx += `\n\n【本卷战略（本章属于本卷，写作须服务于它，卷末才允许落在卷级钩子上）】\n${volumeStrategy}`
+  // 幕级目标（Pacer agent 的 actContext 产出）：卷战略之下、章定位之上的一层节奏坐标。
+  // 空串时整块不注入，输出与改造前逐字节一致（§14 可控开关）。
+  if (actGoal) ctx += `\n\n【本幕目标（本章属于本幕，写作须朝这个目标推进，幕末才允许收束本幕冲突）】\n${actGoal}`
   if (chapterPosition) ctx += `\n\n【本章结构定位：${chapterPosition}】本章叙事节奏须匹配该定位——起=铺垫开局蓄势，承=推进发展，转=制造方向性变化与冲突升级，合=阶段收束落钩，过渡=衔接换挡；不得写成与定位不符的节奏（如「转」章毫无转折、「承」章抢收结局）。`
   if (!outlineDriven && longTerm) ctx += `\n\n【长时记忆（全书重要事件沉淀，写较早章节时以此为准）】\n${longTerm}`
   if (!outlineDriven && rollingSummary) ctx += `\n\n【全书滚动摘要（近期剧情回顾）】\n${rollingSummary}`
@@ -1260,7 +1358,7 @@ export function longFormDraftMessages({ chapterNo, synopsis, world, worldBlockTe
           withTitle
             ? '第一行先输出本章标题（10 字以内，概括本章核心事件或悬念，不带"第X章"前缀、不加引号），第二行起输出正文；除此之外不要输出任何解释性文字；'
             : '直接输出正文，不要输出标题与任何解释性文字；'
-        }
+        }正文按自然段落分行，段与段之间空一行，每段只讲一个意思；严禁把整章挤成一整块不换行的文字，也不要用序号、小标题或 markdown 标记来分段；
 5. 控制叙事节奏：${multiScene ? '只写当前场景，不压缩过程、不跳过应展开的对话与动作；' : '本章只推进 1~2 个关键事件，不要压缩过程、跳过应展开的内容；'}严格遵守伏笔保护期，保护期内的伏笔只能铺垫渲染，绝不能回收或揭示答案。
 6. 叙事视角：以主角线为主；${povRule || '如需使用非主角视角，连续不得超过 3~5 章，篇幅也应明显短于主角线。'}
 7. 信息揭示层级：本章只允许揭示本章细纲钩子所允许层级的信息——属于后续章节的揭秘点（具体代码/编号、身份确认、NPC 明示真相、实质性异象等）本章只能以模糊暗示呈现（欲言又止的眼神、说不出口的半句话、一闪而过的异常细节），严禁通过对话、道具或异象实质性揭示；
@@ -1270,6 +1368,7 @@ export function longFormDraftMessages({ chapterNo, synopsis, world, worldBlockTe
 ${rule11}
 12. 严禁文本重复：同一句话、同一段落或高度相似的描写不得在本章内重复出现；同一个比喻、意象、动作刻画、口头禅或心理独白，全章只允许出现一次——即使换了措辞或句式，只要内核相同（反复用同一个比喻去写同一件事、反复刻画同一个动作细节、反复念叨同一句师门教诲或口头禅、反复描写同一处景物）也算严重重复；跨场景需要呼应时，必须换用全新的、不同的意象与表达，严禁把前文已经用过的比喻或描写改几个字再写一遍。${rule13}` +
         NO_AI_FLAVOR_RULE +
+        genreRegisterRule(genre) +
         styleBlockOf({ style, habits, forbidden, rules, samples }),
     },
     { role: 'user', content: `前文尾部（请紧接其后续写）：\n\n${tail}${ctx}${carryoverBlock(consistencyCarryover, '上一章遗留的连续性硬问题（本章必须修正或避免重犯）')}${lastScene ? '\n\n【末场景强制收束】这是本章最后一个场景：写完本场景即全文结束，必须落在本章最后节点的悬念上立即收尾，严禁再写任何超出本场景的内容，尤其严禁触发任何属于后续章节的关键事件（新的惩罚机制/抑制协议、新能力觉醒、新人物登场等本章大纲未列的节点）。落笔前完成止步自检（规则10）：若已越过本章最后节点，删去超出部分，收在节点的悬念上。' : ''}\n\n请撰写第 ${chapterNo} 章正文。` },
@@ -1299,7 +1398,7 @@ export function sceneCountRange(chapterWords) {
   const range = hint ? (hint >= 5 ? '5' : `${hint}~${hint + 1}`) : '3~5'
   return { hint, range, min: hint || 3 }
 }
-export function scenePlanMessages({ chapterNo, synopsis, outline, rollingSummary, prevChapterSummary, storylines, foreshadows, povRule, instruction, characters, chapterPosition, chapterTask, chapterWords, volumeStory, factSeed, outlineDriven = false }) {
+export function scenePlanMessages({ chapterNo, synopsis, outline, rollingSummary, prevChapterSummary, storylines, foreshadows, povRule, instruction, characters, chapterPosition, chapterTask, chapterWords, volumeStory, factSeed, outlineDriven = false, genre = '' }) {
   const roster = (characters || []).map((c) => c.name).filter(Boolean).join('、') || '（暂无）'
   const hooks = (foreshadows || [])
     .map((f) => {
@@ -1327,7 +1426,7 @@ export function scenePlanMessages({ chapterNo, synopsis, outline, rollingSummary
   if (factSeed) ctx += `\n\n【本章事实台账草稿（据此细化 enter/exit/advance 与 factLedger，不得新造道具/数字/设定）】\n${factSeed}`
   const { hint, range, min } = sceneCountRange(chapterWords)
   return [
-    { role: 'system', content: scenePlanSystem(range, min) },
+    { role: 'system', content: scenePlanSystem(range, min) + genreRegisterRule(genre) },
     { role: 'user', content: `请为长篇小说的第 ${chapterNo} 章规划场景清单。${ctx}\n\n【人物名单（participants 只能从中选取）】\n${roster}` },
   ]
 }
@@ -1575,7 +1674,7 @@ export function inspirationMessages(genre, worldview, tropes, { mode = 'free', s
         role: 'system',
         content: `你是一位资深小说策划，专攻「${genre}」题材。下面给出该题材的世界模板（背景参考）。请构思 5 个彼此差异足够大的小说开局选题，遵循正常叙事法则：人物动机合理、冲突循序渐进、节奏张弛有度，不强制金手指与打脸桥段，反派也有自己的立场与逻辑。
 【世界模板（背景参考）】
-${worldview}
+${worldview}${genreRegisterRule(genre)}
 每个选题写清三件事：① 主角人设（姓名 + 身份 + 1~2 个核心关系）；② 背景与核心冲突（一句话世界观 + 主角要解决的困境）；③ 开局钩子（第一个抓住读者的场景或悬念）。
 【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容：
 {"ideas":[{"title":"选题名（12 字内）","brief":"完整初始提问文本"}]}
@@ -1604,7 +1703,7 @@ brief 必须按此模板写成一段话：
       role: 'system',
       content: `你是一位深谙爽文套路的资深网文策划，专攻「${genre}」题材的爽文选题。下面给出该题材世界模板（背景参考）与市面常见爽文元素库（参考素材），请自主参考、组合、甚至突破，构思 5 个彼此差异足够大的爽文开局选题。
 【世界模板（背景参考，权重低）】
-${worldview}${tropeBlock}${stanceBlock}${seedBlock}
+${worldview}${genreRegisterRule(genre)}${tropeBlock}${stanceBlock}${seedBlock}
 【爽文元素库（参考素材，自主取用，非硬约束）】
 · 主驱动与升级链（每个选题建议选一种主驱动，并按其升级链构思前/中/后期目标）：
 ${drives}
@@ -1645,7 +1744,7 @@ export function inspirationExpandMessages({ brief, genre, worldview, stance = nu
       role: 'system',
       content: `你是一位资深网文策划兼设定校订编辑。请把下面这个「${genre}」灵感选题${task}成一段完整、自洽、可直接用于开书的初始提问。
 【该题材完整世界模板（含力量体系境界阶梯，校准依据）】
-${worldview}${stanceBlock}${noteBlock}
+${worldview}${genreRegisterRule(genre)}${stanceBlock}${noteBlock}
 【待扩充的灵感选题】
 ${brief}
 【扩充要求】

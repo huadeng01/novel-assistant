@@ -162,7 +162,7 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       {/* 小白上手引导 */}
-      <section className="rounded-2xl bg-[#fbf8ef] p-6 shadow-sm">
+      <section className="glass-card rounded-2xl bg-paper p-6 shadow-sm">
         <h2 className="text-base font-bold"><Ic n="rocket" /> 三步开始使用</h2>
         <ol className="mt-4 space-y-3 text-sm text-stone-600">
           <li className="flex gap-3">
@@ -199,7 +199,7 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
       </section>
 
       {/* 写作引擎选择：全站生成请求（写作/规划/归档/重写）二选一，GLM 审核引擎独立不受影响 */}
-      <section className="rounded-2xl bg-[#fbf8ef] p-6 shadow-sm">
+      <section className="glass-card rounded-2xl bg-paper p-6 shadow-sm">
         <h2 className="text-base font-bold"><Ic n="shuffle" /> 写作引擎</h2>
         <p className="mt-2 text-sm text-stone-500">全站写作类请求走当前选中的引擎，两个 Key 各自独立、可随时切换；章节审核始终用下方的智谱 GLM（可选）。</p>
         <div className="mt-3 flex gap-3">
@@ -222,7 +222,7 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
       </section>
 
       {/* Key 管理：DeepSeek */}
-      <section className="rounded-2xl bg-[#fbf8ef] p-6 shadow-sm">
+      <section className="glass-card rounded-2xl bg-paper p-6 shadow-sm">
         <h2 className="text-base font-bold"><Ic n="key" /> DeepSeek API Key</h2>
         <div className="mt-4 flex flex-col gap-3 sm:flex-row">
           <input
@@ -257,7 +257,7 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
       </section>
 
       {/* Key 管理：通义千问（Qwen，阿里云百炼，与 DeepSeek 二选一作为写作引擎） */}
-      <section className="rounded-2xl bg-[#fbf8ef] p-6 shadow-sm">
+      <section className="glass-card rounded-2xl bg-paper p-6 shadow-sm">
         <h2 className="text-base font-bold"><Ic n="key" /> 通义千问 API Key（可选，与 DeepSeek 二选一）</h2>
         <p className="mt-2 text-sm text-stone-500">
           走阿里云百炼（DashScope）OpenAI 兼容接口。在上方「写作引擎」选中通义千问后，全站写作类请求改用此 Key；模型 ID 可自定义，默认 {QWEN_DEFAULT_MODEL}。
@@ -308,7 +308,7 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
       </section>
 
       {/* 智谱 GLM Key（审核引擎，可选） */}
-      <section className="rounded-2xl bg-[#fbf8ef] p-6 shadow-sm">
+      <section className="glass-card rounded-2xl bg-paper p-6 shadow-sm">
         <h2 className="text-base font-bold"><Ic n="search" /> 智谱 GLM API Key（章节审核用，可选）</h2>
         <p className="mt-2 text-sm text-stone-500">
           长篇写作中每写满 5 章可解锁一次剧情连贯性审核，由 GLM-4.7-Flash 执行（只查硬性矛盾，不挑刺）；写作本身仍用 DeepSeek，两个 Key 互不影响。
@@ -359,7 +359,7 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
       </section>
 
       {/* 智谱 Embedding-3 可选开关：与上方审核共用同一把智谱 Key，按量计费极便宜；不启用则前文召回用免费关键词检索 */}
-      <section className="rounded-2xl bg-[#fbf8ef] p-6 shadow-sm">
+      <section className="glass-card rounded-2xl bg-paper p-6 shadow-sm">
         <h2 className="text-base font-bold"><Ic n="pulse" /> 语义向量召回（可选，智谱 Embedding-3）</h2>
         <p className="mt-2 text-sm text-stone-500">
           长篇写作生成初稿时，前文片段召回默认用不花钱的关键词检索。开启后改用语义向量召回（同一把智谱 Key，Embedding-3 约 0.5 元/百万 tokens，一本书全部章节向量化通常不到一毛钱，向量会缓存不重复计费），对语义相近但用词不同的前文召回更准。服务异常时自动降级回关键词检索，不影响写作。
@@ -380,7 +380,7 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
       </section>
 
       {/* 数据管理 */}
-      <section className="rounded-2xl bg-[#fbf8ef] p-6 shadow-sm">
+      <section className="glass-card rounded-2xl bg-paper p-6 shadow-sm">
         <h2 className="text-base font-bold"><Ic n="save" /> 数据备份</h2>
         <p className="mt-2 text-sm text-stone-500">
           你的小说和文风档案只存在当前设备的浏览器里。换设备或清理浏览器缓存前，请先导出备份。

@@ -24,7 +24,7 @@ export default function DarkThreadPanel({ project, saveProject }) {
   const remove = (id) => save(threads.filter((t) => t.id !== id))
 
   return (
-    <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+    <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-base font-bold"><Ic n="thread" /> 暗线追踪台账 · 遗忘预警门</h2>

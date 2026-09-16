@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Ic from './Ic'
 import Select from './Select'
-import { chatJSON } from '../lib/llm.js'
 import { allGenres, getWorldview, worldviewText } from '../lib/worldviews/index.js'
-import { POWER_FANTASY_STANCES, inspirationSeed, inspirationMessages, inspirationExpandMessages } from '../lib/prompts'
+import { POWER_FANTASY_STANCES, inspirationSeed } from '../lib/prompts'
+import { museAgent } from '../lib/agents/index.js'
 
 // 灵感弹窗：内置各题材世界模板 + 爽文元素库（驱动/爽点/流派/金手指），AI 自主参考组合生成灵感。
 // 立意下拉承载三种模式：常规小说（不注入爽文库）/ 自由爽文（注入元素库无倾向）/ 6 个立意倾向（软参考）。
@@ -38,9 +38,7 @@ export default function InspirationModal({ genre, apiKey, onPick, onClose }) {
     if (loading) return
     setLoading(true); setErr(''); setIdeas([]); setView('list')
     try {
-      const msgs = inspirationMessages(sel, worldviewText(g, 'brief'), tropes, { mode, stance, seed })
-      const data = await chatJSON({ apiKey, messages: msgs, temperature: 1.15 })
-      const list = Array.isArray(data?.ideas) ? data.ideas.filter((it) => it && it.brief) : []
+      const { ideas: list } = await museAgent.run({ apiKey, genre: sel, worldview: worldviewText(g, 'brief'), tropes, mode, stance, seed })
       if (list.length) setIdeas(list)
       else setErr('AI 返回格式未识别，请点「再生成一批」重试。')
     } catch (e) { setErr(e?.message || '生成失败，请检查 API Key / 模型配置。') }
@@ -51,9 +49,7 @@ export default function InspirationModal({ genre, apiKey, onPick, onClose }) {
   const expand = async (baseBrief, note) => {
     setExpandLoading(true); setExpandErr('')
     try {
-      const msgs = inspirationExpandMessages({ brief: baseBrief, genre: sel, worldview: worldviewText(g, 'full'), stance, userNote: note })
-      const data = await chatJSON({ apiKey, messages: msgs, temperature: 0.8 })
-      const b = data?.brief
+      const { brief: b } = await museAgent.expand({ apiKey, brief: baseBrief, genre: sel, worldview: worldviewText(g, 'full'), stance, userNote: note })
       if (b && String(b).trim()) setExpandBrief(String(b).trim())
       else setExpandErr('AI 返回格式未识别，请重试。')
     } catch (e) { setExpandErr(e?.message || '扩充失败，请检查 API Key / 模型配置。') }
@@ -85,12 +81,13 @@ export default function InspirationModal({ genre, apiKey, onPick, onClose }) {
   ]
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/40 p-4" onClick={onClose} role="dialog" aria-modal="true">
-      <div ref={panelRef} className="w-full max-w-2xl overflow-y-auto rounded-2xl border border-stone-200 bg-white shadow-xl" style={{ maxHeight: 'min(86vh, 760px)' }} onClick={(e) => e.stopPropagation()}>
+    <div className="glass-scrim fixed inset-0 z-50 flex items-center justify-center bg-stone-900/40 p-4" onClick={onClose} role="dialog" aria-modal="true">
+      <div ref={panelRef} className="glass-modal w-full max-w-2xl overflow-y-auto rounded-2xl border border-stone-200 bg-white shadow-xl" style={{ maxHeight: 'min(86vh, 760px)' }} onClick={(e) => e.stopPropagation()}>
         <div className="border-b border-stone-200 px-5 py-3">
           <div className="flex items-start justify-between gap-3">
             <div className="flex items-center gap-2 text-amber-600">
               <Ic n="idea" /><h3 className="font-serif text-lg">灵感题材</h3>
+              <span className="ml-0.5 hidden shrink-0 rounded-md bg-amber-100/70 px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-amber-700 sm:inline">Muse 灵感选题师</span>
             </div>
             <button type="button" onClick={onClose} aria-label="关闭" className="rounded-lg p-1.5 text-stone-400 hover:bg-stone-100 hover:text-stone-700"><Ic n="close" /></button>
           </div>

@@ -3,28 +3,52 @@
 // 完整世界观（势力/冲突/底牌含登场时机）由用户选定灵感后在开书流程中由 AI 自动生成，存入书籍圣经，不在本库；
 // 本库的 factions/geography 等字段只给「该题材通常长什么样」的类型学参考，不是某本书的具体设定。
 // 注入分两档（见 worldviewText）：brief 给灵感选题（维持低权重参考定位、不膨胀），full 给圣经生成。
-import 玄幻 from './玄幻.js'
-import 仙侠 from './仙侠.js'
-import 修真 from './修真.js'
-import 都市 from './都市.js'
-import 现实 from './现实.js'
-import 科幻 from './科幻.js'
-import 末世 from './末世.js'
-import 奇幻 from './奇幻.js'
-import 悬疑 from './悬疑.js'
-import 推理 from './推理.js'
-import 恐怖 from './恐怖.js'
-import 言情 from './言情.js'
-import 古代言情 from './古代言情.js'
-import 历史 from './历史.js'
-import 武侠 from './武侠.js'
-import 军事 from './军事.js'
-import 游戏 from './游戏.js'
-import 无限流 from './无限流.js'
-import 竞技 from './竞技.js'
-import 轻小说 from './轻小说.js'
+// 文件名一律用拼音：中文文件名在 Mac 打包 → Windows 解压时会因 zip 未设 UTF-8 标志位而变成乱码，
+// 乱码文件名会让下面的 import 路径失效、整个项目跑不起来。键名（BUILTIN_WORLDVIEWS）仍保留中文题材名，
+// UI 显示、getWorldview(genre) 查找、localStorage 里的用户覆盖数据全都按中文键走，故此处改名不影响任何既有数据。
+import xuanhuan from './xuanhuan.js'  // 玄幻
+import xianxia from './xianxia.js'  // 仙侠
+import xiuzhen from './xiuzhen.js'  // 修真
+import dushi from './dushi.js'  // 都市
+import xianshi from './xianshi.js'  // 现实
+import kehuan from './kehuan.js'  // 科幻
+import moshi from './moshi.js'  // 末世
+import qihuan from './qihuan.js'  // 奇幻
+import xuanyi from './xuanyi.js'  // 悬疑
+import tuili from './tuili.js'  // 推理
+import kongbu from './kongbu.js'  // 恐怖
+import yanqing from './yanqing.js'  // 言情
+import gudaiYanqing from './gudai-yanqing.js'  // 古代言情
+import lishi from './lishi.js'  // 历史
+import wuxia from './wuxia.js'  // 武侠
+import junshi from './junshi.js'  // 军事
+import youxi from './youxi.js'  // 游戏
+import wuxianliu from './wuxianliu.js'  // 无限流
+import jingji from './jingji.js'  // 竞技
+import qingxiaoshuo from './qingxiaoshuo.js'  // 轻小说
 
-export const BUILTIN_WORLDVIEWS = { 玄幻, 仙侠, 修真, 都市, 现实, 科幻, 末世, 奇幻, 悬疑, 推理, 恐怖, 言情, 古代言情, 历史, 武侠, 军事, 游戏, 无限流, 竞技, 轻小说 }
+export const BUILTIN_WORLDVIEWS = {
+  玄幻: xuanhuan,
+  仙侠: xianxia,
+  修真: xiuzhen,
+  都市: dushi,
+  现实: xianshi,
+  科幻: kehuan,
+  末世: moshi,
+  奇幻: qihuan,
+  悬疑: xuanyi,
+  推理: tuili,
+  恐怖: kongbu,
+  言情: yanqing,
+  古代言情: gudaiYanqing,
+  历史: lishi,
+  武侠: wuxia,
+  军事: junshi,
+  游戏: youxi,
+  无限流: wuxianliu,
+  竞技: jingji,
+  轻小说: qingxiaoshuo,
+}
 
 const LS_KEY = 'na_worldview_overrides' // 用户修改/新增的题材世界模板（覆盖内置，不污染内置文件；旧版数据缺字段按空串降级，见 getWorldview）
 

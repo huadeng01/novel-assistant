@@ -55,9 +55,44 @@
   --shadow-md: 0 6px 18px -6px rgb(38 34 24 / 0.12);
   --shadow-lg: 0 12px 30px -10px rgb(38 34 24 / 0.16);
 
-  /* 纸页式小圆角：稿纸与书页不是软糖 */
-  --radius-xl: 0.45rem;
-  --radius-2xl: 0.7rem;
+  /* 纸页式圆角：比软糖克制，但比稿纸柔和 —— 玻璃表面的折射感需要一点弧度才不生硬 */
+  --radius-xl: 0.7rem;
+  --radius-2xl: 1rem;
+
+  /* ---------- 磨砂玻璃 token（浅色玻璃：底色仍是宣纸，只是变通透） ----------
+     三档透明度对应三种用途，越靠上层的表面越实（可读性优先）：
+     modal 0.78 > panel 0.68 > card 0.56 > input 0.46 */
+  --glass-blur: 20px;                  /* 模糊半径：温柔路线取偏大值，糊掉背景细节而非只做雾面 */
+  --glass-saturate: 150%;              /* 提饱和：让透出来的宣纸暖调更活，避免发灰 */
+  --glass-bg-card: rgb(255 253 247 / 0.56);
+  --glass-bg-panel: rgb(255 253 247 / 0.68);
+  --glass-bg-modal: rgb(255 253 247 / 0.78);
+  --glass-bg-input: rgb(255 253 247 / 0.46);
+  --glass-border: rgb(255 255 255 / 0.66);      /* 顶光描边：玻璃最亮的一条边 */
+  --glass-border-soft: rgb(255 255 255 / 0.4);  /* hover 前的常态描边 */
+  --glass-hi: rgb(255 255 255 / 0.72);          /* inset 顶部高光，模拟边缘折射 */
+  --glass-lo: rgb(38 34 24 / 0.035);            /* inset 底部暗边，让玻璃有厚度 */
+  --glass-shadow: 0 10px 34px -14px rgb(38 34 24 / 0.22);
+  --glass-shadow-lg: 0 24px 60px -24px rgb(38 34 24 / 0.3);
+  --glass-ring: 0 0 0 3px rgb(194 64 42 / 0.12); /* 聚焦环：朱砂，与既有 focus-visible 同色 */
+
+  /* 纸墨语义 token：收纳散落的硬编码色值（如 header 的 #fbf8ef、正文 #262218），统一可维护。
+     Tailwind v4 下 --color-* 会自动生成 bg-paper / text-ink 等工具类，供阶段7 清理硬编码时替换。 */
+  --color-paper: #fbf8ef;        /* 提亮宣纸：header / 卡片底 */
+  --color-paper-soft: #f3eee0;   /* 正文宣纸底 */
+  --color-ink: #262218;          /* 墨黑正文 */
+
+  /* agent 角色色（守单一强调色，不引入新色相）：朱砂创造 / 黛青审视 / 墨黑统筹，编剧团队面板用。 */
+  --color-agent-generate: #c2402a;     /* 朱砂 */
+  --color-agent-critic: #3d5f6a;       /* 黛青 */
+  --color-agent-orchestrator: #403a2f; /* 墨黑 */
+
+  /* z-index 标度：替代散落的任意值（如 9999），header / 面板 / 遮罩 / 模态层层递进。 */
+  --z-header: 20;
+  --z-panel: 30;
+  --z-overlay: 40;
+  --z-modal: 50;
+  --z-grain: 100;   /* 颗粒 overlay：高于一切，pointer-events:none 不吃交互 */
 }
 
 html {
@@ -69,11 +104,16 @@ body {
   /* 正文用宋体（网页端为思源宋体），读与写都接近纸面 */
   font-family: "Noto Serif SC", "Songti SC", "STSong", "PingFang SC", serif;
   letter-spacing: 0.02em;
-  /* 宣纸底：暖象牙底色 + 两抹极淡的纤维光斑 */
+  /* 宣纸底：主色 #f3eee0 不变，光斑由两抹加到四抹。
+     磨砂玻璃要「糊得出东西」才成立 —— 均匀纯色的背景上 backdrop-filter 看不出任何差别，
+     所以这里用大半径、低对比的柔光斑制造色彩起伏（象牙 / 极淡朱砂 / 极淡黛青 / 纸纤维暗角），
+     全部取自既有主题色相，不引入新颜色，也不改主背景色。 */
   background-color: #f3eee0;
   background-image:
-    radial-gradient(46rem 26rem at 14% -8%, rgb(252 249 238 / 0.9), transparent 62%),
-    radial-gradient(40rem 24rem at 92% 6%, rgb(233 224 199 / 0.5), transparent 55%);
+    radial-gradient(46rem 30rem at 12% -10%, rgb(253 250 240 / 0.95), transparent 60%),
+    radial-gradient(38rem 26rem at 94% 2%, rgb(233 214 199 / 0.55), transparent 58%),
+    radial-gradient(42rem 30rem at 78% 92%, rgb(205 220 221 / 0.42), transparent 60%),
+    radial-gradient(34rem 24rem at 4% 68%, rgb(226 217 190 / 0.4), transparent 62%);
   background-attachment: fixed;
   color: #262218;
 }
@@ -153,4 +193,237 @@ select:focus {
 select:disabled {
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+/* ===== 阶段7 表面精修（redesign skill：grain / glass / skeleton / 减动效）===== */
+
+/* 极淡颗粒 overlay：宣纸纤维感，打破纯平数字味。固定全屏、pointer-events:none 不吃交互，
+   高 z 让其覆于内容之上但透明度极低（0.028），只增质感不扰阅读。 */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-grain);
+  pointer-events: none;
+  opacity: 0.028;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23g)'/%3E%3C/svg%3E");
+}
+
+/* 真·玻璃拟态（sticky header 用）：半透底 + 背景模糊 + 1px 内描边高光 + 极淡内阴影，模拟边缘折射。
+   header 是全站唯一常驻的玻璃表面，透明度取面板档，既能透出滚动内容又不至于让标题糊成一团。 */
+.glass {
+  background-color: var(--glass-bg-panel);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  box-shadow: inset 0 1px 0 0 var(--glass-hi), inset 0 -1px 0 0 var(--glass-lo), 0 2px 14px -6px rgb(38 34 24 / 0.14);
+}
+
+/* 骨架屏：宣纸色底 + 微光扫过，替代纯文字/转圈 loading（生成、agent 运行、列表加载用）。 */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background-color: var(--color-stone-100);
+  border-radius: var(--radius-xl);
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background-image: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.55), transparent);
+  animation: skeleton-shimmer 1.6s ease-in-out infinite;
+}
+@keyframes skeleton-shimmer {
+  100% { transform: translateX(100%); }
+}
+
+/* 无障碍：用户偏好减少动效时，关掉扫光、平滑滚动与按钮位移。 */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .skeleton::after { animation: none; }
+  button:hover:not(:disabled), button:active:not(:disabled) { transform: none; }
+}
+
+/* ==========================================================================
+   磨砂玻璃表面层（Glassmorphism · 浅色温柔版）
+   --------------------------------------------------------------------------
+   为什么这些规则不写进 @layer：CSS 级联层里「未分层样式」优先级高于所有已分层样式，
+   Tailwind v4 的工具类全部位于 @layer utilities。写在层外，.glass-card 的
+   background-color 就能盖掉 JSX 里同时存在的 bg-paper / bg-white / bg-stone-50，
+   不必为 149 个输入控件和 51 个卡片逐个改 className。
+   风格卡红线遵守情况：
+     · 不做嵌套玻璃 —— bg-stone-50 那类卡片内嵌次级块不加玻璃类，最多两层；
+     · 大面积长段落正文用实底 —— .glass-modal / .glass-panel 取 0.78 高不透明度；
+     · 玻璃之间留间隙 —— 由既有 space-y-* / gap-* 保证，本层不动布局。
+   ========================================================================== */
+
+/* 玻璃基类：所有玻璃表面共享的底 + 模糊 + 折射高光。
+   hover 只增强模糊与描边（风格卡：玻璃 hover 禁止缩放）。 */
+.glass-card,
+.glass-panel,
+.glass-modal,
+.glass-input {
+  background-color: var(--glass-bg-card);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  border-color: var(--glass-border-soft);
+  box-shadow:
+    inset 0 1px 0 0 var(--glass-hi),
+    inset 0 -1px 0 0 var(--glass-lo),
+    var(--glass-shadow);
+  transition: background-color 0.25s ease-out, border-color 0.25s ease-out,
+    box-shadow 0.25s ease-out, -webkit-backdrop-filter 0.25s ease-out,
+    backdrop-filter 0.25s ease-out, color 0.2s ease, transform 0.15s ease;
+}
+
+/* 卡片：工作台上的主要容器（原 rounded-2xl bg-paper shadow-sm） */
+.glass-card:hover {
+  border-color: var(--glass-border);
+  box-shadow:
+    inset 0 1px 0 0 var(--glass-hi),
+    inset 0 -1px 0 0 var(--glass-lo),
+    var(--glass-shadow),
+    0 0 0 1px rgb(255 255 255 / 0.3);
+}
+
+/* 侧滑抽屉 / 浮起面板：比卡片更实一档，因为下面压着整页内容 */
+.glass-panel {
+  background-color: var(--glass-bg-panel);
+  box-shadow:
+    inset 0 1px 0 0 var(--glass-hi),
+    inset 0 -1px 0 0 var(--glass-lo),
+    var(--glass-shadow-lg);
+}
+
+/* 模态弹窗：最实的一档 —— 长段落说明文字与正文编辑都发生在这一层，可读性优先 */
+.glass-modal {
+  background-color: var(--glass-bg-modal);
+  -webkit-backdrop-filter: blur(28px) saturate(var(--glass-saturate));
+  backdrop-filter: blur(28px) saturate(var(--glass-saturate));
+  border: 1px solid var(--glass-border);
+  box-shadow:
+    inset 0 1px 0 0 rgb(255 255 255 / 0.85),
+    inset 0 -1px 0 0 var(--glass-lo),
+    var(--glass-shadow-lg);
+}
+
+/* 全屏弹窗（纳入原文）：整屏都是玻璃，透明度取最实，避免压在下面的页面透上来干扰阅读 */
+.glass-modal-full {
+  background-color: rgb(252 249 241 / 0.86);
+  -webkit-backdrop-filter: blur(30px) saturate(var(--glass-saturate));
+  backdrop-filter: blur(30px) saturate(var(--glass-saturate));
+}
+
+/* ---------- 输入控件：全局玻璃 ----------
+   89 个 input + 38 个 textarea + 22 个 select 一次性覆盖，零改 JSX。
+   排除勾选/单选/滑杆/文件/颜色/隐藏 —— 这些有自己的原生绘制，糊玻璃只会画蛇添足。 */
+textarea,
+select,
+input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='file']):not([type='color']):not([type='hidden']):not([type='submit']):not([type='button']) {
+  background-color: var(--glass-bg-input);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  backdrop-filter: blur(12px) saturate(140%);
+  box-shadow: inset 0 1px 2px 0 rgb(38 34 24 / 0.045);
+}
+
+/* 大段正文编辑区（弹窗内的整屏 textarea）：面积大，透明度提高一档保证读得清 */
+textarea.glass-input,
+.novel-text.glass-input {
+  background-color: rgb(255 253 247 / 0.66);
+}
+
+/* 聚焦：朱砂描边 + 柔光环，玻璃底略微提亮（与既有 select:focus 口径一致） */
+textarea:focus,
+select:focus,
+input:focus {
+  background-color: rgb(255 254 250 / 0.72);
+  border-color: var(--color-amber-500);
+  box-shadow: var(--glass-ring), inset 0 1px 2px 0 rgb(38 34 24 / 0.03);
+  outline: none;
+}
+
+textarea:disabled,
+select:disabled,
+input:disabled {
+  background-color: rgb(243 238 224 / 0.6);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  box-shadow: none;
+}
+
+/* 占位符：宣纸调，不用浏览器默认的冷灰 */
+textarea::placeholder,
+input::placeholder {
+  color: var(--color-stone-400);
+  opacity: 0.85;
+}
+
+/* 弹窗遮罩：从死黑改为暖墨色 —— 黑遮罩配宣纸底会显得脏，暖墨更贴合纸墨主题且更柔和 */
+.glass-scrim {
+  background-color: rgb(38 34 24 / 0.34);
+  -webkit-backdrop-filter: blur(6px) saturate(120%);
+  backdrop-filter: blur(6px) saturate(120%);
+}
+
+/* 弹窗入场：opacity + translateY，400ms ease-out（风格卡规定的入场口径） */
+@keyframes glass-in {
+  from { opacity: 0; transform: translateY(14px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes glass-in-side {
+  from { opacity: 0; transform: translateX(24px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes scrim-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.glass-modal,
+.glass-enter {
+  animation: glass-in 0.34s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.glass-panel {
+  animation: glass-in-side 0.34s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.glass-scrim {
+  animation: scrim-in 0.28s ease-out both;
+}
+
+/* ---------- 低端设备降级（风格卡：必做） ----------
+   部分安卓浏览器与低端机上 backdrop-filter 掉帧甚至完全不支持，
+   此时玻璃会变成全透明 —— 输入框看不见边界、弹窗文字压在页面上读不了。
+   降级为高不透明度的实底宣纸，保留描边与阴影，观感退回纸面但功能完好。 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass-card { background-color: rgb(252 249 240 / 0.96); }
+  .glass-panel { background-color: rgb(252 249 240 / 0.98); }
+  .glass-modal { background-color: rgb(253 250 243 / 0.99); }
+  .glass-modal-full { background-color: #fbf8ef; }
+  .glass { background-color: rgb(251 248 239 / 0.97); }
+  .glass-input,
+  textarea,
+  select,
+  input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='file']):not([type='color']):not([type='hidden']) {
+    background-color: rgb(255 254 250 / 0.94);
+  }
+  .glass-scrim { background-color: rgb(38 34 24 / 0.42); }
+}
+
+/* 减动效偏好：关掉入场动画与 hover 模糊变化，只保留静态玻璃质感 */
+@media (prefers-reduced-motion: reduce) {
+  .glass-modal,
+  .glass-panel,
+  .glass-scrim,
+  .glass-enter {
+    animation: none;
+  }
+  .glass-card,
+  .glass-panel,
+  .glass-modal,
+  .glass-input {
+    transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+  }
+  .glass-card:hover {
+    border-color: var(--glass-border-soft);
+    box-shadow: inset 0 1px 0 0 var(--glass-hi), inset 0 -1px 0 0 var(--glass-lo), var(--glass-shadow);
+  }
 }

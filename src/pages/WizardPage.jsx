@@ -4,7 +4,7 @@
 // 2. 人物只保留 1~3 个用户固定的"锚点"，不生成全套班底，其余人物由写作归档自然生长（防早露）；
 // 3. 四层伏笔（短/中/长/终极）登记时即锚定回收卷，成书时换算为回收章硬边界（根治只有短埋点）；
 // 4. 每步独立可编辑、可锁定（锁定项重新生成时不覆盖），进度整体持久化，刷新可续跑。
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Ic from '../components/Ic.jsx'
 import KeyBanner from '../components/KeyBanner.jsx'
 import InspirationModal from '../components/InspirationModal.jsx'
@@ -13,36 +13,41 @@ import { isOverridden, getWorldview, worldviewText, allGenres } from '../lib/wor
 import { chatStream, chatJSON } from '../lib/llm.js'
 import {
   GENRES,
-  bibleRationalizeMessages,
-  bibleFromImportMessages,
-  bookWorldviewMessages,
   fullSynopsisMessages,
-  volumesPlanMessages,
-  actsPlanMessages,
   chapterSkeletonMessages,
   volumeSkeletonMessages,
-  volumeOutlineMessages,
-  sampleNovel,
-  styleAnalyzeMessages,
-  sanitizeHabits,
 } from '../lib/prompts.js'
 import { countWords, uid } from '../lib/utils.js'
 import { loadWizardState, saveWizardState } from '../lib/backup.js'
 import { put, getAll } from '../lib/db.js'
 import { PRESET_STYLES } from '../corpus/presetStyles.js'
-import { newProject, BIBLE_TRUTH_KINDS, splitChapters, archiveImportedChapter, cnToNumber, RHYTHM_TEMPLATES, resampleWeights, chaptersByRhythm, volumeRole, ACT_RATIO_GUIDE, renumberPart, parseSkeleton, skeletonMissing, skeletonTextForRange, outlineLeakScan, outlineLeakContextFor, compressRanges, SKELETON_BATCH, dedupeSkeletonBatch, mergeSkeletonTexts, bibleJsonWithRetry, fallbackVolumeEmotion, blendStyles, distillStyleBand } from '../lib/longform.js'
+import { newProject, BIBLE_TRUTH_KINDS, splitChapters, archiveImportedChapter, cnToNumber, RHYTHM_TEMPLATES, resampleWeights, chaptersByRhythm, volumeRole, ACT_RATIO_GUIDE, renumberPart, parseSkeleton, skeletonMissing, outlineLeakScan, outlineLeakContextFor, compressRanges, SKELETON_BATCH, dedupeSkeletonBatch, mergeSkeletonTexts, fallbackVolumeEmotion } from '../lib/longform.js'
+import { worldsmithAgent, storylinerAgent, structurerAgent, outlinerAgent, stylistAgent, makeProgress, AGENT_MAP, ROLE_THEME } from '../lib/agents/index.js'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms)) // 骨架单批容错重试的退避等待
-const STATE_VERSION = 4
+const STATE_VERSION = 5
 const STEPS = [
   { id: 0, label: '初始提问' },
   { id: 1, label: '小说圣经' },
-  { id: 2, label: '全书梗概' },
-  { id: 3, label: '卷结构' },
-  { id: 4, label: '幕结构' },
-  { id: 5, label: '章名与细纲' },
-  { id: 6, label: '对账成书' },
+  { id: 2, label: '故事线' },
+  { id: 3, label: '全书梗概' },
+  { id: 4, label: '卷结构' },
+  { id: 5, label: '幕结构' },
+  { id: 6, label: '章名与细纲' },
+  { id: 7, label: '对账成书' },
 ]
+
+// 每步负责的构思层 agent（§8：新手写作每步顶部标注驱动 agent）。ids 对应 registry.AGENTS 的 id。
+const STEP_AGENTS = {
+  0: { ids: ['muse', 'stylist'], note: 'Muse 提炼立意/题材/爽点/核心冲突；Stylist 可选蒸馏参考文本的真·语言指纹，驱动后续写作。' },
+  1: { ids: ['worldsmith'], note: 'Worldsmith 把修补诉求合理化为小说圣经：势力盘/冲突线/真相层/地图层——真相永不进写作上下文。' },
+  2: { ids: ['storyliner'], note: 'Storyliner 分 5 段流式撰写 5000-8000 字完整故事线，把整个故事讲完后存于 project.storyline。' },
+  3: { ids: ['structurer'], note: 'Structurer 规划全书总故事线：主线里程碑 + 副线 + 四层伏笔，登记即锚定回收卷。' },
+  4: { ids: ['structurer'], note: 'Structurer 结合剧情节奏引擎把故事线拆成卷，分配各卷章数与情感走向。' },
+  5: { ids: ['structurer'], note: 'Structurer 按 ACT_RATIO_GUIDE 把每卷切成起/发展/冲突/高潮四幕，注入本幕 goal。' },
+  6: { ids: ['outliner'], note: 'Outliner 生成全书章名骨架 + 第 1 卷逐章细纲，把幕内章级细化为可写详纲。' },
+  7: { ids: ['stylist'], note: '开写前确定性对账（零 Token）：伏笔闭环/真相隔离/结构守恒肉眼可查；Stylist 的语言指纹随书定稿。' },
+}
 const TIERS = ['短', '中', '长', '终极']
 const TIER_DESC = { 短: '10~20 章回收：日常爽点、小反转', 中: '50~80 章回收：卷中反转、配角秘密', 长: '150~250 章回收：身世、金手指、幕后黑手', 终极: '终卷回收：全书最大秘密，只露蛛丝马迹' }
 
@@ -58,6 +63,7 @@ const DEFAULT_STATE = {
   bible: null, // {fixes, world, powerRules[], truths[…], anchors[…], mapLayers[…], factions[{id,name,desc,rumor,unlockVolume,locked}], conflicts[{id,name,desc,startVolume,endVolume,locked}], locks:{world,powerRules}}
   importText: '',
   importedChapters: [], // [{no,title,text}] 分章预览/已确认
+  storyline: '', // 完整故事线（5000-8000 字叙事通稿，Storyliner 分段生成）：存 project.storyline，供写作层把握全局走向
   mainline: '',
   subplots: [],
   foreshadows: [], // {id,content,tier,relatedChars,plannedVolume,hints[{chapter,clue}]}
@@ -81,6 +87,8 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
   const [busy, setBusy] = useState('') // 非空 = 生成中的进度文案
   const [err, setErr] = useState('')
   const [creating, setCreating] = useState('')
+  const [agentTrace, setAgentTrace] = useState([]) // agent 运行轨迹（makeProgress 事件流快照）：阶段6「编剧团队」面板消费
+  const progressRef = useRef(makeProgress()) // 全程复用一个 progress 收集器，各 agent run 时 push 事件（构思层已接入，写作层阶段3接入）
   const [showInspire, setShowInspire] = useState(false)
   const [libBooks, setLibBooks] = useState([])
   const [libStyles, setLibStyles] = useState([])
@@ -113,35 +121,33 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
     setBusy('AI 正在蒸馏文风指纹…')
     try {
       const recs = []
+      // Stylist 文风蒸馏师：逐份样本蒸馏（sampleNovel→styleAnalyze→distillStyleBand→sanitizeHabits 内聚在 agent）；
+      // name/forbidden 属页面档案字段，在此补齐后入库（存的就是写作时实际注入的）
       for (const id of sd.bookIds) {
         const prev = libStyles.find((s) => s.bookId === id)
         if (prev && prev.profile) { recs.push(prev); continue }
         const book = libBooks.find((b) => b.id === id)
         if (!book || !book.content) continue
-        const smp = sampleNovel(book.content)
-        const res = await chatJSON({ apiKey, messages: styleAnalyzeMessages(smp), temperature: 0.3 })
-        if (res && res.style_profile) {
-          // habits 入库前先过确定性标点净化：存的就是实际会注入的，避免 UI 展示的清单与写作时用的不一致
-          const band = distillStyleBand(smp.join('\n')) // P1-1R 本书量化指纹（与 LLM 定性 profile 互补，零 Token）
-          const rec = { bookId: id, name: book.name, origin: 'user', profile: res.style_profile, habits: sanitizeHabits(res.habits).habits, samples: (Array.isArray(res.samples) ? res.samples : []).filter((s) => typeof s === 'string' && s.trim()).slice(0, 3), forbidden: prev?.forbidden || [], metrics: band.metrics, thresholds: band.thresholds, bandReliable: band.reliable, updatedAt: Date.now() }
+        const base = await stylistAgent.distillOne({ apiKey, text: book.content, bookId: id, progress: progressRef.current })
+        if (base.profile) {
+          const rec = { ...base, name: book.name, forbidden: prev?.forbidden || [] }
           await put('styles', rec)
           recs.push(rec)
         }
       }
       if (sd.pasteText.trim().length >= 200) {
-        const smpP = sampleNovel(sd.pasteText)
-        const res = await chatJSON({ apiKey, messages: styleAnalyzeMessages(smpP), temperature: 0.3 })
-        if (res && res.style_profile) {
-          const band = distillStyleBand(smpP.join('\n')) // P1-1R 粘贴文本量化指纹
-          const rec = { bookId: 'paste:' + Date.now(), name: '粘贴文本', origin: 'user', profile: res.style_profile, habits: sanitizeHabits(res.habits).habits, samples: (Array.isArray(res.samples) ? res.samples : []).filter((s) => typeof s === 'string' && s.trim()).slice(0, 3), forbidden: [], metrics: band.metrics, thresholds: band.thresholds, bandReliable: band.reliable, updatedAt: Date.now() }
+        const base = await stylistAgent.distillOne({ apiKey, text: sd.pasteText, bookId: 'paste:' + Date.now(), progress: progressRef.current })
+        if (base.profile) {
+          const rec = { ...base, name: '粘贴文本', forbidden: [] }
           await put('styles', rec)
           recs.push(rec)
         }
       }
       if (!recs.length) return setErr('蒸馏未得到有效文风档案，请重试或换一段更长的文本。')
-      const blended = recs.length > 1 ? blendStyles(recs) : null
+      const blended = recs.length > 1 ? stylistAgent.blend(recs) : null
       setLibStyles((prevList) => [...prevList.filter((s) => !recs.some((r) => r.bookId === s.bookId)), ...recs])
       patch({ styleDistill: { ...sd, distilled: recs, blended } })
+      setAgentTrace(progressRef.current.snapshot())
     } catch (e) {
       setErr(e.message)
     } finally {
@@ -214,20 +220,20 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
     setErr('')
     setBusy('AI 正在修补逻辑漏洞并搭建圣经…')
     try {
-      const res = await bibleJsonWithRetry({ apiKey, messages: bibleRationalizeMessages({ brief: st.brief, truthKinds: BIBLE_TRUTH_KINDS }) })
+      // Worldsmith 世界架构师·第一段：理性化圣经骨架（mergeBible 合并锁定项属页面 state 逻辑，保留在本页）
+      const res = await worldsmithAgent.runRationalize({ apiKey, brief: st.brief, progress: progressRef.current })
       const merged = mergeBible(st.bible, res)
-      // 自动串接：圣经完成后立即生成本书完整世界观（势力盘/冲突线含登场时机，防提前透支）；失败不阻塞圣经主流程，可在本页手动重生成圣经补上
+      // 自动串接第二段：本书完整世界观（势力盘/冲突线含登场时机，防提前透支）
       setBusy('正在为这本书生成完整世界观（势力盘与冲突线登场时机）…')
       try {
-        const wvRes = await chatJSON({
-          apiKey,
-          messages: bookWorldviewMessages({ template: worldviewText(getWorldview(st.genre), 'full'), brief: st.brief, bible: merged, volumeCount: st.volumeCount, level: 'full' }),
-          temperature: 0.7,
-        })
+        const wvRes = await worldsmithAgent.runWorldview({ apiKey, brief: st.brief, bible: merged, volumeCount: st.volumeCount, worldviewTemplate: worldviewText(getWorldview(st.genre), 'full'), progress: progressRef.current })
         patch({ bible: mergeBible(merged, wvRes), step: 1 })
-      } catch {
+      } catch (e) {
+        // 显式告警（原为静默吞错）：圣经已成型，世界观可稍后重生成补上，不阻塞主流程
+        setErr(`圣经已生成，但完整世界观生成失败（${e.message}），可在本页重新生成圣经补上。`)
         patch({ bible: merged, step: 1 })
       }
+      setAgentTrace(progressRef.current.snapshot())
     } catch (e) {
       setErr(e.message)
     } finally {
@@ -249,21 +255,19 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
     setErr('')
     setBusy('AI 正在从既有章节反推圣经草稿…')
     try {
-      const text = st.importedChapters.map((c) => `【第${c.no}章 ${c.title}】\n${c.text}`).join('\n\n').slice(0, 60000)
-      const res = await bibleJsonWithRetry({ apiKey, messages: bibleFromImportMessages({ text, truthKinds: BIBLE_TRUTH_KINDS }), temperature: 0.5 })
+      // Worldsmith 世界架构师·导入支线：从既有章节反推圣经（text 截断 60000 字在 agent 内做）
+      const text = st.importedChapters.map((c) => `【第${c.no}章 ${c.title}】\n${c.text}`).join('\n\n')
+      const res = await worldsmithAgent.runFromImport({ apiKey, text, progress: progressRef.current })
       const merged = mergeBible(st.bible, res)
-      // 导入路径同样自动成型完整世界观（失败不阻塞）
       setBusy('正在为这本书生成完整世界观（势力盘与冲突线登场时机）…')
       try {
-        const wvRes = await chatJSON({
-          apiKey,
-          messages: bookWorldviewMessages({ template: worldviewText(getWorldview(st.genre), 'full'), brief: st.brief, bible: merged, volumeCount: st.volumeCount, level: 'full' }),
-          temperature: 0.7,
-        })
+        const wvRes = await worldsmithAgent.runWorldview({ apiKey, brief: st.brief, bible: merged, volumeCount: st.volumeCount, worldviewTemplate: worldviewText(getWorldview(st.genre), 'full'), progress: progressRef.current })
         patch({ bible: mergeBible(merged, wvRes) })
-      } catch {
+      } catch (e) {
+        setErr(`圣经草稿已生成，但完整世界观生成失败（${e.message}），可重新生成补上。`)
         patch({ bible: merged })
       }
+      setAgentTrace(progressRef.current.snapshot())
     } catch (e) {
       setErr(e.message)
     } finally {
@@ -271,7 +275,40 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
     }
   }
 
-  // ---------- Step 2 全书梗概 ----------
+  // ---------- Step 2 故事线（Storyliner agent 分段生成 5000-8000 字完整故事线） ----------
+  // storylinerAgent 分 5 段（开局/发展/中盘/高潮/结局）流式撰写，每段完成即回填 textarea（onSegment）；
+  // 前段全文喂后段保证连贯；成书时存入 project.storyline，供长篇写作层把握全局走向、防偏离主线。
+  const genStoryline = async () => {
+    if (!apiKey) return onNeedKey()
+    if (!st.bible?.world) return setErr('请先生成小说圣经，再撰写故事线。')
+    setErr('')
+    setBusy('Storyliner 正在分段撰写完整故事线（5000-8000 字）…')
+    try {
+      const { storyline } = await storylinerAgent.run({
+        apiKey,
+        brief: st.brief,
+        genre: st.genre,
+        bible: st.bible,
+        mainline: st.mainline,
+        totalWords: st.totalWords,
+        volumeCount: st.volumeCount,
+        progress: progressRef.current,
+        onSegment: ({ storyline: acc, wordCount }) => {
+          patch({ storyline: acc })
+          setBusy(`Storyliner 正在撰写故事线… 已生成 ${wordCount} 字`)
+        },
+      })
+      patch({ storyline })
+      setAgentTrace(progressRef.current.snapshot())
+      if (storyline.trim().length < 2000) setErr('故事线偏短（<2000 字），可重新生成以获得更完整的 5000-8000 字通稿。')
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  // ---------- Step 3 全书梗概 ----------
   const genSynopsis = async () => {
     if (!apiKey) return onNeedKey()
     if (!st.bible?.world) return setErr('请先生成小说圣经。')
@@ -280,7 +317,7 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
     try {
       const res = await chatJSON({
         apiKey,
-        messages: fullSynopsisMessages({ bible: st.bible, brief: st.brief, totalWords: st.totalWords * 10000, volumeCount: st.volumeCount, chapterWords: st.chapterWords }),
+        messages: fullSynopsisMessages({ genre: st.genre, bible: st.bible, brief: st.brief, totalWords: st.totalWords * 10000, volumeCount: st.volumeCount, chapterWords: st.chapterWords }),
         temperature: 0.7,
       })
       patch({
@@ -309,7 +346,7 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
   const patchHook = (id, p) => patch({ foreshadows: st.foreshadows.map((f) => (f.id === id ? { ...f, ...p } : f)) })
   const addHook = () => patch({ foreshadows: [...st.foreshadows, { id: uid(), content: '', tier: '短', relatedChars: [], plannedVolume: 1, hints: [] }] })
 
-  // ---------- Step 3 卷结构 ----------
+  // ---------- Step 4 卷结构 ----------
   const totalChapters = Math.max(1, Math.round((st.totalWords * 10000) / st.chapterWords))
   const volumeLength = Math.max(5, Math.round(totalChapters / Math.max(1, st.volumeCount)))
   // 节奏模板 → 各卷章数（模板与卷数不同时等比重采样适配，形状保持不降级均分）；卷角色供四幕拆幕与提示词侧重使用
@@ -336,41 +373,14 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
     setErr('')
     setBusy(`AI 正在按「${st.rhythm}」节奏切分 ${st.volumeCount} 卷结构…`)
     try {
-      const res = await chatJSON({ apiKey, messages: volumesPlanMessages({ bible: st.bible, mainline: st.mainline, volumeCount: st.volumeCount, lengths: rhythmLengths, roles: rhythmRoles, genre: st.genre }), temperature: 0.7 })
-      const vols = (Array.isArray(res.volumes) ? res.volumes : [])
-        .filter((v) => v?.name)
-        .map((v, i) => ({
-          volumeNo: Number(v.volume_no) || i + 1,
-          name: String(v.name),
-          theme: String(v.theme || ''),
-          conflict: String(v.conflict || ''),
-          arcStory: String(v.arc_story || ''),
-          gain: String(v.gain || ''),
-          location: String(v.location || ''),
-          unlockLayer: Number(v.unlock_layer) || 0,
-          strategy: String(v.strategy || ''),
-          endHook: String(v.end_hook || ''),
-          emotion: String(v.emotion || ''),
-          length: rhythmLengths[i] || volumeLength,
-          arc: '',
-          acts: [],
-          forbiddenForeshadowIds: [],
-        }))
-        .sort((a, b) => a.volumeNo - b.volumeNo)
-      // 情感走向兜底：AI 未给的卷从题材×基调库按卷号轮转补（跳过已用，卷间不重复）
-      const usedEmotions = []
-      for (const v of vols) {
-        if (v.emotion) { usedEmotions.push(v.emotion); continue }
-        v.emotion = fallbackVolumeEmotion({ genre: st.genre, volumeNo: v.volumeNo, used: usedEmotions })
-        if (v.emotion) usedEmotions.push(v.emotion)
-      }
-      // 卷档案确认后：计算 startChapter 并把四层伏笔的回收卷锚定为回收章硬边界
-      let start = 1
-      for (const v of vols) {
-        v.startChapter = start
-        start += v.length
-      }
-      patch({ volumes: vols })
+      // Structurer 结构规划师：卷结构（volumesPlanMessages → 解析 → 情感兜底 → startChapter 累加，内聚在 agent）
+      const { volumes } = await structurerAgent.runVolumes({
+        apiKey, bible: st.bible, mainline: st.mainline, volumeCount: st.volumeCount,
+        lengths: rhythmLengths, roles: rhythmRoles, genre: st.genre, volumeLength,
+        progress: progressRef.current,
+      })
+      patch({ volumes })
+      setAgentTrace(progressRef.current.snapshot())
     } catch (e) {
       setErr(e.message)
     } finally {
@@ -380,19 +390,17 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
 
   const patchVol = (no, p) => patch({ volumes: st.volumes.map((v) => (v.volumeNo === no ? { ...v, ...p } : v)) })
 
-  // ---------- Step 4 幕结构 ----------
+  // ---------- Step 5 幕结构 ----------
   const genActs = async (vol) => {
     if (!apiKey) return onNeedKey()
     setErr('')
     const role = volumeRole(vol.volumeNo, rhythmWeights)
     setBusy(`AI 正在按「${role}」角色拆解第 ${vol.volumeNo} 卷四幕结构…`)
     try {
-      const res = await chatJSON({ apiKey, messages: actsPlanMessages({ volume: vol, mainline: st.mainline, role, ratioGuide: ACT_RATIO_GUIDE[role] }), temperature: 0.6 })
-      const acts = (Array.isArray(res.acts) ? res.acts : [])
-        .filter((a) => a?.act && Number.isFinite(Number(a.start)) && Number.isFinite(Number(a.end)))
-        .map((a) => ({ act: String(a.act), start: Number(a.start), end: Number(a.end), goal: String(a.goal || '') }))
-      if (!acts.length) throw new Error('AI 未返回有效幕结构，请重试。')
-      patchVol(vol.volumeNo, { acts, arc: actsToArc(acts) })
+      // Structurer 结构规划师：幕结构（volumeRole 定位 + actsPlanMessages → 解析；空数组由 agent 抛错）
+      const { acts, arc } = await structurerAgent.runActs({ apiKey, volume: vol, mainline: st.mainline, weights: rhythmWeights, progress: progressRef.current })
+      patchVol(vol.volumeNo, { acts, arc })
+      setAgentTrace(progressRef.current.snapshot())
     } catch (e) {
       setErr(e.message)
     } finally {
@@ -408,7 +416,7 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
     patchVol(no, { acts, arc: actsToArc(acts) })
   }
 
-  // ---------- Step 5 章名骨架 + 第 1 卷细纲 ----------
+  // ---------- Step 6 章名骨架 + 第 1 卷细纲 ----------
   const runStream = async (messages, field, temperature) => {
     if (!apiKey) return onNeedKey()
     setErr('')
@@ -628,16 +636,26 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
 
   const genVol1Outline = async () => {
     const vol = st.volumes[0]
-    const arcText = vol?.acts?.length ? `第1卷（第1-${vol.length}章，章号为卷内坐标）：${['起', '承', '转', '合'].map((p, i) => (vol.acts[i] ? `${p}=第${vol.acts[i].start}-${vol.acts[i].end}章` : '')).filter(Boolean).join('；')}` : ''
-    // 只给本卷骨架：原先直传 st.skeleton（全书骨架全文，连 slice 都没有），模型能看到后续所有卷的章名与任务，
-    // 第 1 卷细纲里就会提前埋后续卷的事件——这是已确认的剧透泄漏点，按 vol.startChapter ~ 卷末章号过滤后重拼。
-    const volStart = vol?.startChapter || 1
-    const volEnd = volStart + (vol?.length || volumeLength || 20) - 1
-    const volSkeleton = skeletonTextForRange(st.chapterSkeleton, volStart, volEnd, st.skeleton)
-    await runStream(volumeOutlineMessages({ skeleton: volSkeleton, volume: vol, bible: st.bible, chapterCount: vol?.length || volumeLength, arcText }), 'outline', 0.7)
+    if (!apiKey) return onNeedKey()
+    setErr('')
+    setBusy('AI 生成中…')
+    patch({ outline: '' })
+    try {
+      // Outliner 细纲师：第 1 卷精简地图（防剧透——agent 内只喂本卷骨架 skeletonTextForRange，流式回写 onDelta）
+      await outlinerAgent.runVolumeOutline({
+        apiKey, bible: st.bible, volume: vol, chapterSkeleton: st.chapterSkeleton, skeleton: st.skeleton,
+        onDelta: (full) => patch({ outline: full }),
+        progress: progressRef.current,
+      })
+      setAgentTrace(progressRef.current.snapshot())
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setBusy('')
+    }
   }
 
-  // ---------- Step 6 对账成书 ----------
+  // ---------- Step 7 对账成书 ----------
   // 伏笔回收章锚定（与引擎层 anchorForeshadowResolve 同规则，此处独立计算供对账单展示，成书时由引擎统一锚定）
   const resolveChapterOf = (f) => {
     if (f.tier === '终极') {
@@ -652,13 +670,14 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
   const canNext = {
     0: st.brief.trim().length >= 10,
     1: !!st.bible?.world,
-    2: !!st.mainline,
-    3: st.volumes.length > 0,
-    4: st.volumes.length > 0 && st.volumes.every((v) => v.arc),
+    2: st.storyline.trim().length > 0,
+    3: !!st.mainline,
+    4: st.volumes.length > 0,
+    5: st.volumes.length > 0 && st.volumes.every((v) => v.arc),
     // blocked = 封存真相（终极真相 / 地图分层真相）被写进细纲：这是「真相隔离」的红线，不允许带着它成书；
     // warnings 只提示不拦（与项目既有「只报警不阻断」风格一致，尊重作者拍板）。
-    5: !!st.outline && !outlineLeak.blocked.length,
-    6: false,
+    6: !!st.outline && !outlineLeak.blocked.length,
+    7: false,
   }[st.step]
 
   const createBook = async () => {
@@ -671,7 +690,9 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
       proj.idea = st.brief
       proj.genre = st.genre
       proj.chapterWords = st.chapterWords
+      proj.volumeLength = volumeLength // 持久化向导算出的每卷计划章数（长篇自动断卷用）
       proj.synopsis = st.mainline
+      proj.storyline = st.storyline // 完整故事线（Storyliner）：供写作层把握全局走向
       proj.world = b.world
       // 力量体系绝对规则 → 世界手册规则块（写作时永不省略注入）
       proj.worldBlocks = (b.powerRules || []).map((r, i) => ({ id: uid(), name: `绝对规则${i + 1}`, aliases: '', kind: '规则', content: r }))
@@ -680,7 +701,7 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
       proj.protagonist = b.anchors[0]?.name || ''
       proj.bible = b
       // 卷档案补 id（列表渲染的 key 与 patchVolume 都按 id 寻址；向导态的卷没有 id，成书时统一补齐）
-      proj.volumes = st.volumes.map((v) => ({ ...v, id: v.id || uid(), emotion: '' }))
+      proj.volumes = st.volumes.map((v) => ({ ...v, id: v.id || uid() })) // 保留 emotion（不再清空）
       proj.outline = st.outline
       proj.chapterSkeleton = st.chapterSkeleton
       proj.storylines = st.subplots.map((s) => ({ name: s.name, type: '支线', progress: s.theme, lastChapter: 0 }))
@@ -741,6 +762,7 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
   }
 
   const { step, bible } = st
+  const stepAgent = STEP_AGENTS[step]
   const inputCls = 'w-full rounded-xl border border-stone-200 p-3 text-sm focus:border-stone-500 focus:outline-none'
   const btnCls = 'rounded-full bg-stone-800 px-6 py-3 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50'
 
@@ -749,14 +771,14 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
       {!apiKey && <KeyBanner onNeedKey={onNeedKey} />}
 
       {/* 步骤条 */}
-      <nav className="flex gap-2 overflow-x-auto rounded-2xl bg-[#fbf8ef] p-3 shadow-sm">
+      <nav className="glass-card flex gap-2 overflow-x-auto rounded-2xl bg-paper p-3 shadow-sm">
         {STEPS.map((s) => (
           <button
             key={s.id}
             onClick={() => !busy && !creating && patch({ step: s.id })}
             className={`flex shrink-0 items-center gap-2 rounded-xl px-3.5 py-2 text-sm transition-colors ${step === s.id ? 'bg-stone-800 text-white' : 'text-stone-500 hover:bg-stone-100'}`}
           >
-            <span className={`flex h-5 w-5 items-center justify-center rounded-full text-xs ${step === s.id ? 'bg-[#fbf8ef]/20' : 'bg-stone-200'}`}>{s.id}</span>
+            <span className={`flex h-5 w-5 items-center justify-center rounded-full text-xs ${step === s.id ? 'bg-paper/20' : 'bg-stone-200'}`}>{s.id}</span>
             {s.label}
           </button>
         ))}
@@ -764,10 +786,26 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
 
       {err && <p className="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">{err}</p>}
       {busy && <p className="rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-800">{busy}</p>}
+      {stepAgent && (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-2xl border border-stone-200 bg-white/60 px-4 py-2.5">
+          <span className="text-[11px] font-semibold tracking-wide text-stone-400">本步 agent</span>
+          {stepAgent.ids.map((id) => {
+            const a = AGENT_MAP[id]
+            if (!a) return null
+            const th = ROLE_THEME[a.role] || ROLE_THEME.generate
+            return (
+              <span key={id} className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium ${th.border} ${th.bg} ${th.text}`}>
+                <Ic n={a.icon} /> {a.name} <span className="font-normal opacity-70">{a.cn}</span>
+              </span>
+            )
+          })}
+          <span className="basis-full text-[11px] leading-relaxed text-stone-400">{stepAgent.note}</span>
+        </div>
+      )}
 
       {/* Step 0 初始提问 */}
       {step === 0 && (
-        <section className="space-y-4 rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+        <section className="glass-card space-y-4 rounded-2xl bg-paper p-5 shadow-sm">
           <div className="flex items-center justify-between gap-3">
             <h2 className="text-base font-bold"><Ic n="bulb" /> 初始提问：固定项 + 修补诉求</h2>
             <button
@@ -921,7 +959,7 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
 
       {/* Step 1 小说圣经 */}
       {step === 1 && (
-        <section className="space-y-4 rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+        <section className="glass-card space-y-4 rounded-2xl bg-paper p-5 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-base font-bold"><Ic n="globe" /> 小说圣经 · 永久不变设定</h2>
             <button onClick={genBible} disabled={!!busy || st.brief.trim().length < 10} className="rounded-full border border-stone-300 px-4 py-2 text-xs text-stone-600 hover:bg-stone-50 disabled:opacity-50">
@@ -1087,9 +1125,36 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
         </section>
       )}
 
-      {/* Step 2 全书梗概 */}
+      {/* Step 2 故事线（Storyliner agent 分段生成 5000-8000 字完整故事线） */}
       {step === 2 && (
-        <section className="space-y-4 rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+        <section className="glass-card space-y-4 rounded-2xl bg-paper p-5 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-base font-bold"><Ic n="thread" /> 完整故事线（5000-8000 字把整个故事讲完）</h2>
+            <button onClick={genStoryline} disabled={!!busy || !st.bible?.world} className={btnCls}>{busy || (st.storyline ? '重新生成故事线' : '生成故事线')}</button>
+          </div>
+          <p className="text-xs leading-relaxed text-stone-500">
+            本步由 <span className="font-semibold text-amber-700">Storyliner 故事线作家</span> 负责：分 5 段（开局 / 发展 / 中盘 / 高潮 / 结局）流式撰写，把从第 1 章到大结局的整个故事连贯讲完，成书后存入书稿档案，供长篇写作层随时把握全局走向、防止写着写着偏离主线。与下一步「全书梗概」的结构化里程碑（主线 / 副线 / 四层伏笔）互补。
+          </p>
+          {!st.bible?.world && <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">请先返回上一步生成小说圣经，再撰写故事线。</p>}
+          <div>
+            <div className="mb-1 flex items-center justify-between text-xs text-stone-500">
+              <span>故事线全文（可手动编辑）</span>
+              <span className="tabular-nums">{st.storyline.trim().length} 字{st.storyline.trim().length >= 5000 ? ' · 已达标' : st.storyline.trim().length > 0 ? ' · 建议 5000-8000 字' : ''}</span>
+            </div>
+            <textarea
+              value={st.storyline}
+              onChange={(e) => patch({ storyline: e.target.value })}
+              rows={18}
+              placeholder="点击「生成故事线」，Storyliner 将分段撰写完整故事线，边写边显示…"
+              className="w-full rounded-xl border border-stone-200 bg-white/60 p-3 text-sm leading-relaxed focus:border-stone-500 focus:outline-none"
+            />
+          </div>
+        </section>
+      )}
+
+      {/* Step 3 全书梗概 */}
+      {step === 3 && (
+        <section className="glass-card space-y-4 rounded-2xl bg-paper p-5 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-base font-bold"><Ic n="map" /> 全书总故事线（主线里程碑 + 副线 + 四层伏笔）</h2>
             <button onClick={genSynopsis} disabled={!!busy || !st.bible?.world} className={btnCls}>{busy || (st.mainline ? '重新生成梗概' : '生成全书梗概')}</button>
@@ -1139,9 +1204,9 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
         </section>
       )}
 
-      {/* Step 3 卷结构 */}
-      {step === 3 && (
-        <section className="space-y-4 rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+      {/* Step 4 卷结构 */}
+      {step === 4 && (
+        <section className="glass-card space-y-4 rounded-2xl bg-paper p-5 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-base font-bold"><Ic n="mountain" /> 卷结构（{st.volumeCount} 卷 · 节奏：{st.rhythm}）</h2>
             <button onClick={genVolumes} disabled={!!busy || !st.mainline} className={btnCls}>{busy || (st.volumes.length ? '重新切分卷结构' : 'AI 切分卷结构')}</button>
@@ -1228,9 +1293,9 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
         </section>
       )}
 
-      {/* Step 4 幕结构 */}
-      {step === 4 && (
-        <section className="space-y-4 rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+      {/* Step 5 幕结构 */}
+      {step === 5 && (
+        <section className="glass-card space-y-4 rounded-2xl bg-paper p-5 shadow-sm">
           <h2 className="text-base font-bold"><Ic n="film" /> 卷内四幕：起幕 → 发展幕 → 冲突幕 → 高潮落幕</h2>
           <p className="text-xs text-stone-400">每卷按其叙事角色（开卷/腹地深耕/扩张过渡/收割）给不同比例参考，禁止每卷同构均分；区间与目标可手工微调，章头起承转合标签按此对齐。</p>
           {st.volumes.map((v) => (
@@ -1264,9 +1329,9 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
         </section>
       )}
 
-      {/* Step 5 章名骨架 + 第 1 卷细纲 */}
-      {step === 5 && (
-        <section className="space-y-4 rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+      {/* Step 6 章名骨架 + 第 1 卷细纲 */}
+      {step === 6 && (
+        <section className="glass-card space-y-4 rounded-2xl bg-paper p-5 shadow-sm">
           <h2 className="text-base font-bold"><Ic n="notepad" /> 全书章名骨架 + 第 1 卷完整细纲</h2>
           <div>
             <div className="mb-2 flex items-center justify-between">
@@ -1318,9 +1383,9 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
         </section>
       )}
 
-      {/* Step 6 对账成书 */}
-      {step === 6 && (
-        <section className="space-y-4 rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+      {/* Step 7 对账成书 */}
+      {step === 7 && (
+        <section className="glass-card space-y-4 rounded-2xl bg-paper p-5 shadow-sm">
           <h2 className="text-base font-bold"><Ic n="ok" /> 开写前对账（结构化渲染，零 AI 调用——检查的和写的是同一份事实）</h2>
 
           <div>
@@ -1378,10 +1443,10 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
 
       {/* 上一步 / 下一步 */}
       <div className="flex justify-between">
-        <button onClick={() => patch({ step: Math.max(0, step - 1) })} disabled={step === 0 || !!busy || !!creating} className="rounded-full border border-stone-300 px-5 py-2.5 text-sm text-stone-600 hover:bg-[#fbf8ef] disabled:opacity-40">
+        <button onClick={() => patch({ step: Math.max(0, step - 1) })} disabled={step === 0 || !!busy || !!creating} className="rounded-full border border-stone-300 px-5 py-2.5 text-sm text-stone-600 hover:bg-paper disabled:opacity-40">
           ← 上一步
         </button>
-        {step < 6 && (
+        {step < 7 && (
           <button onClick={() => patch({ step: step + 1 })} disabled={!canNext || !!busy || !!creating} className="rounded-full bg-stone-800 px-5 py-2.5 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-40">
             下一步 →
           </button>
@@ -1393,5 +1458,5 @@ export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
 
 // 成书前置条件：圣经世界观 + 主线 + 卷结构 + 第 1 卷细纲
 function canNextBook(st) {
-  return !!st.bible?.world && !!st.mainline && st.volumes.length > 0 && !!st.outline
+  return !!st.bible?.world && !!st.mainline && !!st.storyline && st.volumes.length > 0 && !!st.outline
 }

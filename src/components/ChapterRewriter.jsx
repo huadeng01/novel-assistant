@@ -5,7 +5,7 @@
 import { useRef, useState } from 'react'
 import { chatStream, ANTI_REPETITION } from '../lib/llm.js'
 import { chapterRewriteMessages } from '../lib/prompts.js'
-import { replaceChapter, runPostChapter, reapplyReport, activeStyleRules, aiFlavorScan, povStreak } from '../lib/longform.js'
+import { replaceChapter, runPostChapter, reapplyReport, activeStyleRules, aiFlavorScan, povStreak, formatNovelParagraphs } from '../lib/longform.js'
 import { getById } from '../lib/db.js'
 import { countWords } from '../lib/utils.js'
 import Ic from './Ic.jsx'
@@ -21,7 +21,7 @@ export function parseTitle(full) {
   if (m) title = m[1].trim()
   else if (firstLine.length <= 20 && !/[。！？!?…，,]$/.test(firstLine)) title = firstLine
   const text = title ? lines.slice(firstIdx + 1).join('\n').replace(/^\s+/, '') : full
-  return { title, text }
+  return { title, text: formatNovelParagraphs(text).text } // 重写稿同样排版归一（段落空行 + 行首两格缩进）
 }
 
 export default function ChapterRewriter({ project, saveProject, apiKey, chapterNo, fixPrompt, label, disabled, onDone, editable }) {

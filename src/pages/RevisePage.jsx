@@ -107,7 +107,7 @@ export default function RevisePage({ apiKey, onNeedKey }) {
 
         <div className="min-w-0 space-y-4">
           {/* 原文输入 */}
-          <section className="rounded-2xl bg-[#fbf8ef] p-5 shadow-sm">
+          <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-bold"><Ic n="pencil" /> 粘贴要修改的片段</h2>
               {lib.selectedBook && lib.style && (
@@ -155,7 +155,7 @@ export default function RevisePage({ apiKey, onNeedKey }) {
           {result && result.needRevision && result.versions.length > 0 && (
             <section className="grid gap-4 sm:grid-cols-2">
               {result.versions.map((v, i) => (
-                <article key={i} className="flex flex-col rounded-2xl bg-[#fbf8ef] shadow-sm">
+                <article key={i} className="glass-card flex flex-col rounded-2xl bg-paper shadow-sm">
                   <header className="flex items-center justify-between rounded-t-2xl border-b border-stone-100 px-4 py-3">
                     <h3 className="text-sm font-bold">{v.title || `版本${i + 1}`}</h3>
                     <div className="flex gap-2">

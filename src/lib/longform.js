@@ -179,11 +179,12 @@ export function newProject(name) {
     idea: '',
     genre: '玄幻',
     synopsis: '',
+    storyline: '', // 完整故事线（5000-8000 字叙事通稿，Storyliner 分段生成后拼合）：把整个故事从头讲到尾，存起来供写作层把握全局走向；区别于结构化 synopsis/mainline 里程碑
     world: '',
     worldBlocks: [], // 世界手册结构化块 [{id, name, aliases, kind, content}]；kind='规则' 永不省略；非空时按章选择性注入替代全量 world
     outline: '', // 精简地图（60~120 字/章）：职责是全书/全卷走向与边界感知，不是单章写作依据
     outlineDetail: {}, // 逐章详纲 { [chapterNo]: '500~700 字结构化详纲' }：写章前按需细化、是本章唯一写作依据；与 outline 分开存，避免精简地图与详纲混在一个大字符串里（续纲与编辑 UI 都难维护）
-    outlineDriven: false, // 细纲驱动开关：为真时写章上下文走精简分支（只依赖本章详纲+世界规则块+出场人物卡+文风+前文尾部）；关闭时逐字节等同原有全量上下文
+    outlineDriven: true, // 细纲驱动开关（★默认开启=防剧透最强档）：为真时写章上下文走精简分支（只依赖本章详纲+世界规则块+出场人物卡+文风+前文尾部）；关闭时逐字节等同原有全量上下文。旧默认 false=全量泄漏态（synopsis/passages/rollingSummary 会把后续剧情喂进写作上下文），是「限制很全仍漏剧透」的根因，故改为默认 true；需要旧全量行为的老书可显式关闭。
     volumes: [], // 显式卷档案 [{id, volumeNo, name, strategy, startChapter, length}]；写作时注入本卷战略，自动连写超出末卷范围时自动断卷规划新卷
     volumeLength: 20, // 断卷时每卷默认计划章数（卷结构区可改；0 = 开放式）
     protagonist: '', // 主角姓名（视角约束的依据，在设定页选择）
@@ -192,7 +193,7 @@ export function newProject(name) {
     memoryUpTo: 0, // 已压入卷志的章数
     storylines: [], // {name, type, progress, lastChapter} 持久化故事线档案（进展随每章回写）
     characters: [], // {uid, name, aliases, identity, personality, description, status, alive, canSpeak, location, mutableInjuries}；uid=canonical 身份主键（随机铸造、一次分配永不变、不由名字派生，机制一），alive(alive/dying/dead)/canSpeak/location/mutableInjuries 为受控状态位
-    chapters: [], // {id, chapterNo, title, content, wordCount, summary, pov, issueCount, createdAt}
+    chapters: [], // {id, chapterNo, title, content, wordCount, summary, pov, issueCount, createdAt, userNotes, prev}
     foreshadows: [], // {id, content, relatedChars, importance, plantedChapter, minResolveChapter, status, resolveChapter}
     events: [], // {chapter, text} 事件级时间线
     facts: [], // 受控谓词事实库（机制二·双时态）：{id, uid, subject, predicate, value, validFrom, validTo, sourceChapter}；按 uid 索引（同名角色不合并），新值关闭旧区间而非覆盖，是消歧后的权威记忆（优先级高于名字键 chronicles）
@@ -453,11 +454,12 @@ export function dedupeRepeatedClauses(text, opts = {}) {
   const clauses = []
   let m
   while ((m = re.exec(raw)) !== null) {
-    if (m[0].trim()) clauses.push({ s: m[0], n: normalizeForDedup(m[0]) })
+    if (m[0].trim()) clauses.push({ s: m[0], start: m.index, end: m.index + m[0].length, n: normalizeForDedup(m[0]) })
   }
   if (clauses.length < 3) return { text: raw, removedCount: 0, removed: '', flagged: false }
   const kept = []
   const removed = []
+  const removeSpans = []
   for (const c of clauses) {
     if (c.n.length < minLen) { kept.push(c); continue }
     let dup = false
@@ -466,11 +468,19 @@ export function dedupeRepeatedClauses(text, opts = {}) {
       const common = longestCommonSubstring(p.n, c.n)
       if (common.length >= hardLen || (common.length >= minLen && common.length / c.n.length >= dominate)) { dup = true; break }
     }
-    if (dup) removed.push(c.s.trim())
+    if (dup) { removed.push(c.s.trim()); removeSpans.push([c.start, c.end]) }
     else kept.push(c)
   }
   if (!removed.length) return { text: raw, removedCount: 0, removed: '', flagged: false }
-  return { text: kept.map((c) => c.s).join(''), removedCount: removed.length, removed: removed.join('｜').slice(0, 500), flagged: true }
+  // 按原文坐标从后往前删，不用 kept.map().join('') 重组：上面的正则只吃单个换行，
+  // 段间的空行不属于任何 clause，重组会把它们一并丢掉——成稿变成一整块无换行、无分段的字墙。
+  let out = raw
+  for (let k = removeSpans.length - 1; k >= 0; k--) {
+    const [s, e] = removeSpans[k]
+    out = out.slice(0, s) + out.slice(e)
+  }
+  out = out.replace(/\n{3,}/g, '\n\n')
+  return { text: out, removedCount: removed.length, removed: removed.join('｜').slice(0, 500), flagged: true }
 }
 
 // 确定性「重复长短语」扫描（补 dedupeChapterSentences 的粒度盲区）：《剑来》式 40~80 字长复句里，
@@ -2701,6 +2711,34 @@ export function replaceChapter(project, chapterNo, { title, text }, meta = {}) {
   return next
 }
 
+// 逐章用户意见（§7/§9）：chapter.userNotes[] = {id, text, at, applied}。
+// addUserNote 追加一条未落实意见；applyUserNotes 把意见标记为已落实（定向重写落库后调用，避免重复计入下次修订指令）。
+// 纯函数、幂等、不 mutate 入参，与 replaceChapter/restoreChapter 同口径，可单测。noteIds 省略时标记该章全部未落实意见。
+export function addUserNote(project, chapterNo, text) {
+  const body = String(text || '').trim()
+  if (!body) return project
+  const next = { ...project }
+  next.chapters = (project.chapters || []).map((c) =>
+    c.chapterNo === chapterNo
+      ? { ...c, userNotes: [...(c.userNotes || []), { id: uid(), text: body, at: Date.now(), applied: false }] }
+      : c,
+  )
+  next.updatedAt = Date.now()
+  return next
+}
+
+export function applyUserNotes(project, chapterNo, noteIds) {
+  const only = Array.isArray(noteIds) ? new Set(noteIds) : null
+  const next = { ...project }
+  next.chapters = (project.chapters || []).map((c) =>
+    c.chapterNo === chapterNo && Array.isArray(c.userNotes)
+      ? { ...c, userNotes: c.userNotes.map((nm) => ((only ? only.has(nm.id) : !nm.applied) ? { ...nm, applied: true } : nm)) }
+      : c,
+  )
+  next.updatedAt = Date.now()
+  return next
+}
+
 // 恢复替换前的原稿：把 prev 快照回写正文与派生数据（问题明细一并清空，因为那是旧版本的校验结果）；无快照时不动
 export function restoreChapter(project, chapterNo) {
   const next = { ...project }
@@ -3361,6 +3399,27 @@ export function normalizeRunOnPunctuation(text, opts = {}) {
     inserted += cnt
   }
   return { text: out, inserted, flagged: inserted > 0 }
+}
+
+// 中文小说排版归一（确定性、幂等）：段与段之间空一行 + 每段行首两个全角空格缩进。
+// 治「成稿无缩进、无换行」：模型逐场景扩写回来的段落边界常被压成单换行甚至连排，而正文的主要工作面是
+// <textarea>——CSS 的 text-indent 只对块级首行生效，textarea 里每行都是首行，做不出中文小说的两字缩进。
+// 所以把排版落到字符层（\n\n + U+3000×2），编辑框、阅读视图、导出三处看到的就是同一份排好版的正文。
+// 只动空白字符，一个字都不改；countWords / normalizeForDedup 都把 \s（含 U+3000）当空白，字数与去重口径不受影响。
+// 已排好版的正文再跑一次结果不变（幂等），可以安全地放在生成、保存、展示三处重复调用。
+export function formatNovelParagraphs(text, opts = {}) {
+  const indent = opts.indent ?? '\u3000\u3000'
+  const gap = opts.gap ?? '\n\n'
+  const raw = String(text || '')
+  if (!raw.trim()) return { text: raw, flagged: false }
+  // 按任意连续换行切段，再去掉每段两端的空白与旧缩进，避免重复叠加缩进
+  const paras = raw
+    .split(/\n+/)
+    .map((p) => p.replace(/^[\s\u3000]+/, '').replace(/[\s\u3000]+$/, ''))
+    .filter((p) => p.length > 0)
+  if (!paras.length) return { text: raw, flagged: false }
+  const out = paras.map((p) => (p.startsWith(indent) ? p : indent + p)).join(gap)
+  return { text: out, flagged: out !== raw }
 }
 
 // P0-2 残留重复定向修复：把「二次自检对长章返回整章 revisedText 被 0.7 地板拒绝」的两难（§3.1），
