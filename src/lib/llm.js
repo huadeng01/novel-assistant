@@ -9,7 +9,7 @@ const QWEN_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/complet
 export const QWEN_DEFAULT_MODEL = 'qwen3.8-max'
 export const getQwenModel = () => localStorage.getItem('qwen_model') || QWEN_DEFAULT_MODEL
 
-// 写作引擎选择：'deepseek'（默认）或 'qwen'，存 localStorage；GLM 审核引擎独立不受影响。
+// 写作引擎选择：'deepseek'（默认）或 'qwen'，存 localStorage。
 // 全站所有生成请求（写作/规划/归档/重写）统一走当前选中的引擎，API Key 各自独立保存。
 export const writerProvider = () => (localStorage.getItem('writer_provider') === 'qwen' ? 'qwen' : 'deepseek')
 export const setWriterProvider = (p) => localStorage.setItem('writer_provider', p === 'qwen' ? 'qwen' : 'deepseek')
@@ -17,16 +17,12 @@ export const WRITER_LABELS = { deepseek: 'DeepSeek', qwen: '通义千问' }
 export const writerProviderLabel = () => WRITER_LABELS[writerProvider()]
 
 // 当前写作引擎的连接配置（url / model / 文案标签 / 本机存的 Key / 是否需要关思考模式）
-export function writerConfig() {
+// thinking=true 时 qwen 开思考模式（成文与灵感补全问题用，约束执行靠落笔前规划）；其余调用保持关（快）
+export function writerConfig(thinking = false) {
   return writerProvider() === 'qwen'
-    ? { url: QWEN_URL, model: getQwenModel(), provider: '通义千问', key: localStorage.getItem('qwen_api_key') || '', noThinking: true }
+    ? { url: QWEN_URL, model: getQwenModel(), provider: '通义千问', key: localStorage.getItem('qwen_api_key') || '', noThinking: !thinking }
     : { url: API_URL, model: MODEL, provider: 'DeepSeek', key: localStorage.getItem('ds_api_key') || '', noThinking: false }
 }
-
-// 智谱 GLM（审核引擎）：OpenAI 兼容协议，模型 ID 可在「我的」页自定义，默认 glm-4.7-flash
-const GLM_URL = 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
-export const GLM_DEFAULT_MODEL = 'glm-4.7-flash'
-export const getGlmModel = () => localStorage.getItem('glm_model') || GLM_DEFAULT_MODEL
 
 // 把 API 错误翻译成人话，小白用户不需要看原始报错（provider 用于区分文案）
 function friendlyError(status, data, provider = 'DeepSeek') {
@@ -38,7 +34,7 @@ function friendlyError(status, data, provider = 'DeepSeek') {
 }
 
 // 防复读（温和兜底）：LLM 写长正文时易在尾部进入“复读机”循环、整段重吐前文。
-// frequency/presence_penalty 是 OpenAI 兼容端点（DeepSeek/通义/智谱）标准的解码级防重复参数，取温和值只作安全网、不使文风生硬。
+// frequency/presence_penalty 是 OpenAI 兼容端点（DeepSeek/通义）标准的解码级防重复参数，取温和值只作安全网、不使文风生硬。
 // 关键边界1：惩罚会降低“重复 token”的概率，而【结构化枚举输出】（章名骨架/细纲：每行都必须重复“第/章/｜/任务：”等结构 token）
 // 与【JSON】（字段名必须重复）恰恰依赖重复 token——对它们加惩罚会诱发格式崩坏（把“任务：”替换成英文“task:”、断号、思维链泄漏）。
 // 因此 chatStream 默认【不带】惩罚，只有【长正文散文生成】显式 opt-in（展开 ANTI_REPETITION）；chatJSON 永远不带。
@@ -54,24 +50,269 @@ const DRAFT_PRESENCE_PENALTY = 0.2
 // 长正文散文生成的防复读预设：仅章节正文/续写/改写等散文路径展开使用；骨架/细纲/规划/JSON 一律不用。
 export const ANTI_REPETITION = { frequencyPenalty: DRAFT_FREQUENCY_PENALTY, presencePenalty: DRAFT_PRESENCE_PENALTY }
 
-async function doFetch({ apiKey, messages, stream, temperature, jsonMode, maxTokens, signal, url, model, provider, webSearch, frequencyPenalty, presencePenalty }) {
-  // 未显式传 url 时（写作链路）按当前选中的写作引擎路由；显式传 url 的（GLM 审核）不受影响
-  const cfg = url ? { url, model, provider } : writerConfig()
+// ============ 统一超时 + 重试（全链路收口，调用方只传预算） ============
+// 背景：dashscope 偶发「HTTP 连接还活着但不再吐字」的僵死流，单请求可 in-flight >10 分钟，
+// 把整条自动连写静默拖停（表现为某章之后再无落库、也没有报错）。超时统一在 llm.js 实现，
+// 调用方不再各自手写 AbortController + setTimeout（此前只有 LongFormPage.planJSON 有一套，其余路径全裸）。
+//
+// 语义区分（关键，别混）：
+//   - 流式：timeoutMs 是【空闲看门狗】——只有「正文 delta 真的变长」才重置计时；SSE 心跳/空 delta 不算进展。
+//     另用 totalTimeoutMs 作总时长兜底，防「每几分钟挤一个字」的病态慢流靠不断 touch 永不超时。
+//     为什么不把总时长当唯一判据：一章 2000~4000 字的合法生成本身就可能要几分钟，
+//     总时长硬上限会误杀正常长章 → 重试从头重写 → 更慢、且已写好的半章白扔。
+//   - 非流式：没有增量概念，timeoutMs 就是总时长。
+//
+// 重试与 abort 的边界：
+//   - 只有【看门狗触发的超时】才重试（默认 1 次）。
+//   - 外部 signal 主动 abort（用户点「停止」）原样上抛 AbortError、绝不重试——用户停了还偷偷跑是不可接受的。
+//   - 超时最终失败抛 name='TimeoutError'，【不复用 AbortError】：上层 consistency/editor/runtime 都把 AbortError
+//     当「用户停止」直接终止整条连写；超时属于服务抖动，应走各自的降级（skipped）让连写继续跑下一章。
+export const LLM_TIMEOUT = {
+  STREAM_IDLE: 300_000, // 流式默认：300s 无正文进展判僵死
+  STREAM_TOTAL: 1_800_000, // 流式默认总时长兜底：30min
+  JSON: 120_000, // 非流式默认：120s
+  SCENE_IDLE: 240_000, // 单场景正文（writer 逐场景扩写）：篇幅小、该更快
+  SCENE_TOTAL: 900_000,
+  CHAPTER_TOTAL: 1_200_000, // 整章级流式（单次生成/定点重写/续写）总时长兜底
+  REVIEW_JSON: 180_000, // 审校/归档类 JSON：上下文长（整章正文+设定），比默认宽
+}
+
+// 合并「外部用户 signal」与「内部看门狗计时器」为单个可传给 fetch 的 signal。
+// touch() 由流式解析循环在拿到正文增量时调用，用于重置空闲计时；非流式不调用即可。
+function makeWatchdog({ signal, idleMs, totalMs }) {
+  const ac = new AbortController()
+  let idleTimer = null
+  let firedBy = null
+  const onExternalAbort = () => ac.abort()
+  if (signal) {
+    if (signal.aborted) ac.abort()
+    else signal.addEventListener('abort', onExternalAbort, { once: true })
+  }
+  const fire = (by) => {
+    if (!firedBy) firedBy = by
+    ac.abort()
+  }
+  const armIdle = () => {
+    if (idleMs == null) return
+    clearTimeout(idleTimer)
+    idleTimer = setTimeout(() => fire('idle'), idleMs)
+  }
+  const totalTimer = totalMs == null ? null : setTimeout(() => fire('total'), totalMs)
+  armIdle()
+  return {
+    signal: ac.signal,
+    touch: armIdle,
+    // 计时器与监听器必须清干净：否则每次调用都往外部 signal 上挂一个常驻监听，长连写会累积泄漏
+    dispose: () => {
+      clearTimeout(idleTimer)
+      if (totalTimer) clearTimeout(totalTimer)
+      signal?.removeEventListener?.('abort', onExternalAbort)
+    },
+    timedOut: () => Boolean(firedBy),
+    firedBy: () => firedBy,
+  }
+}
+
+// 超时错误：name 用 TimeoutError 而非 AbortError（上层把 AbortError 当「用户停止」终止整条连写）；
+// by 区分是「长时间无新内容」还是「总时长兜底」触发，消息与 timeoutKind 都要如实反映，便于事后排查是僵死还是慢。
+export function llmTimeoutError({ by = 'idle', idleMs, totalMs, attempts = 1 }) {
+  const detail = by === 'total' ? `总时长超过 ${Math.round((totalMs || 0) / 1000)} 秒` : `${Math.round((idleMs || 0) / 1000)} 秒没有新内容`
+  const e = new Error(`AI 响应超时（${detail}），已重试 ${Math.max(0, attempts - 1)} 次仍无响应，本次调用放弃。`)
+  e.name = 'TimeoutError'
+  e.timeoutKind = by
+  return e
+}
+
+function userAbortError() {
+  const e = new Error('已停止生成')
+  e.name = 'AbortError'
+  return e
+}
+
+// ============ 用量核算（token 计量）+ 并发闸（多 agent 并行的安全阀） ============
+// 为什么要它：分卷多 agent 建书会一次并行跑多个卷 agent。此前全站**从不读响应里的 usage**，
+// 一次建书/写书花了多少 token 完全不可知（成本无法评估）；也没有任何并发上限（并行无法安全开）。
+// 口径纪律：
+//   · usage 读不到就记 **null**，绝不补 0 —— 0 会被下游当成「真实用量是零」，与「没测到」无法区分。
+//   · calls 记的是**真实发出的请求数**，含超时重试的每一次尝试（每次重试都是一份新 token）。
+//   · 累计值只在「至少读到一次 usage」时才是数字，否则保持 null（未激活），文案见 llmUsageText。
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null)
+
+// 各家 OpenAI 兼容端点（DeepSeek / dashscope）的 usage 字段名一致，但**给不给**不一致：
+// 非流式都给；流式默认只在最后一个分片给，dashscope 兼容模式还要显式开 stream_options.include_usage
+// （见 doFetch）。input_tokens/output_tokens 是 dashscope 原生模式的别名，一并容错读。
+export function parseUsage(u) {
+  if (!u || typeof u !== 'object') return null
+  const promptTokens = num(u.prompt_tokens ?? u.input_tokens)
+  const completionTokens = num(u.completion_tokens ?? u.output_tokens)
+  const given = num(u.total_tokens)
+  const totalTokens = given != null ? given : promptTokens != null && completionTokens != null ? promptTokens + completionTokens : null
+  if (promptTokens == null && completionTokens == null && totalTokens == null) return null
+  return { promptTokens, completionTokens, totalTokens }
+}
+
+export function emptyUsageLedger() {
+  return { calls: 0, observed: 0, promptTokens: null, completionTokens: null, totalTokens: null, byProvider: {} }
+}
+
+// 只把「真的有值」的加进去；任一侧为 null 时结果保持 null（缺测不冒充 0）
+const addNullable = (a, b) => (b == null ? a : (a == null ? b : a + b))
+
+// 5.4：用量账本持久化。原先 usageLedger 是纯内存态，刷新即清零，成本无法累积查看。
+// 账本数据极小（计数 + token 累加值），存 localStorage 即可；读写都包 try/catch，隐私模式/配额满时退化为内存态、不抛错。
+const store = () => (typeof localStorage === 'undefined' ? null : localStorage)
+const USAGE_LEDGER_KEY = 'llm_usage_ledger'
+function loadUsageLedger() {
+  try {
+    const raw = store()?.getItem?.(USAGE_LEDGER_KEY)
+    return raw ? normalizeUsageLedger(JSON.parse(raw)) : emptyUsageLedger()
+  } catch {
+    return emptyUsageLedger()
+  }
+}
+function persistUsageLedger() {
+  try {
+    store()?.setItem?.(USAGE_LEDGER_KEY, JSON.stringify(usageLedger))
+  } catch {
+    /* 隐私模式/配额满：退化为内存态，本次会话仍可见，只是刷新不保留 */
+  }
+}
+
+let usageLedger = loadUsageLedger()
+
+// 记一次真实调用。usage 传原始响应里的 usage 对象（没有就传 null）。返回记账后的快照。
+export function recordLlmUsage({ provider = '', usage = null } = {}) {
+  const p = provider || '未知引擎'
+  const bucket = (usageLedger.byProvider[p] = usageLedger.byProvider[p] || { calls: 0, observed: 0, promptTokens: null, completionTokens: null, totalTokens: null })
+  usageLedger.calls += 1
+  bucket.calls += 1
+  const u = parseUsage(usage)
+  if (u) {
+    usageLedger.observed += 1
+    bucket.observed += 1
+    for (const [dst, src] of [[usageLedger, u], [bucket, u]]) {
+      dst.promptTokens = addNullable(dst.promptTokens, src.promptTokens)
+      dst.completionTokens = addNullable(dst.completionTokens, src.completionTokens)
+      dst.totalTokens = addNullable(dst.totalTokens, src.totalTokens)
+    }
+  }
+  persistUsageLedger() // 5.4：每次记账后落盘，刷新不清零
+  return llmUsage()
+}
+
+export function llmUsage() {
+  const l = usageLedger
+  return { ...l, byProvider: Object.fromEntries(Object.entries(l.byProvider).map(([k, v]) => [k, { ...v }])) }
+}
+
+// 归一外部传进来的用量对象（localStorage 老存档 / 字段缺失）：缺的就留 null，绝不补 0
+export function normalizeUsageLedger(u) {
+  if (!u || typeof u !== 'object') return emptyUsageLedger()
+  const byProvider = {}
+  const src = u.byProvider && typeof u.byProvider === 'object' ? u.byProvider : {}
+  for (const [k, v] of Object.entries(src)) {
+    byProvider[k] = { calls: Number(v?.calls) || 0, observed: Number(v?.observed) || 0, promptTokens: num(v?.promptTokens), completionTokens: num(v?.completionTokens), totalTokens: num(v?.totalTokens) }
+  }
+  return { calls: Number(u.calls) || 0, observed: Number(u.observed) || 0, promptTokens: num(u.promptTokens), completionTokens: num(u.completionTokens), totalTokens: num(u.totalTokens), byProvider }
+}
+
+// 用量 → 人话。0/0 纪律：一次都没读到 usage 时写「未激活」，不写成 0 tokens；
+// 只读到一部分时把「没带的次数」说出来，否则合计值会被当成全量。
+export function llmUsageText(l) {
+  const s = normalizeUsageLedger(l == null ? usageLedger : l)
+  const calls = Number(s.calls) || 0
+  if (!calls) return 'AI 用量未激活（本次还没有任何 AI 调用）'
+  const observed = Number(s.observed) || 0
+  const missing = calls - observed
+  const head = `AI 调用 ${calls} 次`
+  if (!observed) return `${head}，token 用量未激活（${calls} 次响应都没带 usage，算不出 token，不是 0）`
+  const f = (v) => (v == null ? '未测到' : String(v))
+  const tail = missing > 0 ? `；另有 ${missing} 次响应没带 usage、未计入（合计是部分值，不是全量）` : ''
+  return `${head}，其中 ${observed} 次带 usage：合计 ${f(s.totalTokens)} tokens（prompt ${f(s.promptTokens)} / completion ${f(s.completionTokens)}）${tail}`
+}
+
+// ---------- 并发闸 ----------
+// 默认 3：写作链路本身是「一章接一章」的串行流式，正常单线跑不会撞到闸；
+// 闸真正要拦的是分卷多 agent 并行 —— 6 个卷 agent 同时打出去会撞 429（dashscope 有 QPS 限制），
+// 而 429 在 friendlyError 里只是「请稍等几秒再试」，会让整卷规划静默失败。
+// 超限的调用**排队等**，不丢弃、不并发打出去。
+export const LLM_MAX_CONCURRENT_DEFAULT = 3
+export function llmMaxConcurrent() {
+  const n = Number(store()?.getItem?.('llm_max_concurrent'))
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : LLM_MAX_CONCURRENT_DEFAULT
+}
+
+let activeSlots = 0
+const slotQueue = []
+
+// 拿一个槽位再执行 run；槽位在整个请求生命周期（含流式读完）内占用，finally 里必定释放并唤醒下一个。
+export function withLlmSlot(run) {
+  return new Promise((resolve, reject) => {
+    const start = () => {
+      // L-8：真正起跑前再校验一次并发上限——llmMaxConcurrent() 是动态读的，用户中途调小后，
+      //   已排队被唤醒的 start 不能照旧放行（会超限）。超限则退回队首，等下次有槽位释放再被唤醒。
+      //   退回时 activeSlots 必 ≥ max ≥ 1（否则不会走到这），故一定还有在跑的请求会触发下一次唤醒，不会饿死。
+      if (activeSlots >= llmMaxConcurrent()) { slotQueue.unshift(start); return }
+      activeSlots += 1
+      Promise.resolve()
+        .then(run)
+        .then(resolve, reject)
+        .finally(() => {
+          activeSlots -= 1
+          const next = slotQueue.shift()
+          if (next) next()
+        })
+    }
+    if (activeSlots < llmMaxConcurrent()) start()
+    else slotQueue.push(start)
+  })
+}
+
+// run(watchdogSignal, touch) → 结果；超时重试 retries 次（默认 1），用户 abort 立即上抛不重试。
+// 并发闸包在重试外层：一次 chatStream 调用（含它的所有重试）只占一个槽位，
+// 否则重试会在闸上再排一次队，6 个卷 agent 的排队深度会随重试翻倍、且看起来像并发失控。
+async function callWithTimeout({ signal, idleMs, totalMs, retries = 1, run }) {
+  return withLlmSlot(() => callWithTimeoutInner({ signal, idleMs, totalMs, retries, run }))
+}
+
+async function callWithTimeoutInner({ signal, idleMs, totalMs, retries = 1, run }) {
+  // 前置守卫：调用前用户就已停止 → 连一次请求都不发（真实 fetch 虽会立刻拒绝，但没必要白发一次）
+  if (signal?.aborted) throw userAbortError()
+  let lastKind = null
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    // 上一轮超时后、重试前用户已点停止：不再发起新请求
+    if (attempt > 0 && signal?.aborted) throw userAbortError()
+    const wd = makeWatchdog({ signal, idleMs, totalMs })
+    try {
+      return await run(wd.signal, wd.touch)
+    } catch (e) {
+      // 只有看门狗自己触发的 abort 才算超时；用户停止（或其他网络/HTTP 错误）原样上抛，交给调用方既有策略
+      if (!wd.timedOut()) throw e
+      lastKind = wd.firedBy()
+    } finally {
+      wd.dispose()
+    }
+  }
+  throw llmTimeoutError({ by: lastKind, idleMs, totalMs, attempts: retries + 1 })
+}
+
+async function doFetch({ apiKey, messages, stream, temperature, jsonMode, maxTokens, signal, url, model, provider, frequencyPenalty, presencePenalty, thinking = false }) {
+  // 未显式传 url 时（写作链路）按当前选中的写作引擎路由；显式传 url/model/provider 的（如指定引擎测试 Key）不受影响
+  const cfg = url ? { url, model, provider } : writerConfig(thinking)
   const body = { model: cfg.model, messages, stream, temperature }
+  // 流式必须显式要 usage：dashscope 兼容模式（以及 DeepSeek）默认**不在流式响应里回 usage**，
+  // 带上 include_usage 后最后一个分片的 choices 为空数组、usage 才有值。解析侧对空 choices 已容错。
+  if (stream) body.stream_options = { include_usage: true }
   // qwen3 系列默认开启思考模式：思考内容走 reasoning_content 字段，本站解析器只读 content，
   // 表现为长时间无响应；且官方要求思考模式只能用于流式请求，非流式（归档/诊断等 JSON 调用）会报错。
-  // 写作场景不需要思考链，统一关闭，响应也更快。
+  // 建书等求快的调用关思考（noThinking=true → enable_thinking=false）；成文与灵感补全问题要落笔前规划，
+  // 显式打开（thinking=true → writerConfig.noThinking=false → 不置 enable_thinking，qwen 走默认的思考开）。
   if (cfg.noThinking) body.enable_thinking = false
   if (jsonMode) body.response_format = { type: 'json_object' }
   if (maxTokens) body.max_tokens = maxTokens
   // 解码级防复读（温和兜底）：仅正文流式生成会传入，JSON 调用不传
   if (frequencyPenalty != null) body.frequency_penalty = frequencyPenalty
   if (presencePenalty != null) body.presence_penalty = presencePenalty
-  // 联网搜索（灵感选题用）：智谱走 web_search 工具、通义走 enable_search；DeepSeek 无此能力，忽略
-  if (webSearch) {
-    if (cfg.provider === '智谱 GLM') body.tools = [{ type: 'web_search', web_search: { enable: true } }]
-    else if (cfg.provider === '通义千问') body.enable_search = true
-  }
   let res
   try {
     res = await fetch(cfg.url, {
@@ -99,51 +340,148 @@ async function doFetch({ apiKey, messages, stream, temperature, jsonMode, maxTok
   return res
 }
 
+// 非流式：读 body 的同时把 usage 记进账本（读不到就记 null，不补 0）
+async function readJsonUsage(res, provider) {
+  const data = await res.json()
+  recordLlmUsage({ provider, usage: data?.usage })
+  return data
+}
+
 // 流式调用：边生成边回调，返回完整文本（用于打字机效果）；
 // Key 始终取当前写作引擎的（页面层传入的可能是切换引擎前的旧值，避免拿错家的 Key 打错家的门）
-export async function chatStream({ apiKey, messages, temperature = 0.9, onDelta, signal, frequencyPenalty = null, presencePenalty = null, maxTokens }) {
-  const res = await doFetch({ apiKey: writerConfig().key || apiKey, messages, stream: true, temperature, signal, frequencyPenalty, presencePenalty, maxTokens })
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let full = ''
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() || ''
-    for (const line of lines) {
-      const t = line.trim()
-      if (!t.startsWith('data:')) continue
-      const payload = t.slice(5).trim()
-      if (payload === '[DONE]') continue
+// 超时：timeoutMs = 无正文进展的空闲上限（每收到增量就重置），totalTimeoutMs = 单次尝试总时长兜底；
+// 超时自动重试 retries 次（默认 1），用户 abort 不重试。重试会从头重生成，onDelta 收到的是新一轮的累计文本。
+export async function chatStream({
+  apiKey,
+  messages,
+  temperature = 0.9,
+  onDelta,
+  signal,
+  frequencyPenalty = null,
+  presencePenalty = null,
+  maxTokens,
+  timeoutMs = LLM_TIMEOUT.STREAM_IDLE,
+  totalTimeoutMs = LLM_TIMEOUT.STREAM_TOTAL,
+  retries = 1,
+  finishInfo = null,
+  thinking = false,
+}) {
+  return callWithTimeout({
+    signal,
+    idleMs: timeoutMs,
+    totalMs: totalTimeoutMs,
+    retries,
+    run: async (wdSignal, touch) => {
+      // 每次尝试都要清空：超时重试是从头重生成，上一次尝试的 finish_reason 不属于这一份文本
+      if (finishInfo && typeof finishInfo === 'object') { finishInfo.finishReason = ''; finishInfo.truncated = false; finishInfo.incomplete = false }
+      // L-7：在请求起点捕获一次 provider，finally 记账用这个局部值——流式请求可能持续数十秒，
+      //   期间用户若切换写作引擎，到 finally 再读 writerConfig().provider 会把这次消耗记到错误的引擎名下。
+      const provider = writerConfig(thinking).provider
+      const res = await doFetch({ apiKey: writerConfig().key || apiKey, messages, stream: true, temperature, signal: wdSignal, frequencyPenalty, presencePenalty, maxTokens, thinking })
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let full = ''
+      // 流式 usage 只在最后一个分片出现（且该分片 choices 为空）；逐分片覆盖即可拿到最终值。
+      // 放在 finally 里记账：僵死流被看门狗 abort、或用户点停止时，这一次请求**已经真实烧了 token**，
+      // 不记就会让「总调用次数」少算（重试从头再写一遍，那一份也算）。此时 usage 多半没读到 → 记 null。
+      let usage = null
       try {
-        const json = JSON.parse(payload)
-        const delta = json.choices?.[0]?.delta?.content || ''
-        if (delta) {
-          full += delta
-          onDelta?.(full)
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || ''
+          for (const line of lines) {
+            const t = line.trim()
+            if (!t.startsWith('data:')) continue
+            const payload = t.slice(5).trim()
+            if (payload === '[DONE]') continue
+            try {
+              const json = JSON.parse(payload)
+              if (json?.usage) usage = json.usage
+              const d = json.choices?.[0]?.delta || {}
+              const delta = d.content || ''
+              // 思考模式下 qwen 会先流一段 reasoning_content（此时正文 content 为空）：只喂看门狗、不进正文，
+              // 否则落笔前的长思考会被「空闲无正文进展」误判僵死。正文增量仍照常 touch + 回调。
+              if (d.reasoning_content) touch()
+              if (delta) {
+                full += delta
+                // 只有真拿到正文才算「有进展」：SSE 心跳/空 delta 不重置看门狗，否则僵死流靠心跳就能永远续命
+                touch()
+                onDelta?.(full)
+              }
+              // finish_reason（T-criticfix）：max_tokens 触顶时正文会停在半句上，而流式调用**不会报错** ——
+              // 此前全项目没有任何一处读它，截断 100% 静默（实测一章末句「……谁调的」无标点、无右引号就这样落库了）。
+              // 各家字段位置不同（choices[0] / choices[0].delta / 顶层），一律容错读；只回填、不改返回值类型，
+              // 所以存量调用方（writer/页面各处长篇流式）零改动、零回归。命中 'length' 即置 truncated=true。
+              if (finishInfo && typeof finishInfo === 'object') {
+                const fr = json?.choices?.[0]?.finish_reason || json?.choices?.[0]?.delta?.finish_reason || json?.finish_reason || ''
+                if (fr) {
+                  finishInfo.finishReason = String(fr)
+                  finishInfo.truncated = finishInfo.finishReason === 'length'
+                }
+              }
+            } catch {
+              /* 单个分片解析失败不影响整体 */
+            }
+          }
         }
-      } catch {
-        /* 单个分片解析失败不影响整体 */
+        // M11：流正常结束(done)但全程没收到 finish_reason 分片（服务端提前 FIN，非僵死）→ full 可能是半截正文。
+        // 用独立的 incomplete 标记（不覆盖 truncated，避免与 length 截断混淆、也不把"正常收尾但 provider 不发 finish_reason"误判成坏稿）；UI 据此提示"可能不完整"。
+        if (finishInfo && typeof finishInfo === 'object' && full && !finishInfo.finishReason) finishInfo.incomplete = true
+        return full
+      } finally {
+        recordLlmUsage({ provider, usage })
       }
-    }
-  }
-  return full
+    },
+  })
 }
 
 // 非流式调用并要求 JSON 输出，解析失败时抛错由调用方重试
-export async function chatJSON({ apiKey, messages, temperature = 0.4, signal }) {
-  const res = await doFetch({ apiKey: writerConfig().key || apiKey, messages, stream: false, temperature, jsonMode: true, signal })
-  const data = await res.json()
+// timeoutMs 即总时长（无增量概念）；超时自动重试 retries 次（默认 1），用户 abort 不重试。
+// 注意：JSON 格式崩坏（extractJSON 抛错）不属于超时，不在此处重试——各调用方已有「降温重问一次」的既有策略。
+export async function chatJSON({ apiKey, messages, temperature = 0.4, signal, timeoutMs = LLM_TIMEOUT.JSON, retries = 1 }) {
+  const data = await callWithTimeout({
+    signal,
+    idleMs: timeoutMs,
+    totalMs: null,
+    retries,
+    run: async (wdSignal) => {
+      // M15：在 await 之前捕获一次 provider，记账用它——否则请求期间用户切换写作引擎，会把这次消耗记到错误的引擎名下（同 chatStream 的 L-7）。
+      const provider = writerConfig().provider
+      const res = await doFetch({ apiKey: writerConfig().key || apiKey, messages, stream: false, temperature, jsonMode: true, signal: wdSignal })
+      return readJsonUsage(res, provider)
+    },
+  })
   const text = data.choices?.[0]?.message?.content || ''
+  // M10：非流式也读 finish_reason；被长度截断时报"超长"而非让 extractJSON 抛"格式不正确"误导用户去反复重试
+  if (data.choices?.[0]?.finish_reason === 'length') throw new Error('AI 回复超长被截断，请缩小任务范围或分步生成（并非格式错误）')
   return extractJSON(text)
 }
 
 // 从模型回复中抽取 JSON（兼容带 ```json 代码块包裹的情况）
 export function extractJSON(text) {
-  const cleaned = text.replace(/```json|```/g, '')
+  const cleaned = text.replace(/```json|```/g, '').trim()
+  // 顶层数组支持：补全问答等场景模型返回 [...]；旧逻辑只找 {...} 会把数组外层切坏导致 parse 失败
+  if (cleaned.startsWith('[')) {
+    const as = cleaned.indexOf('[')
+    const ae = cleaned.lastIndexOf(']')
+    if (ae > as) {
+      const slice = cleaned.slice(as, ae + 1)
+      try {
+        return JSON.parse(slice)
+      } catch {
+        try {
+          return JSON.parse(slice.replace(/,\s*([}\]])/g, '$1'))
+        } catch (e) {
+          // M12：以 [ 开头就该返回数组；两次解析都失败直接抛，不静默落到对象分支返回单个对象（会让期望数组的调用方拿到对象而不自知）
+          throw new Error('数组 JSON 解析失败：' + (e && e.message ? e.message : String(e)))
+        }
+      }
+    }
+  }
   const start = cleaned.indexOf('{')
   const end = cleaned.lastIndexOf('}')
   if (start === -1 || end === -1 || end <= start) {
@@ -156,18 +494,8 @@ export function extractJSON(text) {
   }
 }
 
-// 用最小的请求测试 Key 是否有效（按当前选中的写作引擎测试）
-export async function testKey(apiKey) {
-  await doFetch({
-    apiKey,
-    messages: [{ role: 'user', content: '你好' }],
-    stream: false,
-    temperature: 0,
-    maxTokens: 1,
-  })
-  return true
-}
-
+// 用量口径的边界：所有**生成**调用（流式 + JSON）都过 callWithTimeout，自动计入账本；
+// 下面的 testKeyFor 探活（max_tokens=1）不计入 —— 它不属于建书/写书，计进去会污染调用次数。
 // 指定引擎测试 Key（「我的」页两个写作引擎各自测试用，不依赖当前选中项）
 export async function testKeyFor(provider, apiKey) {
   const cfg = provider === 'qwen' ? { url: QWEN_URL, model: getQwenModel(), provider: '通义千问' } : { url: API_URL, model: MODEL, provider: 'DeepSeek' }
@@ -178,90 +506,6 @@ export async function testKeyFor(provider, apiKey) {
     temperature: 0,
     maxTokens: 1,
     ...cfg,
-  })
-  return true
-}
-
-// 灵感选题生成：纯题材脑洞（不联网搜热梗），走当前写作引擎；
-// 世界观底稿由调用方注入 messages（见 worldviews 库），温度偏高鼓励发散。
-export async function inspirationJSON({ apiKey, messages, temperature = 0.95 }) {
-  const cfg = writerConfig()
-  const res = await doFetch({ apiKey: cfg.key || apiKey, messages, stream: false, temperature })
-  const data = await res.json()
-  return { data: extractJSON(data.choices?.[0]?.message?.content || ''), engine: cfg.provider }
-}
-
-// ============ 智谱 GLM 客户端（章节审核引擎，与写作引擎分工） ============
-// 注：GLM 不强制 JSON 模式（部分版本兼容性差），靠提示词约束 + extractJSON 抽取
-export async function glmChatJSON({ apiKey, messages, temperature = 0.3, signal }) {
-  const res = await doFetch({
-    apiKey,
-    messages,
-    stream: false,
-    temperature,
-    signal,
-    url: GLM_URL,
-    model: getGlmModel(),
-    provider: '智谱 GLM',
-  })
-  const data = await res.json()
-  const text = data.choices?.[0]?.message?.content || ''
-  return extractJSON(text)
-}
-
-// ---------- 智谱 Embedding-3（可选向量召回） ----------
-// 与 GLM 审核共用同一把智谱 Key；0.5 元/百万 tokens，单请求最多 64 条、单条 3072 tokens。
-// 默认关闭（用不花钱的关键词/扩词检索，即方案 A）；在「我的」页开关启用后用于前文语义召回。
-export const embeddingEnabled = () => localStorage.getItem('glm_embedding') === '1'
-
-export async function glmEmbed({ apiKey, texts }) {
-  let res
-  try {
-    res = await fetch('https://open.bigmodel.cn/api/paas/v4/embeddings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model: 'embedding-3', input: texts }),
-    })
-  } catch {
-    throw new Error('网络连接失败，请检查网络后重试。')
-  }
-  if (!res.ok) {
-    let data = {}
-    try {
-      data = await res.json()
-    } catch {
-      /* 忽略 */
-    }
-    throw friendlyError(res.status, data, '智谱向量')
-  }
-  const data = await res.json()
-  return (data.data || []).sort((a, b) => a.index - b.index).map((d) => d.embedding)
-}
-
-export function cosine(a, b) {
-  if (!a || !b || a.length !== b.length) return 0
-  let dot = 0
-  let na = 0
-  let nb = 0
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i]
-    na += a[i] * a[i]
-    nb += b[i] * b[i]
-  }
-  return na && nb ? dot / Math.sqrt(na * nb) : 0
-}
-
-// 用最小请求测试智谱 Key 是否有效
-export async function testGlmKey(apiKey) {
-  await doFetch({
-    apiKey,
-    messages: [{ role: 'user', content: '你好' }],
-    stream: false,
-    temperature: 0,
-    maxTokens: 1,
-    url: GLM_URL,
-    model: getGlmModel(),
-    provider: '智谱 GLM',
   })
   return true
 }

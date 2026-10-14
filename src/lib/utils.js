@@ -1,4 +1,10 @@
 // 通用小工具
+// M12：原 quote/speech/dedup/clause/sentence 等 34 个导出（QUOTE_PAIRS / QUOTE_PAIRS_DOUBLE / QUOTE_CHAR_RE /
+//   quotedSpans / quotedLinesOf / speechQuoteSpans / attributeSpeechQuotes / speechVerbReOf / normalizeForDedup /
+//   stripFixedPunct / FIXED_PUNCT_RE / clauseFragments / sentenceSpans / isSpeechQuote / isDigitOnlyQuote /
+//   DISPLAY_* / SPEECH_* / CLAUSE_* / SENTENCE_* / ELLIPSIS_SRC / READOUT_TAIL_RE / MIN_FRAG_LEN 等）
+//   只被已物理删除的暗箱流水线（continuity / threads / voice / knowledge / foreshadowLeak）消费；暗箱删除后全为零消费方，
+//   已连同其内部 helper 与实测取证注释一并移除（用户拍板确认删除）。下面 5 个是仍被页面/hooks 使用的零依赖小工具。
 
 export function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)

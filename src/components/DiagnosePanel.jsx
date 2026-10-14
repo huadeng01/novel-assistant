@@ -1,6 +1,6 @@
 // 全局诊断看板：让 AI 对已有内容做一次"体检"——梳理故事线、诊断节奏（含伏笔是否收太早）、给出建议
-// 四个 tab（长篇 / 新手 / 续写 / 改写）复用；调用方负责把要诊断的内容组装进 text
-import { useEffect, useState } from 'react'
+// 续写页、改写页复用（长篇 / 新手页当前未挂载诊断入口）；调用方负责把要诊断的内容组装进 text
+import { useEffect, useRef, useState } from 'react'
 import Ic from './Ic.jsx'
 import { chatJSON } from '../lib/llm.js'
 import { diagnoseMessages } from '../lib/prompts.js'
@@ -12,9 +12,14 @@ export default function DiagnosePanel({ apiKey, text, context, disabled, cacheKe
   const [err, setErr] = useState('')
   const [result, setResult] = useState(null)
   const [fromCache, setFromCache] = useState(false)
+  // 5.1：发送前提示词确认（人在环路）。点"开始诊断"先弹窗展示将发送的 system+user 提示词，可查看/编辑，确认后才真正发 chatJSON（保留 jsonMode / temperature 0.3 / 缓存写回，质量参数不变）。
+  const [promptConfirm, setPromptConfirm] = useState(null) // { title, messages, proceed }
+  // C8：记录最近一次 run 产出新鲜结果时的 cacheKey；该 key 的内存 result 已是最新，effect 不再回读缓存覆盖它（防异步竞态把新鲜结果打回旧快照）
+  const producedKeyRef = useRef(null)
 
   // 结果缓存：同一内容状态（如章节数未变）下直接读本地缓存，避免重复消耗 API；点“重新诊断”强制刷新并写回缓存
   useEffect(() => {
+    if (cacheKey && cacheKey === producedKeyRef.current) return // C8：本轮刚产出的结果，跳过缓存回读
     let c = null
     if (cacheKey) {
       try {
@@ -27,31 +32,59 @@ export default function DiagnosePanel({ apiKey, text, context, disabled, cacheKe
     setFromCache(!!c?.result)
   }, [cacheKey])
 
-  const run = async () => {
+  // 真正发送（用户在确认窗点"确认并发送"后调用；messages 可能已被用户编辑）
+  const run = async (messages) => {
     if (!apiKey || !text) return
     setErr('')
     setBusy(true)
     setResult(null)
+    setPromptConfirm(null)
     try {
-      const res = await chatJSON({
-        apiKey,
-        messages: diagnoseMessages({ text: String(text).slice(0, LIMIT), context }),
-        temperature: 0.3,
-      })
+      const res = await chatJSON({ apiKey, messages, temperature: 0.3 })
       setResult(res)
       setFromCache(false)
+      producedKeyRef.current = cacheKey || null // C8：标记这份新鲜结果归属的 cacheKey，effect 不回读覆盖
       if (cacheKey) {
         try {
+          // M17：诊断缓存无界增长防护——写当前键前，清掉其它 na_diag_ 前缀的旧快照（每次 text 变都写新键、从不清 → localStorage 堆积）
+          for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+            const k = localStorage.key(i)
+            if (k && k.startsWith('na_diag_') && k !== cacheKey) localStorage.removeItem(k)
+          }
           localStorage.setItem(cacheKey, JSON.stringify({ at: Date.now(), result: res }))
         } catch {
-          /* 缓存写失败不影响诊断结果 */
+          /* 缓存写/清失败不影响诊断结果 */
         }
       }
     } catch (e) {
-      setErr(e.message)
+      setErr(e?.message || String(e)) // C4：非 Error 抛出时 e.message 为 undefined，界面会完全不提示
+      // M16：失败时按 cacheKey 回读缓存恢复上次结果，避免"一次失败抹掉已付费的缓存快照、按钮退回『开始诊断』"
+      if (cacheKey) {
+        try {
+          const c = JSON.parse(localStorage.getItem(cacheKey))
+          if (c && c.result) {
+            setResult(c.result)
+            setFromCache(true)
+            producedKeyRef.current = cacheKey
+          }
+        } catch {
+          /* 无可用缓存则保持空结果 */
+        }
+      }
     } finally {
       setBusy(false)
     }
+  }
+
+  // 点"开始诊断"：先组装将发送的提示词并弹确认窗，用户查看/编辑后再走 run（不直接发送）
+  const openConfirm = () => {
+    if (!apiKey || !text) return
+    setErr('')
+    setPromptConfirm({
+      title: 'AI 全局诊断',
+      messages: diagnoseMessages({ text: String(text).slice(0, LIMIT), context }),
+      proceed: run,
+    })
   }
 
   const storylines = Array.isArray(result?.storylines) ? result.storylines : []
@@ -60,6 +93,7 @@ export default function DiagnosePanel({ apiKey, text, context, disabled, cacheKe
   const suggestions = Array.isArray(result?.suggestions) ? result.suggestions : []
 
   return (
+    <>
     <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
@@ -69,7 +103,7 @@ export default function DiagnosePanel({ apiKey, text, context, disabled, cacheKe
           </p>
         </div>
         <button
-          onClick={run}
+          onClick={openConfirm}
           disabled={busy || disabled || !text}
           className="rounded-full bg-stone-800 px-5 py-2 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
         >
@@ -140,5 +174,39 @@ export default function DiagnosePanel({ apiKey, text, context, disabled, cacheKe
         </div>
       )}
     </section>
+    {promptConfirm && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" onClick={() => setPromptConfirm(null)}>
+        <div className="flex max-h-[88vh] w-[min(760px,94vw)] flex-col overflow-hidden rounded-2xl bg-paper shadow-2xl" onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center justify-between border-b border-stone-200 px-5 py-3">
+            <span className="font-semibold text-ink">{promptConfirm.title} · 发送前可查看 / 编辑提示词</span>
+            <button onClick={() => setPromptConfirm(null)} className="text-stone-400 hover:text-stone-700" aria-label="关闭">✕</button>
+          </div>
+          <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
+            {promptConfirm.messages.map((m, i) => (
+              <div key={i}>
+                <div className="mb-1 text-xs font-medium text-stone-500">{m.role === 'system' ? 'System（角色与规则）' : 'User（本次发送内容）'}</div>
+                <textarea
+                  value={m.content}
+                  rows={m.role === 'system' ? 6 : 12}
+                  onChange={(e) =>
+                    setPromptConfirm((p) => {
+                      const ms = p.messages.slice()
+                      ms[i] = { ...ms[i], content: e.target.value }
+                      return { ...p, messages: ms }
+                    })
+                  }
+                  className="w-full resize-y rounded-lg border border-stone-300 bg-stone-50 p-3 font-mono text-[13px] leading-relaxed focus:border-stone-500 focus:outline-none"
+                />
+              </div>
+            ))}
+          </div>
+          <div className="flex items-center justify-end gap-2 border-t border-stone-200 px-5 py-3">
+            <button onClick={() => setPromptConfirm(null)} className="rounded-lg px-3 py-1.5 text-sm text-stone-600 hover:bg-stone-100">取消</button>
+            <button onClick={() => promptConfirm.proceed(promptConfirm.messages)} className="rounded-lg bg-stone-800 px-4 py-1.5 text-sm text-white hover:bg-stone-700">确认并发送</button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   )
 }

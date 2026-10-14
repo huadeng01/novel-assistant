@@ -1,9 +1,34 @@
 import { useRef, useState } from 'react'
 import Ic from '../components/Ic.jsx'
-import { testKeyFor, testGlmKey, GLM_DEFAULT_MODEL, QWEN_DEFAULT_MODEL } from '../lib/llm.js'
+import { testKeyFor, QWEN_DEFAULT_MODEL, llmUsageText } from '../lib/llm.js'
 import { exportBackup, importBackup, wipeAll } from '../lib/backup.js'
 
-export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChange, onKeyChange, glmKey, onGlmKeyChange }) {
+// M14：localStorage 读写统一包 try/catch——隐私模式/存储被禁用/配额满时，读抛错会让 useState 初始化失败→白屏，写抛错会让后续 setState/onKeyChange 不执行→"看起来成功实际没存"
+const safeGet = (k, d = '') => {
+  try {
+    const v = localStorage.getItem(k)
+    return v == null ? d : v
+  } catch {
+    return d
+  }
+}
+const safeSet = (k, v) => {
+  try {
+    localStorage.setItem(k, v)
+    return true
+  } catch {
+    return false
+  }
+}
+const safeRemove = (k) => {
+  try {
+    localStorage.removeItem(k)
+  } catch {
+    /* 忽略：存储不可用时清除本就是 no-op */
+  }
+}
+
+export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChange, onKeyChange }) {
   const [input, setInput] = useState(apiKey)
   const [visible, setVisible] = useState(false)
   const [testing, setTesting] = useState(false)
@@ -11,30 +36,24 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
   const [wiping, setWiping] = useState(false)
   // 通义千问（Qwen，第二写作引擎，可选）：Key 与模型 ID 分开管理，都存 localStorage，与 DeepSeek 二选一生效
   const [qwenInput, setQwenInput] = useState(qwenKey || '')
-  const [qwenModelInput, setQwenModelInput] = useState(localStorage.getItem('qwen_model') || QWEN_DEFAULT_MODEL)
+  const [qwenModelInput, setQwenModelInput] = useState(() => safeGet('qwen_model') || QWEN_DEFAULT_MODEL)
   const [qwenVisible, setQwenVisible] = useState(false)
   const [qwenTesting, setQwenTesting] = useState(false)
   const [qwenMsg, setQwenMsg] = useState(null)
-  // 智谱 GLM（章节审核引擎，可选）：Key 与模型 ID 分开管理，都存 localStorage
-  const [glmInput, setGlmInput] = useState(glmKey || '')
-  const [glmModelInput, setGlmModelInput] = useState(localStorage.getItem('glm_model') || GLM_DEFAULT_MODEL)
-  const [glmVisible, setGlmVisible] = useState(false)
-  const [glmTesting, setGlmTesting] = useState(false)
-  const [glmMsg, setGlmMsg] = useState(null)
-  // 智谱 Embedding-3 可选开关：默认关闭（前文召回用零费用的关键词检索）；启用后长篇写作前文召回改走语义向量。
-  const [embedOn, setEmbedOn] = useState(localStorage.getItem('glm_embedding') === '1')
   const importRef = useRef(null)
+  // 5.4：AI 用量（累计调用次数 / token）。账本已持久化到 localStorage，进本页时读一次；点「刷新用量」取最新值。
+  const [usageText, setUsageText] = useState(() => llmUsageText())
 
   const save = () => {
     const key = input.trim()
     if (!key) return
-    localStorage.setItem('ds_api_key', key)
+    safeSet('ds_api_key', key)
     onKeyChange()
     setMsg({ type: 'ok', text: 'Key 已保存到本机浏览器，仅你自己可见。' })
   }
 
   const clear = () => {
-    localStorage.removeItem('ds_api_key')
+    safeRemove('ds_api_key')
     setInput('')
     onKeyChange()
     setMsg({ type: 'ok', text: 'Key 已清除。' })
@@ -58,22 +77,22 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
     }
   }
 
-  // 通义千问 Key 的保存 / 清除 / 测试（与 DeepSeek 二选一作为写作引擎，审核引擎仍用智谱）
+  // 通义千问 Key 的保存 / 清除 / 测试（与 DeepSeek 二选一作为写作引擎）
   const saveQwen = () => {
     const key = qwenInput.trim()
     const model = qwenModelInput.trim() || QWEN_DEFAULT_MODEL
-    localStorage.setItem('qwen_model', model)
+    safeSet('qwen_model', model)
     if (!key) {
       setQwenMsg({ type: 'err', text: '请先填写通义千问 API Key。' })
       return
     }
-    localStorage.setItem('qwen_api_key', key)
+    safeSet('qwen_api_key', key)
     onKeyChange()
     setQwenMsg({ type: 'ok', text: `已保存（模型：${model}）${provider === 'qwen' ? '，当前写作引擎即通义千问。' : '；如需启用请点击上方「通义千问」。'}` })
   }
 
   const clearQwen = () => {
-    localStorage.removeItem('qwen_api_key')
+    safeRemove('qwen_api_key')
     setQwenInput('')
     onKeyChange()
     setQwenMsg({ type: 'ok', text: '通义千问 Key 已清除。' })
@@ -86,7 +105,7 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
       return
     }
     // 测试前先落盘模型 ID，确保测试用的就是用户配置的模型
-    localStorage.setItem('qwen_model', qwenModelInput.trim() || QWEN_DEFAULT_MODEL)
+    safeSet('qwen_model', qwenModelInput.trim() || QWEN_DEFAULT_MODEL)
     setQwenTesting(true)
     setQwenMsg(null)
     try {
@@ -99,44 +118,13 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
     }
   }
 
-  // 智谱 GLM Key 的保存 / 清除 / 测试（审核引擎专用，不影响写作引擎）
-  const saveGlm = () => {
-    const key = glmInput.trim()
-    const model = glmModelInput.trim() || GLM_DEFAULT_MODEL
-    localStorage.setItem('glm_model', model)
-    if (!key) {
-      setGlmMsg({ type: 'err', text: '请先填写智谱 API Key。' })
-      return
-    }
-    localStorage.setItem('glm_api_key', key)
-    onGlmKeyChange()
-    setGlmMsg({ type: 'ok', text: `已保存（模型：${model}），可在长篇写作的「章节审核」中使用。` })
-  }
-
-  const clearGlm = () => {
-    localStorage.removeItem('glm_api_key')
-    setGlmInput('')
-    onGlmKeyChange()
-    setGlmMsg({ type: 'ok', text: '智谱 Key 已清除。' })
-  }
-
-  const testGlm = async () => {
-    const key = glmInput.trim() || glmKey
-    if (!key) {
-      setGlmMsg({ type: 'err', text: '请先填写智谱 API Key。' })
-      return
-    }
-    // 测试前先落盘模型 ID，确保测试用的就是用户配置的模型
-    localStorage.setItem('glm_model', glmModelInput.trim() || GLM_DEFAULT_MODEL)
-    setGlmTesting(true)
-    setGlmMsg(null)
+  // M-8：导出是唯一的数据逃生口，失败必须明确告知(exportBackup 内部 Promise.all 任一 reject 即整体失败)，不能静默
+  const onExport = async () => {
     try {
-      await testGlmKey(key)
-      setGlmMsg({ type: 'ok', text: '连接成功！智谱 Key 有效，可以开始审核了。' })
-    } catch (e) {
-      setGlmMsg({ type: 'err', text: e.message })
-    } finally {
-      setGlmTesting(false)
+      await exportBackup()
+      setMsg({ type: 'ok', text: '备份已导出（含小说、文风档案与草稿）。' })
+    } catch (err) {
+      setMsg({ type: 'err', text: '导出失败：' + (err && err.message ? err.message : String(err)) })
     }
   }
 
@@ -146,7 +134,8 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
     if (!file) return
     try {
       await importBackup(file)
-      setMsg({ type: 'ok', text: '备份导入成功，小说与文风档案已恢复。' })
+      // L-14：本页不持有书库列表(useBooks 在改写/续写页)，导入后无法就地刷新；提示切到书库页查看(切页会重新挂载并 refresh)
+      setMsg({ type: 'ok', text: '备份导入成功，小说与文风档案已恢复。请切换到「改写润色」或「续写」页，在左侧书库查看导入的书。' })
     } catch (err) {
       setMsg({ type: 'err', text: err.message || '导入失败，请确认文件是否正确。' })
     }
@@ -154,9 +143,15 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
 
   const wipe = async () => {
     setWiping(true)
-    await wipeAll()
-    setWiping(false)
-    setMsg({ type: 'ok', text: '本地数据已全部清空（Key 未受影响）。' })
+    try {
+      await wipeAll()
+      setMsg({ type: 'ok', text: '已清空本地小说、文风档案、草稿与诊断缓存（API Key、AI 用量账本、题材选择未清）。' }) // M15：文案对齐 wipeAll 实际范围，不再笼统说"全部清空"
+    } catch (err) {
+      // M-7：wipeAll 失败(IndexedDB 被 blocked / 事务中止)也要退出 loading，否则按钮永久卡在"清空中…"
+      setMsg({ type: 'err', text: '清空失败：' + (err && err.message ? err.message : String(err)) })
+    } finally {
+      setWiping(false)
+    }
   }
 
   return (
@@ -180,7 +175,7 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
         </ol>
 
         <div className="mt-5 rounded-xl bg-stone-50 p-4 text-sm text-stone-600">
-          <p className="font-semibold text-stone-800">如何获取 DeepSeek API Key？</p>
+          <p className="font-semibold text-ink">如何获取 DeepSeek API Key？</p>
           <ol className="mt-2 list-decimal space-y-1 pl-5">
             <li>
               打开{' '}
@@ -198,20 +193,20 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
         </div>
       </section>
 
-      {/* 写作引擎选择：全站生成请求（写作/规划/归档/重写）二选一，GLM 审核引擎独立不受影响 */}
+      {/* 写作引擎选择：全站生成请求（写作/规划/归档/重写）二选一 */}
       <section className="glass-card rounded-2xl bg-paper p-6 shadow-sm">
         <h2 className="text-base font-bold"><Ic n="shuffle" /> 写作引擎</h2>
-        <p className="mt-2 text-sm text-stone-500">全站写作类请求走当前选中的引擎，两个 Key 各自独立、可随时切换；章节审核始终用下方的智谱 GLM（可选）。</p>
+        <p className="mt-2 text-sm text-stone-500">全站写作类请求走当前选中的引擎，两个 Key 各自独立、可随时切换。</p>
         <div className="mt-3 flex gap-3">
           {[
             { id: 'deepseek', label: 'DeepSeek', desc: apiKey ? '已配置 Key' : '未配置 Key' },
-            { id: 'qwen', label: '通义千问', desc: qwenKey ? `已配置 Key · ${localStorage.getItem('qwen_model') || QWEN_DEFAULT_MODEL}` : '未配置 Key' },
+            { id: 'qwen', label: '通义千问', desc: qwenKey ? `已配置 Key · ${safeGet('qwen_model') || QWEN_DEFAULT_MODEL}` : '未配置 Key' },
           ].map((p) => (
             <button
               key={p.id}
               onClick={() => onProviderChange(p.id)}
               className={`flex-1 rounded-xl border px-4 py-3 text-left transition-colors ${
-                provider === p.id ? 'border-stone-800 bg-stone-800 text-white' : 'border-stone-200 bg-white text-stone-600 hover:bg-stone-50'
+                provider === p.id ? 'border-stone-800 bg-stone-800 text-white' : 'border-stone-200 bg-paper text-stone-600 hover:bg-stone-50'
               }`}
             >
               <span className="block text-sm font-semibold">{p.label}{provider === p.id && '（当前）'}</span>
@@ -244,7 +239,7 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
             {testing ? '测试中…' : '测试连接'}
           </button>
           {apiKey && (
-            <button onClick={clear} className="rounded-full border border-red-200 px-5 py-2.5 text-sm text-red-600 hover:bg-red-50">
+            <button onClick={clear} className="rounded-full border border-red-200 px-5 py-2.5 text-sm text-red-400 hover:bg-red-50">
               清除 Key
             </button>
           )}
@@ -288,7 +283,7 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
             {qwenTesting ? '测试中…' : '测试连接'}
           </button>
           {qwenKey && (
-            <button onClick={clearQwen} className="rounded-full border border-red-200 px-5 py-2.5 text-sm text-red-600 hover:bg-red-50">
+            <button onClick={clearQwen} className="rounded-full border border-red-200 px-5 py-2.5 text-sm text-red-400 hover:bg-red-50">
               清除 Key
             </button>
           )}
@@ -307,76 +302,19 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
         </p>
       </section>
 
-      {/* 智谱 GLM Key（审核引擎，可选） */}
+      {/* 5.4：AI 用量（账本已持久化到 localStorage，刷新不清零） */}
       <section className="glass-card rounded-2xl bg-paper p-6 shadow-sm">
-        <h2 className="text-base font-bold"><Ic n="search" /> 智谱 GLM API Key（章节审核用，可选）</h2>
+        <h2 className="text-base font-bold"><Ic n="pulse" /> AI 用量</h2>
         <p className="mt-2 text-sm text-stone-500">
-          长篇写作中每写满 5 章可解锁一次剧情连贯性审核，由 GLM-4.7-Flash 执行（只查硬性矛盾，不挑刺）；写作本身仍用 DeepSeek，两个 Key 互不影响。
+          本机累计的 AI 调用次数与 token 用量，保存在浏览器本地、刷新不清零（「测试连接」探活不计入）。token 仅在服务商响应带 usage 时才能统计，未带 usage 的调用只计次数、不冒充 0。
         </p>
-        <div className="mt-4 flex flex-col gap-3 sm:flex-row">
-          <input
-            type={glmVisible ? 'text' : 'password'}
-            value={glmInput}
-            onChange={(e) => setGlmInput(e.target.value)}
-            placeholder="智谱 API Key（bigmodel.cn 获取，有免费额度）"
-            className="flex-1 rounded-xl border border-stone-300 px-4 py-2.5 text-sm focus:border-stone-500 focus:outline-none"
-          />
-          <input
-            value={glmModelInput}
-            onChange={(e) => setGlmModelInput(e.target.value)}
-            placeholder={`模型 ID（默认 ${GLM_DEFAULT_MODEL}）`}
-            className="rounded-xl border border-stone-300 px-4 py-2.5 text-sm focus:border-stone-500 focus:outline-none sm:w-56"
-          />
-          <button onClick={() => setGlmVisible(!glmVisible)} className="rounded-xl border border-stone-300 px-4 py-2.5 text-sm text-stone-600 hover:bg-stone-50">
-            {glmVisible ? '隐藏' : '显示'}
-          </button>
-        </div>
-        <div className="mt-3 flex flex-wrap gap-3">
-          <button onClick={saveGlm} className="rounded-full bg-stone-800 px-5 py-2.5 text-sm font-medium text-white hover:bg-stone-700">
-            保存
-          </button>
-          <button onClick={testGlm} disabled={glmTesting} className="rounded-full border border-stone-300 px-5 py-2.5 text-sm text-stone-700 hover:bg-stone-50 disabled:opacity-50">
-            {glmTesting ? '测试中…' : '测试连接'}
-          </button>
-          {glmKey && (
-            <button onClick={clearGlm} className="rounded-full border border-red-200 px-5 py-2.5 text-sm text-red-600 hover:bg-red-50">
-              清除 Key
-            </button>
-          )}
-        </div>
-        {glmMsg && (
-          <p className={`mt-3 rounded-lg px-3 py-2 text-sm ${glmMsg.type === 'ok' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
-            {glmMsg.text}
-          </p>
-        )}
-        <p className="mt-3 text-xs text-stone-400">
-          获取方法：登录{' '}
-          <a href="https://bigmodel.cn" target="_blank" rel="noreferrer" className="underline hover:text-stone-600">
-            智谱开放平台（bigmodel.cn）
-          </a>
-          ，在「API Keys」中创建，新用户有免费额度；不填也不影响写作功能。
-        </p>
-      </section>
-
-      {/* 智谱 Embedding-3 可选开关：与上方审核共用同一把智谱 Key，按量计费极便宜；不启用则前文召回用免费关键词检索 */}
-      <section className="glass-card rounded-2xl bg-paper p-6 shadow-sm">
-        <h2 className="text-base font-bold"><Ic n="pulse" /> 语义向量召回（可选，智谱 Embedding-3）</h2>
-        <p className="mt-2 text-sm text-stone-500">
-          长篇写作生成初稿时，前文片段召回默认用不花钱的关键词检索。开启后改用语义向量召回（同一把智谱 Key，Embedding-3 约 0.5 元/百万 tokens，一本书全部章节向量化通常不到一毛钱，向量会缓存不重复计费），对语义相近但用词不同的前文召回更准。服务异常时自动降级回关键词检索，不影响写作。
-        </p>
-        <label className="mt-3 flex cursor-pointer items-center gap-3">
-          <input
-            type="checkbox"
-            checked={embedOn}
-            onChange={(e) => {
-              localStorage.setItem('glm_embedding', e.target.checked ? '1' : '0')
-              setEmbedOn(e.target.checked)
-            }}
-            className="h-4 w-4 accent-stone-700"
-          />
-          <span className="text-sm text-stone-700">{embedOn ? '已启用：前文召回优先走语义向量' : '未启用：用免费关键词检索（推荐先用这个）'}</span>
-        </label>
-        {!glmKey && embedOn && <p className="mt-2 text-xs text-amber-700">注意：还没填智谱 Key，开启后会自动降级回关键词检索；要真正生效请先在上方填写智谱 Key。</p>}
+        <p className="mt-3 rounded-lg bg-stone-50 px-3 py-2 text-sm text-stone-700">{usageText}</p>
+        <button
+          onClick={() => setUsageText(llmUsageText())}
+          className="mt-3 rounded-full border border-stone-300 px-5 py-2.5 text-sm text-stone-700 hover:bg-stone-50"
+        >
+          刷新用量
+        </button>
       </section>
 
       {/* 数据管理 */}
@@ -386,7 +324,7 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
           你的小说和文风档案只存在当前设备的浏览器里。换设备或清理浏览器缓存前，请先导出备份。
         </p>
         <div className="mt-4 flex flex-wrap gap-3">
-          <button onClick={exportBackup} className="rounded-full bg-stone-800 px-5 py-2.5 text-sm font-medium text-white hover:bg-stone-700">
+          <button onClick={onExport} className="rounded-full bg-stone-800 px-5 py-2.5 text-sm font-medium text-white hover:bg-stone-700">
             导出备份
           </button>
           <button onClick={() => importRef.current?.click()} className="rounded-full border border-stone-300 px-5 py-2.5 text-sm text-stone-700 hover:bg-stone-50">
@@ -396,9 +334,9 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
           <button
             onClick={() => window.confirm('确定要清空本机所有小说与文风档案吗？此操作不可恢复！') && wipe()}
             disabled={wiping}
-            className="rounded-full border border-red-200 px-5 py-2.5 text-sm text-red-600 hover:bg-red-50 disabled:opacity-50"
+            className="rounded-full border border-red-200 px-5 py-2.5 text-sm text-red-400 hover:bg-red-50 disabled:opacity-50"
           >
-            {wiping ? '清空中…' : '清空全部数据'}
+            {wiping ? '清空中…' : '清空小说与档案'}
           </button>
         </div>
       </section>

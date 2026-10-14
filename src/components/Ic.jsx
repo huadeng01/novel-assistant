@@ -54,7 +54,7 @@ const MAP = {
   timer: Timer,          // ⏱ 节奏
   hourglass: Hourglass,  // ⏳ 时间线
   pulse: Activity,       // 心跳 / 状态流
-  chat: MessageCircle,   // 💬 剧情讨论
+  chat: MessageCircle,   // 💬 对话 / 意见
   shuffle: Shuffle,      // 🔀 引擎切换 / 交叉审核
   flame: Flame,          // 🔥 热门榜单
   chevron: ChevronDown,  // 🔽 折叠 / 展开

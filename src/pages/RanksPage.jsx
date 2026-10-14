@@ -4,8 +4,8 @@ import { loadRanks, ranksSummary, generatedLabel, gendersOf, listsByGender } fro
 import { chatJSON, writerConfig } from '../lib/llm.js'
 import { rankInsightMessages } from '../lib/prompts.js'
 
-// 榜单区（顶栏「榜单」页）：展示各平台【每日热门榜快照】。
-// 数据来自同源静态 public/ranks.json（由 scripts/fetch-ranks.mjs 每日抓取生成），
+// 榜单区（顶栏「榜单」页）：展示各平台【热门榜快照】（内置静态数据，非实时）。
+// 数据来自同源静态 public/ranks.json（M22：原抓取脚本 scripts/fetch-ranks.mjs 已随项目精简移除、快照不再每日更新；实际快照日期见页内 generatedLabel），
 // 本页运行时【不发起任何跨域抓取】——只显示最新元数据；点击书名 → 外链跳转平台官方阅读页，
 // 本应用不存储、不展示、不缓存任何正文章节（合规红线，见 docs/ranks-crawler-github-actions.md）。
 
@@ -62,9 +62,9 @@ export default function RanksPage() {
       <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="flex items-center gap-2 text-lg font-bold text-stone-800">
+            <h2 className="flex items-center gap-2 text-lg font-bold text-ink">
               <span className="text-amber-600"><Ic n="flame" /></span>
-              各平台每日热门榜
+              各平台热门榜快照
             </h2>
             <p className="mt-1 text-xs leading-relaxed text-stone-400">
               聚合主流网文平台的公开榜单快照，帮你快速看清风向、找灵感。
@@ -106,7 +106,7 @@ export default function RanksPage() {
         <section className="glass-card rounded-2xl bg-paper p-10 text-center shadow-sm">
           <p className="text-sm text-stone-500"><Ic n="alert" className="mr-1 text-amber-600" />{state.error}</p>
           <p className="mt-2 text-xs leading-relaxed text-stone-400">
-            运行 <code className="rounded bg-stone-100 px-1 py-0.5">node scripts/fetch-ranks.mjs</code> 生成快照，或等待 GitHub Actions 每日定时抓取。
+            榜单为内置快照，可能已过期；原抓取脚本已随项目精简移除，如需更新请替换 src/lib/ranks.js 里的快照数据。
           </p>
         </section>
       )}
@@ -215,7 +215,7 @@ export default function RanksPage() {
 
 function Chip({ icon, children }) {
   return (
-    <span className="inline-flex items-center gap-1 rounded-full border border-stone-200 bg-white/60 px-2.5 py-1 text-stone-500">
+    <span className="inline-flex items-center gap-1 rounded-full border border-stone-200 bg-paper/60 px-2.5 py-1 text-stone-500">
       <Ic n={icon} className="text-stone-400" />
       {children}
     </span>
@@ -234,7 +234,7 @@ function BookRow({ book }) {
       )}
       <span className="min-w-0 flex-1">
         <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-          <span className="truncate text-sm font-medium text-stone-800">{book.title}</span>
+          <span className="truncate text-sm font-medium text-ink">{book.title}</span>
           {book.author && <span className="text-xs text-stone-400">{book.author}</span>}
           {book.category && <span className="rounded bg-stone-100 px-1.5 py-0.5 text-[10px] text-stone-500">{book.category}</span>}
           {book.extra?.status && <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-700">{book.extra.status}</span>}
@@ -245,7 +245,7 @@ function BookRow({ book }) {
       <span className="shrink-0 self-center text-stone-300"><Ic n="globe" /></span>
     </>
   )
-  const cls = 'flex w-full items-center gap-3 rounded-xl border border-stone-200 bg-white/50 p-3 text-left transition-colors hover:border-amber-300 hover:bg-amber-50/40'
+  const cls = 'flex w-full items-center gap-3 rounded-xl border border-stone-200 bg-paper/50 p-3 text-left transition-colors hover:border-amber-300 hover:bg-amber-50/40'
   return (
     <li>
       {book.officialUrl ? (
@@ -262,16 +262,19 @@ function RankInsight({ platformName, listName, books }) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [data, setData] = useState(null)
+  // 5.1：发送前提示词确认（人在环路）。点"分析本榜"先弹窗展示将发送的 system+user，可查看/编辑，确认后才真正发 chatJSON（保留 jsonMode / temperature 0.5）。
+  const [promptConfirm, setPromptConfirm] = useState(null) // { title, messages, proceed }
 
-  const analyze = async () => {
+  const analyze = async (messages) => {
     if (!writerConfig().key) {
       setErr('尚未配置 API Key：请先到「我的」页面填写通义千问或 DeepSeek 密钥，再来分析榜单。')
       return
     }
     setBusy(true)
     setErr('')
+    setPromptConfirm(null)
     try {
-      const res = await chatJSON({ messages: rankInsightMessages({ platformName, listName, books }), temperature: 0.5 })
+      const res = await chatJSON({ messages, temperature: 0.5 })
       if (!res || (!Array.isArray(res.books) && !res.overview)) {
         setErr('AI 返回的内容格式不正确，请点「重新分析」重试。')
       } else {
@@ -284,18 +287,33 @@ function RankInsight({ platformName, listName, books }) {
     }
   }
 
+  // 点"分析本榜"：先组装将发送的提示词并弹确认窗，用户查看/编辑后再走 analyze（不直接发送）
+  const openConfirm = () => {
+    if (!writerConfig().key) {
+      setErr('尚未配置 API Key：请先到「我的」页面填写通义千问或 DeepSeek 密钥，再来分析榜单。')
+      return
+    }
+    setErr('')
+    setPromptConfirm({
+      title: `AI 故事偏向分析 · ${platformName}${listName ? ' ' + listName : ''}`,
+      messages: rankInsightMessages({ platformName, listName, books }),
+      proceed: analyze,
+    })
+  }
+
   const genres = data && Array.isArray(data.genres) ? data.genres : []
   const items = data && Array.isArray(data.books) ? data.books : []
 
   return (
+    <>
     <section className="glass-card rounded-2xl bg-paper p-4 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="flex items-center gap-2 text-sm font-bold text-stone-800">
+        <h3 className="flex items-center gap-2 text-sm font-bold text-ink">
           <span className="text-amber-600"><Ic n="sparkle" /></span>
           AI 故事偏向分析 · {platformName}{listName ? ' ' + listName : ''}
         </h3>
         <button
-          onClick={analyze}
+          onClick={openConfirm}
           disabled={busy}
           className="flex shrink-0 items-center gap-1.5 rounded-full bg-stone-800 px-3.5 py-2 text-xs font-medium text-white transition-colors hover:bg-stone-700 disabled:opacity-50"
         >
@@ -323,7 +341,7 @@ function RankInsight({ platformName, listName, books }) {
       {data && !busy && (
         <div className="mt-3 space-y-3">
           {data.overview && (
-            <div className="rounded-xl border border-stone-200 bg-white/60 p-3">
+            <div className="rounded-xl border border-stone-200 bg-paper/60 p-3">
               <p className="text-xs font-semibold text-stone-700">整榜故事偏向</p>
               <p className="mt-1 whitespace-pre-line text-xs leading-relaxed text-stone-600">{data.overview}</p>
             </div>
@@ -334,7 +352,7 @@ function RankInsight({ platformName, listName, books }) {
                 <span
                   key={i}
                   title={g.note || ''}
-                  className="inline-flex items-center gap-1 rounded-full border border-stone-200 bg-white/60 px-2.5 py-1 text-[11px] text-stone-600"
+                  className="inline-flex items-center gap-1 rounded-full border border-stone-200 bg-paper/60 px-2.5 py-1 text-[11px] text-stone-600"
                 >
                   <span className="font-medium text-stone-700">{g.genre}</span>
                   <span className="text-amber-700">{g.count}本</span>
@@ -346,8 +364,8 @@ function RankInsight({ platformName, listName, books }) {
           {items.length > 0 && (
             <ul className="space-y-2">
               {items.map((b, i) => (
-                <li key={i} className="rounded-xl border border-stone-200 bg-white/50 p-3">
-                  <p className="text-xs font-semibold text-stone-800">{i + 1}. {b.title || '未命名'}</p>
+                <li key={i} className="rounded-xl border border-stone-200 bg-paper/50 p-3">
+                  <p className="text-xs font-semibold text-ink">{i + 1}. {b.title || '未命名'}</p>
                   {b.orientation && (
                     <p className="mt-1 text-[11px] leading-relaxed text-amber-900">
                       <span className="mr-1 rounded bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-800">偏向</span>
@@ -367,5 +385,39 @@ function RankInsight({ platformName, listName, books }) {
         </div>
       )}
     </section>
+    {promptConfirm && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" onClick={() => setPromptConfirm(null)}>
+        <div className="flex max-h-[88vh] w-[min(760px,94vw)] flex-col overflow-hidden rounded-2xl bg-paper shadow-2xl" onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center justify-between border-b border-stone-200 px-5 py-3">
+            <span className="font-semibold text-ink">{promptConfirm.title} · 发送前可查看 / 编辑提示词</span>
+            <button onClick={() => setPromptConfirm(null)} className="text-stone-400 hover:text-stone-700" aria-label="关闭">✕</button>
+          </div>
+          <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
+            {promptConfirm.messages.map((m, i) => (
+              <div key={i}>
+                <div className="mb-1 text-xs font-medium text-stone-500">{m.role === 'system' ? 'System（角色与规则）' : 'User（本次发送内容）'}</div>
+                <textarea
+                  value={m.content}
+                  rows={m.role === 'system' ? 6 : 12}
+                  onChange={(e) =>
+                    setPromptConfirm((p) => {
+                      const ms = p.messages.slice()
+                      ms[i] = { ...ms[i], content: e.target.value }
+                      return { ...p, messages: ms }
+                    })
+                  }
+                  className="w-full resize-y rounded-lg border border-stone-300 bg-stone-50 p-3 font-mono text-[13px] leading-relaxed focus:border-stone-500 focus:outline-none"
+                />
+              </div>
+            ))}
+          </div>
+          <div className="flex items-center justify-end gap-2 border-t border-stone-200 px-5 py-3">
+            <button onClick={() => setPromptConfirm(null)} className="rounded-lg px-3 py-1.5 text-sm text-stone-600 hover:bg-stone-100">取消</button>
+            <button onClick={() => promptConfirm.proceed(promptConfirm.messages)} className="rounded-lg bg-stone-800 px-4 py-1.5 text-sm text-white hover:bg-stone-700">确认并发送</button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   )
 }

@@ -1,1462 +1,958 @@
-// 新手写作（六步圣经流程）：初始提问 → 小说圣经 → 全书梗概（四层伏笔）→ 卷结构 → 幕结构 → 章名骨架+第1卷细纲 → 对账成书
-// 设计要点：
-// 1. 真相隔离——圣经真相层（truth）永不进写作上下文，只有线索（clues）可露出；真相仅供审核对照；
-// 2. 人物只保留 1~3 个用户固定的"锚点"，不生成全套班底，其余人物由写作归档自然生长（防早露）；
-// 3. 四层伏笔（短/中/长/终极）登记时即锚定回收卷，成书时换算为回收章硬边界（根治只有短埋点）；
-// 4. 每步独立可编辑、可锁定（锁定项重新生成时不覆盖），进度整体持久化，刷新可续跑。
 import { useEffect, useMemo, useRef, useState } from 'react'
-import Ic from '../components/Ic.jsx'
-import KeyBanner from '../components/KeyBanner.jsx'
-import InspirationModal from '../components/InspirationModal.jsx'
-import WorldviewEditor from '../components/WorldviewEditor.jsx'
-import { isOverridden, getWorldview, worldviewText, allGenres } from '../lib/worldviews/index.js'
-import { chatStream, chatJSON } from '../lib/llm.js'
-import {
-  GENRES,
-  fullSynopsisMessages,
-  chapterSkeletonMessages,
-  volumeSkeletonMessages,
-} from '../lib/prompts.js'
-import { countWords, uid } from '../lib/utils.js'
-import { loadWizardState, saveWizardState } from '../lib/backup.js'
-import { put, getAll } from '../lib/db.js'
+import PromptEditorModal from '../components/PromptEditorModal.jsx'
 import { PRESET_STYLES } from '../corpus/presetStyles.js'
-import { newProject, BIBLE_TRUTH_KINDS, splitChapters, archiveImportedChapter, cnToNumber, RHYTHM_TEMPLATES, resampleWeights, chaptersByRhythm, volumeRole, ACT_RATIO_GUIDE, renumberPart, parseSkeleton, skeletonMissing, outlineLeakScan, outlineLeakContextFor, compressRanges, SKELETON_BATCH, dedupeSkeletonBatch, mergeSkeletonTexts, fallbackVolumeEmotion } from '../lib/longform.js'
-import { worldsmithAgent, storylinerAgent, structurerAgent, outlinerAgent, stylistAgent, makeProgress, AGENT_MAP, ROLE_THEME } from '../lib/agents/index.js'
+import { put, getById, del, getAll } from '../lib/db.js'
+import { parseBookAssets, parseAssetTable, backfillChapterNos, digestLines } from '../lib/parseAssets.js'
+import { sampleNovel, styleAnalyzeMessages, LANG_RULE } from '../lib/prompts.js' // WZ-4：移除 sanitizeHabits(净化统一在消费端 LongFormPage 做，建书侧不再净化)
+import { distillStyleBand } from '../lib/longform.js'
+import { readDocumentFile, READ_ACCEPT } from '../lib/docio.js'
+import ClarifyModal from '../components/ClarifyModal.jsx'
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms)) // 骨架单批容错重试的退避等待
-const STATE_VERSION = 5
-const STEPS = [
-  { id: 0, label: '初始提问' },
-  { id: 1, label: '小说圣经' },
-  { id: 2, label: '故事线' },
-  { id: 3, label: '全书梗概' },
-  { id: 4, label: '卷结构' },
-  { id: 5, label: '幕结构' },
-  { id: 6, label: '章名与细纲' },
-  { id: 7, label: '对账成书' },
+// 新手写作：自顶向下搭建故事框架，共 9 步。每一步的提示词都经 PromptEditorModal 暴露给用户编辑、确认后才发送。
+// 方案C：资产库管实体(assets)，情绪节拍(beats)与伏笔(foreshadows)分离落库；落库前用 parseBookAssets 把｜分列文本解析进三表。
+// 数量带(宁多)：至少N至M，真书校准(完美世界势力核心20-25/地点25-30)；质量锚=每个资产写清前三卷不可替代的剧情作用。
+// 章号断点修法A：第4-6步时序一律用【卷序】，章号在第7步排章后经【资产章号回填】细化。
+// 提示词纪律：一律正向陈述；正向锚"只写上游出现过的或为其直接补全的"；字段缺省时写—。
+
+const inspirePrompt = (targetWords, clarifyText) =>
+  [
+    '你是网文选题编辑。把下面的一句话灵感扩写成创作简报，每项一行，停留在概念层(讲什么/凭什么吸引/往哪走)。',
+    LANG_RULE,
+    '1. 题材与基调：类型/流派+情绪基调+一个对标作品或细分赛道，一句话。',
+    `2. 目标体量：总字数${targetWords}字；卷数至少6至8+每卷大致章数，一句话。`,
+    '3. 设定支点：区别于现实的核心设定及其规则，一句话；力量来源或升级方式涉及多个耦合设定时分条写清，至少1条至3条。',
+    '4. 主角：身份+核心欲望+金手指类型，一句话。',
+    '5. 核心冲突：一句话。',
+    '6. 成长曲线：主角从起点到终局的能力/地位跨度，一句话。',
+    '7. 主线：阶段数与建议卷数相当(至少6至8个)，每阶段写明格局变化(新增敌手层级+活动尺度扩大+本阶段揭示的真相)。',
+    '8. 终局：主角最终成为/得到什么，一句话。',
+    '',
+    '用户补全答案(已确认的逻辑，直接采用；只写这些答案出现过的或为其直接补全的)：',
+    clarifyText || '(无)',
+    '',
+    '一句话灵感：',
+  ].join('\n')
+
+const clarifyPrompt = (inspiration) =>
+  [
+    '你是故事结构编辑。读下面的一句话灵感，按逻辑顺序找出其中的逻辑缺口(①世界构成或地理没定 ②力量或能力体系没定 ③势力或社会格局没定 ④世界前史或背景事件没定 ⑤机制没定义 ⑥因果没讲清 ⑦动机没给足 ⑧关系没说明 ⑨对抗力量没定义 ⑩边界或限制没定义 ⑪信息差没定 ⑫时序或跨度没排 ⑬收束没闭环)，产出至少3个至10个补全问题帮用户补全逻辑；优先问序号靠前的缺口(世界观基础先定，才能推后续人物与情节)。',
+    '每个问题给3个候选答案(每个一句话，方向明显不同)，供用户选择；用户也可自己写。',
+    '问题必须是补全整体逻辑、让后续生成有据可依的关键缺口(如：A为什么能影响B？主角的X从哪来？Y的机制是什么？)；问题限定在灵感已提及要素之间的缺口，提问只用灵感里出现过的要素(灵感没提的新要素，如穿越者的现代知识金手指，留在提问之外)。',
+    '只输出一个结构表：[{"question":"...","options":[{"label":"...","description":"..."},{"label":"...","description":"..."},{"label":"...","description":"..."}]}]',
+    '',
+    '一句话灵感：',
+    inspiration,
+  ].join('\n')
+
+const STYLE_PROMPT_HEAD = [
+  '你是文风编辑。基于"参考文风""题材"和"补充要求"，产出本书专用的六维度文风档案。',
+  LANG_RULE,
+  '六个小标题：【句式与语法】【叙事视角与人称】【节奏与分段】【对话风格】【描写取舍】【用词与修辞】。',
+  '每维0-2句可执行描述，写"怎么做"；无把握的维度写一句该题材的基线做法。',
+  '提炼笔法并适配题材基线；参考文风未覆盖的维度按题材与补充要求写。',
+  '只输出六个小标题及其内容。',
+  '',
+  '参考文风：',
+].join('\n')
+
+// A10（用户拍板：圣经步骤不注入文风档案）：删掉原 styleProfile 死参数与其注释掉的注入块，签名收敛为只接收真正用到的 brief
+const biblePrompt = (brief) =>
+  [
+    '你是世界观架构师。为百万字长篇构建世界观圣经。只写恒定状态(规则/等级/势力/地点/真相)，事件与时序留给下游。',
+    LANG_RULE,
+    '每条用陈述句给定名称/数值/因果；只写上游材料(简报)出现过的或为其直接补全的。',
+    '质量锚：每个势力/地点/真相都写清它在前三卷承担哪个不可替代的剧情作用(删掉它哪个场景写不下去)；支撑不足该条写"—"；每个势力各有独立立场、每个地点都有人物前往的理由、每个等级都有各自的战力标尺。',
+    '主角的现代背景只作性格与视角底色；能力、道具、机制的来源一律取自世界观内部。机构、能力、器物、机制、地点的命名和描述一律用本书世界观内部的说法，把现代职场、财务、互联网词汇换成世界观内的对应说法。',
+    '时序一律用【卷序】(第几卷)；具体章号在第7步排章后回填。',
+    '',
+    '【世界与规则】宏观面貌与物理/社会运行规则，3-8句，每句一个独立规则。',
+    '【核心设定机制】核心设定(金手指/灾变/异能体系)的运作规则与限制，5-10句。',
+    '【力量体系】至少6个至15个大等级，每级一行：等级名｜能力质变｜突破条件｜战力标尺｜大致达成卷序；把全书要用到的等级体系一次交代明白，从最低到最高逐级列全。',
+    '【势力】至少8方至20方，每方一行：势力名｜立场+资源｜与主角初始关系(敌/中立/庇护/利用)｜功能位(前三卷推动哪条冲突)｜知情人｜透出卷｜传闻卷(缺省写—)。',
+    '【地点】至少12个至30个，按层级分组(世界框架/域级/场景级/势力驻地)，每地一行：地点名｜层级：X / 区域：Y｜功能 / 控制方：Z｜透出卷｜传闻卷（"层级："与"区域："与"控制方："三个前缀逐字保留，区域写它所属的更大地区名）。圣经只收恒定地点，副本流/无限流的一次性场景留到卷章步。',
+    '【终极真相】至少3条至5条分阶段揭示的真相，每条一行：真相｜揭示卷序｜知情人。',
+    '',
+    '创作简报：',
+    brief || '（空）',
+  ].join('\n')
+
+const charPrompt = (brief, bible) =>
+  [
+    '你是人物设计编辑。基于简报/圣经，设计本书的【常驻人物】与【群像】。本步只定义贯穿多卷的人物；各卷对立角色在第6步分卷结构表里按卷定义。时序用【卷序】，章号在第7步排章后回填。',
+    LANG_RULE,
+    '每个人物一行(字段顺序固定，该字段缺省时写—)：姓名｜身份｜核心欲望(脱离主角也成立)｜能力/战力定位(境界或段位+相对主角位置)｜与主角关系及张力(关系+利益冲突点)｜性格弧光(从X信念→到Y信念+触发事件；外部驱动型主角写—)｜秘密/底牌(1条+预计揭示卷)｜识别符(口头禅或标志动作，择一)｜语气示例(直接写2句可照抄进正文的台词，体现用词/句长/称呼)｜外貌锚点(10至20字)｜高光事件(具体动作+具体后果)｜高光卷序(与第7步节拍对应)｜贯穿卷范围｜首次透出卷｜传闻卷｜知情人｜退场方式(死/离/转化/留；死/离/转化各自给触发条件)。',
+    '配角群像(群像=配角每一位都有独立高光)：长期配角之外再补2至4位次要配角，每行：配角名｜身份一句｜高光事件(具体动作+具体后果)｜高光卷序｜透出卷。',
+    '硬约束：语气示例可直接照抄、不同人物用词层级肉眼可辨；主角与配角至少2处能力互补、1处能力冲突；配角之间至少3条独立于主角的关系线。',
+    '每个人物的欲望在其与主角无关时也成立。某项无法从上游推出时该项写—，整个人物照常保留。',
+    '',
+    '配额：主角1人；长期配角至少6人至10人，覆盖功能位(战斗队友/情报技术/导师/情感线/势力接口/后勤调剂)每个功能位1至2人；圣经每个势力至少1名代表，缺省时写—。',
+    '',
+    '创作简报：',
+    brief || '（空）',
+    '',
+    '世界观圣经：',
+    bible || '（空）',
+  ].join('\n')
+
+// 独立资产表：一次生成完整、分层、带透出卷的资产（主角/配角/普通角色/地点/势力/道具），
+// 替代"从圣经/人物顺带解析"导致的资产单薄；每行尾部统一三列「透出卷｜传闻卷｜知情人」，由 parseAssetTable 解析。
+const assetTablePrompt = (brief, bible, characters) =>
+  [
+    '你是资产表编辑。基于简报/圣经/人物，产出本书完整的资产表，供正文写作时按章透出调用。分六段，每段每行一个资产，字段用｜分隔。',
+    LANG_RULE,
+    '所有段的每一行，最后三列固定是：透出卷｜传闻卷｜知情人（没有就填—）。透出卷写该资产正式登场的卷序，传闻卷写它只以传闻露出的卷序，具体章号在排章后回填。',
+    '【主角】1人，每行：姓名｜身份｜能力/战力定位｜核心欲望｜性格弧光｜高光事件｜透出卷｜传闻卷｜知情人。',
+    '【配角】至少6人至12人（贯穿多卷的主要配角），每行：姓名｜身份｜能力/战力定位｜与主角关系及张力｜核心欲望｜高光事件｜透出卷｜传闻卷｜知情人。',
+    '【普通角色】至少10个至30个（各卷陆续登场的次要角色、对手、功能性人物），每行：姓名｜身份｜与主角关系｜在剧情里的功能作用｜透出卷｜传闻卷｜知情人。',
+    '【地点】至少15个至40个，每行：地点名｜层级｜区域｜功能｜控制方｜透出卷｜传闻卷｜知情人。',
+    '【势力】至少8方至20方，每行：势力名｜立场+资源｜与主角初始关系｜功能位｜透出卷｜传闻卷｜知情人。',
+    '【道具】至少8个至20个，每行：道具名｜持有者｜功能｜出处｜透出卷｜传闻卷｜知情人。',
+    '硬约束：名字取自圣经/人物/简报，不新造与上游冲突的实体；控制方/持有者/出处指向本表已有的资产名，没有就填"无主"；每个资产都写清它在剧情里不可替代的作用；数量宁多勿少，让每一章都有足够的已透出资产可写。',
+    '只输出以上六段的｜分列行。',
+    '',
+    '创作简报：',
+    brief || '（空）',
+    '',
+    '世界观圣经：',
+    bible || '（空）',
+    '',
+    '人物：',
+    characters || '（空）',
+  ].join('\n')
+
+const outlinePrompt = (brief, bible, characters) =>
+  [
+    '你是故事结构编辑。基于简报/圣经/人物，产出全书结构大纲。只写结构层，场景对白留给正文。时序用【卷序】。主线在简报基础上产出增量。',
+    LANG_RULE,
+    '【分卷结构表】每卷一行：卷序｜地图推进｜主角战力阶位(标本卷突破点)｜主要对手与势力格局变化。',
+    '【关键转折】每卷至少2至3个(全书至少12至18个)，每个一句：所在卷+发生什么+改变了什么。',
+    '【每卷事件节点】每卷至少8至15个，按时间序每节点一行：卷序.节点序｜事件(谁在何地做了什么，一句讲清)｜涉及人物｜涉及地点或势力｜承接(上一节点的后果如何引发本节点)｜后果(本节点造成什么变化或埋下什么新钩子)。节点因果相连、逐级推进；【关键转折】的每个转折都落在某个节点上；只写上游出现过的或为其直接补全的。',
+    '【情绪曲线】按"蓄力—爆发—回落"循环编排，每卷标：主情绪基调｜蓄力段:释放段章数配比至少2至4比1｜卷末大爆点(爽点类型+强度)｜卷末新钩子。强度4至5的章在每卷里占少数(每4章里1章上下)、彼此隔开排布；高潮后接1章强度1至2的回落章。',
+    '  · 每个情绪节点标出本章主爽点类型与触发事件。',
+    '【伏笔】至少3条至6条(全书8至12条)，每条一行：伏笔名｜埋什么｜埋设卷｜回收卷｜重要度(主线级/支线级/局部级)｜传闻卷。发酵期由重要度决定(主线级至少40章、支线级至少15章、局部级至少5章)；每条伏笔都写出确定的回收卷。',
+    '【悬念账本】全书一张：钩子编号｜埋设卷｜内容｜预计回收卷｜回收方式｜状态(未回收/已回收)。每卷末留待回收的钩子控制在5条以内。',
+    '【终局】一句话。',
+    '只写走向与节点；只写上游出现过的或为其直接补全的。',
+    '',
+    '创作简报：',
+    brief || '（空）',
+    '',
+    '世界观圣经：',
+    bible || '（空）',
+    '',
+    '人物：',
+    characters || '（空）',
+  ].join('\n')
+
+// 第7/8步共用的排章纪律（单一出处，避免两处漂移）
+const VOLUME_RULES = [
+  '回溯锚：本章首次透出的资产，其透出卷早于或等于本卷；透出卷晚于本卷的资产以传闻出现，或留到其透出卷再登场。',
+  '资产登场以资产表标明的透出卷为准，只排入透出卷早于或等于本卷的资产；不为凑数提前拉后面才透出的资产登场。',
+  '每章任务各有分工；按事件密度排章；每章都推进主线、塑造人物、兑现爽点其中之一，只列有实际内容的章。',
 ]
 
-// 每步负责的构思层 agent（§8：新手写作每步顶部标注驱动 agent）。ids 对应 registry.AGENTS 的 id。
-const STEP_AGENTS = {
-  0: { ids: ['muse', 'stylist'], note: 'Muse 提炼立意/题材/爽点/核心冲突；Stylist 可选蒸馏参考文本的真·语言指纹，驱动后续写作。' },
-  1: { ids: ['worldsmith'], note: 'Worldsmith 把修补诉求合理化为小说圣经：势力盘/冲突线/真相层/地图层——真相永不进写作上下文。' },
-  2: { ids: ['storyliner'], note: 'Storyliner 分 5 段流式撰写 5000-8000 字完整故事线，把整个故事讲完后存于 project.storyline。' },
-  3: { ids: ['structurer'], note: 'Structurer 规划全书总故事线：主线里程碑 + 副线 + 四层伏笔，登记即锚定回收卷。' },
-  4: { ids: ['structurer'], note: 'Structurer 结合剧情节奏引擎把故事线拆成卷，分配各卷章数与情感走向。' },
-  5: { ids: ['structurer'], note: 'Structurer 按 ACT_RATIO_GUIDE 把每卷切成起/发展/冲突/高潮四幕，注入本幕 goal。' },
-  6: { ids: ['outliner'], note: 'Outliner 生成全书章名骨架 + 第 1 卷逐章细纲，把幕内章级细化为可写详纲。' },
-  7: { ids: ['stylist'], note: '开写前确定性对账（零 Token）：伏笔闭环/真相隔离/结构守恒肉眼可查；Stylist 的语言指纹随书定稿。' },
+const volumePrompt = (volumeLine, bibleDigest, charsDigest, outlineDigest) =>
+  [
+    '你是分卷结构编辑。基于体量/精简清单/大纲摘要，产出第1卷章节框架；分卷沿用大纲里的【分卷结构表】，本步只排章、不重复产分卷。',
+    LANG_RULE,
+    '【第1卷章节·前段】逐章列出第1至20章，每章一行：章号｜章名｜本章故事梗概(约200字，讲完本章从开场到结尾钩子的完整故事：在哪个场景/谁做了什么/遇到什么冲突/如何转折/怎么收尾；含对峙或谈判的章，梗概里写清一轮来回台词谁对谁说了什么；梗概内一律用逗号句号，把｜分隔符留给字段之间)｜本章视角人物(写人物名)｜本章首次透出的资产(人物/地点/势力名，含本章主角与在场人物)｜情绪节拍(主情绪+强度1-5+主爽点类型+触发事件)｜出场人物(用人物名册里的准确名字，逗号分隔)｜结尾钩子+类型。',
+    ...VOLUME_RULES,
+    '',
+    '目标体量：',
+    volumeLine || '（空）',
+    '',
+    '势力/地点/等级清单(精简)：',
+    bibleDigest || '（空）',
+    '',
+    '人物清单(精简)：',
+    charsDigest || '（空）',
+    '',
+    '故事大纲摘要(分卷表+事件节点+情绪曲线)：',
+    outlineDigest || '（空）',
+  ].join('\n')
+
+// 第8步：续排第21章起 + 资产章号回填（独立一步，避免与长章表挤在同一次输出里被截断）
+const volumePrompt2 = (volumesTail, bibleDigest, charsDigest, foreshadowLines) =>
+  [
+    '你是分卷结构编辑。第1卷前20章已排定(见下)。续排第21章起至本卷末，并产出资产章号回填清单。',
+    LANG_RULE,
+    '【第1卷章节·后段】逐章列出第21章至本卷末章，每章一行：章号｜章名｜本章故事梗概(150至250字，讲完本章从开场到结尾钩子的完整故事；含对峙或谈判的章，梗概里写清一轮来回台词谁对谁说了什么；梗概内一律用逗号句号，把｜分隔符留给字段之间)｜本章视角人物(写人物名)｜本章首次透出的资产(人物/地点/势力名，含本章主角与在场人物)｜情绪节拍(主情绪+强度1-5+主爽点类型+触发事件)｜出场人物(用人物名册里的准确名字，逗号分隔)｜结尾钩子+类型。',
+    '【资产章号回填】把圣经/人物/伏笔各资产的"透出卷/传闻卷"细化为"透出章(伏笔写埋设章)/传闻章"，每行：资产名｜透出章｜传闻章，逐行整齐列出，每个资产与每条伏笔一行不漏；章号按前段加后段章表的事件顺序推定。',
+    ...VOLUME_RULES,
+    '',
+    '势力/地点/等级清单(精简)：',
+    bibleDigest || '（空）',
+    '',
+    '人物清单(精简)：',
+    charsDigest || '（空）',
+    '',
+    '伏笔清单(回填埋设章的依据)：',
+    foreshadowLines || '（空）',
+    '',
+    '前段末3章(续排时承接其结尾钩子与人物处境；前段已排到第20章)：',
+    volumesTail || '（空）',
+  ].join('\n')
+
+// 上游精简：只取｜分列行的前 keep 个字段，避免全文堆叠稀释第7步指令。
+// keep 需覆盖到"透出卷/传闻卷/知情人/退场方式"列(圣经势力第7列、人物知情人第16列、退场方式第17列)，否则第7/8步的回溯锚、知情人节与人物退场安排无从核对(M36)。
+// digestLines 复用 parseAssets 导出的兼容版（兼容半角竖线与 markdown 表头；M35 起保留段标题行并滤掉 markdown 分隔行/表头行）。
+// 大纲摘要：只取排章真消费的段（分卷表/转折/事件节点/情绪曲线）；伏笔与悬念账本已落库成表，整段不再注入
+const outlineDigest = (text) => {
+  const keep = []
+  let on = false
+  for (const raw of String(text || '').split('\n')) {
+    const l = raw.trim()
+    if (/^#{1,3} /.test(l) || l.startsWith('【')) {
+      on = l.includes('分卷结构表') || l.includes('关键转折') || l.includes('每卷事件节点') || l.includes('情绪曲线')
+      if (on) keep.push(l)
+      continue
+    }
+    if (on && l) keep.push(l)
+  }
+  return keep.join('\n')
 }
-const TIERS = ['短', '中', '长', '终极']
-const TIER_DESC = { 短: '10~20 章回收：日常爽点、小反转', 中: '50~80 章回收：卷中反转、配角秘密', 长: '150~250 章回收：身世、金手指、幕后黑手', 终极: '终卷回收：全书最大秘密，只露蛛丝马迹' }
+// 伏笔段单独抽出，作第8步回填埋设章的依据
+const foreshadowLinesOf = (text) => {
+  const keep = []
+  let on = false
+  for (const raw of String(text || '').split('\n')) {
+    const l = raw.trim()
+    if (/^#{1,3} /.test(l) || l.startsWith('【')) {
+      // A12：与 outlineDigest 口径统一——不带【】匹配，兼容 AI 把伏笔段标题写成 '## 伏笔'/'伏笔' 而非 '【伏笔】'（否则漏匹配、第8步失去回填埋设章依据）
+      on = l.includes('伏笔')
+      if (on) keep.push(l)
+      continue
+    }
+    if (on && l) keep.push(l)
+  }
+  return keep.join('\n')
+}
+// 前段章表只取末3章给第8步承接钩子，整份20章不再重复注入
+const volumesTail = (text) =>
+  String(text || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /^\d+[｜|]/.test(l))
+    .slice(-3)
+    .join('\n')
 
-const DEFAULT_STATE = {
-  version: STATE_VERSION,
-  step: 0,
-  brief: '',
-  genre: GENRES[0],
-  bookName: '',
-  totalWords: 100, // 万字
-  volumeCount: 6,
-  chapterWords: 2000,
-  bible: null, // {fixes, world, powerRules[], truths[…], anchors[…], mapLayers[…], factions[{id,name,desc,rumor,unlockVolume,locked}], conflicts[{id,name,desc,startVolume,endVolume,locked}], locks:{world,powerRules}}
-  importText: '',
-  importedChapters: [], // [{no,title,text}] 分章预览/已确认
-  storyline: '', // 完整故事线（5000-8000 字叙事通稿，Storyliner 分段生成）：存 project.storyline，供写作层把握全局走向
-  mainline: '',
-  subplots: [],
-  foreshadows: [], // {id,content,tier,relatedChars,plannedVolume,hints[{chapter,clue}]}
-  rhythm: '快头肥中快尾', // 分卷节奏模板（不均分：开卷短而密/腹地长/收割快）
-  volumes: [], // {volumeNo,name,theme,conflict,gain,strategy,endHook,length,startChapter,arc,acts,forbiddenForeshadowIds[]}
-  skeleton: '',
-  chapterSkeleton: [], // [{chapterNo,title,task}]
-  outline: '',
-  styleDistill: { bookIds: [], pasteText: '', distilled: [], blended: null }, // 功能4：step0 文风蒸馏（可选）
+// 第7步体量行提取：宽松匹配简报里以序号 2 开头的行(允许 **2. / 2、/ 二. 等任意非数字前缀)；
+// 匹配不到时用目标总字数除以每章字数兜底算出全书章数，保证 volumePrompt 始终有体量锚。
+const PER_CHAPTER_WORDS = 2500
+const resolveVolumeLine = (brief, targetWords) => {
+  const hit = String(brief || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => /^\D*2\s*[.、．:：]/.test(l))
+  if (hit) return hit
+  const tw = Number(targetWords) || 1000000
+  const chapters = Math.max(1, Math.round(tw / PER_CHAPTER_WORDS))
+  return `目标总字数${tw}字；按每章约${PER_CHAPTER_WORDS}字估算，全书约${chapters}章。`
 }
 
-// 四幕 → 兼容 parseVolumeArc 的 arc 文本（幕名含起/发展/冲突/落幕，可被弧线坐标系正确归类）
-const actsToArc = (acts) => (acts || []).map((a) => `${a.act}(第${a.start}-${a.end}章)`).join('→')
+// 补全问答与文风蒸馏的回复是结构表文本，采纳时从中解析出问题列表/文风字段；解析失败提示用户重发。
+const parseJsonReply = (text) => {
+  const raw = String(text || '').trim()
+  if (!raw) return null
+  const unfenced = raw.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim()
+  try {
+    return JSON.parse(unfenced)
+  } catch {
+    /* 落到下面的截取分支 */
+  }
+  const arr = unfenced.match(/\[[\s\S]*\]/)
+  const obj = unfenced.match(/\{[\s\S]*\}/)
+  for (const m of [arr, obj]) {
+    if (m) {
+      try {
+        return JSON.parse(m[0])
+      } catch {
+        /* 继续尝试下一种 */
+      }
+    }
+  }
+  return null
+}
 
-export default function WizardPage({ apiKey, onNeedKey, onOpenLongForm }) {
-  const [st, setSt] = useState(() => {
-    const saved = loadWizardState()
-    // 旧版向导状态格式不兼容时重置（v3 为圣经流程）
-    return saved && saved.version === STATE_VERSION ? { ...DEFAULT_STATE, ...saved } : { ...DEFAULT_STATE }
-  })
-  const [busy, setBusy] = useState('') // 非空 = 生成中的进度文案
-  const [err, setErr] = useState('')
-  const [creating, setCreating] = useState('')
-  const [agentTrace, setAgentTrace] = useState([]) // agent 运行轨迹（makeProgress 事件流快照）：阶段6「编剧团队」面板消费
-  const progressRef = useRef(makeProgress()) // 全程复用一个 progress 收集器，各 agent run 时 push 事件（构思层已接入，写作层阶段3接入）
-  const [showInspire, setShowInspire] = useState(false)
-  const [libBooks, setLibBooks] = useState([])
-  const [libStyles, setLibStyles] = useState([])
-  // 蒸馏入口需要书库与已蒸馏文风：挂载时读取（best-effort，失败不阻塞向导）
+// M-10：三表解析(资产/节拍/伏笔)——资产以独立「资产表」为准(更完整、分层、带透出卷)，资产表为空时回落圣经/人物解析；
+// 再把卷章表的「资产章号回填」写回资产/伏笔(否则第8步回填成果全丢)。previewCounts(防抖计数)与 saveBook(落库即时算)共用同一函数，保证"所见即所存"。
+const computeParsed = ({ assetTable, bible, characters, outline, volumes, volumes2 }) => {
+  const vols = `${volumes}\n${volumes2}`
+  const fromBook = parseBookAssets({ bible, characters, outline, volumes: vols })
+  const fromTable = parseAssetTable(assetTable)
+  const assets = fromTable.length ? fromTable : fromBook.assets
+  backfillChapterNos(assets, fromBook.foreshadows, vols)
+  return { assets, beats: fromBook.beats, foreshadows: fromBook.foreshadows }
+}
+
+const box = 'w-full resize-y rounded-lg border border-stone-300 bg-stone-50 p-3 text-sm leading-relaxed focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-200'
+const line =
+  'w-full rounded-lg border border-stone-300 bg-stone-50 px-3 py-2 text-sm focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-200'
+const label = 'mb-1 block text-xs font-medium text-stone-500'
+const genBtn =
+  'rounded-lg bg-red-700 px-4 py-1.5 text-sm text-onaccent hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-red-700'
+const hint = 'mt-2 text-xs text-stone-400'
+
+// 草稿持久化：纯前端项目，刷新不丢未落库内容（落库的书在 IndexedDB books store）
+const DRAFT_KEY = 'na_wizard_draft'
+const DRAFT = (() => {
+  try {
+    return JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null') || {}
+  } catch {
+    return {}
+  }
+})()
+
+export default function WizardPage({ onOpenLongForm }) {
+  const [inspiration, setInspiration] = useState(DRAFT.inspiration || '')
+  const [targetWords, setTargetWords] = useState(DRAFT.targetWords || '1000000')
+  const [brief, setBrief] = useState(DRAFT.brief || '')
+  const [inspireOpen, setInspireOpen] = useState(false)
+
+  const [clarifyQuestions, setClarifyQuestions] = useState(DRAFT.clarifyQuestions || [])
+  const [clarifyOpen, setClarifyOpen] = useState(false)
+  const [clarifyAnswers, setClarifyAnswers] = useState(DRAFT.clarifyAnswers || null)
+  const [clarifyPromptOpen, setClarifyPromptOpen] = useState(false)
+  const [clarifyErr, setClarifyErr] = useState('')
+
+  const [stylePreset, setStylePreset] = useState(DRAFT.stylePreset || '')
+  const [genreNote, setGenreNote] = useState(DRAFT.genreNote || '')
+  const [styleNote, setStyleNote] = useState(DRAFT.styleNote || '')
+  const [styleProfile, setStyleProfile] = useState(DRAFT.styleProfile || '')
+  const [styleOpen, setStyleOpen] = useState(false)
+  const [styleSourceText, setStyleSourceText] = useState('')
+  const [styleHabits, setStyleHabits] = useState(DRAFT.styleHabits || []) // WZ-1：初值从 DRAFT 读，与 styleProfile 一致，避免"localStorage 存了却首屏闪空/IndexedDB 载入失败时永远空"
+  const [styleSamples, setStyleSamples] = useState(DRAFT.styleSamples || [])
+  const [styleMetrics, setStyleMetrics] = useState(DRAFT.styleMetrics || null)
+  const [styleReliable, setStyleReliable] = useState(!!DRAFT.styleReliable) // WZ-2：蒸馏指纹是否可靠(样本量足够)，与 styleMetrics 一起持久化；徽标据此区分"含14维指纹"与"样本过短仅供参考"
+  const [distillPromptOpen, setDistillPromptOpen] = useState(false)
+  const [distillSystem, setDistillSystem] = useState('')
+  const [distillUserPrompt, setDistillUserPrompt] = useState('')
+  const [distillSamples, setDistillSamples] = useState([])
+  const [distillErr, setDistillErr] = useState('')
+
+  const [bible, setBible] = useState(DRAFT.bible || '')
+  const [bibleOpen, setBibleOpen] = useState(false)
+  const [characters, setCharacters] = useState(DRAFT.characters || '')
+  const [charsOpen, setCharsOpen] = useState(false)
+  const [assetTable, setAssetTable] = useState(DRAFT.assetTable || '')
+  const [assetTableOpen, setAssetTableOpen] = useState(false)
+  const [outline, setOutline] = useState(DRAFT.outline || '')
+  const [outlineOpen, setOutlineOpen] = useState(false)
+  const [volumes, setVolumes] = useState(DRAFT.volumes || '')
+  const [volumesOpen, setVolumesOpen] = useState(false)
+  const [volumes2, setVolumes2] = useState(DRAFT.volumes2 || '')
+  const [volumes2Open, setVolumes2Open] = useState(false)
+
+  const [savedBook, setSavedBook] = useState(null)
+  const [saveErr, setSaveErr] = useState('')
+  const [draftSaveError, setDraftSaveError] = useState('') // M38：草稿写 IndexedDB 失败时置位，界面明示"未能保存"，不再无保证地承诺"刷新不丢"
+  const loadedRef = useRef(false) // M37：首次草稿载入完成前，保存副作用不写盘，避免用挂载初值(空 styleSourceText)覆盖 IndexedDB 里已存的原文样本
+
+  const hasBrief = !!brief.trim()
+  const hasBible = !!bible.trim()
+  const hasChars = !!characters.trim()
+  const hasOutline = !!outline.trim()
+  const styleEmpty = !stylePreset && !styleNote.trim() && !genreNote.trim()
+
+  const preset = PRESET_STYLES.find((s) => s.bookName === stylePreset)
+  const styleInitialPrompt =
+    STYLE_PROMPT_HEAD +
+    (preset?.profile || '（无预设）') +
+    '\n\n题材：\n' +
+    (genreNote || '（无）') +
+    '\n\n补充要求：\n' +
+    (styleNote || '（无）')
+
   useEffect(() => {
-    getAll('books').then((list) => setLibBooks(Array.isArray(list) ? list : [])).catch(() => {})
-    getAll('styles').then((list) => setLibStyles([...PRESET_STYLES, ...(Array.isArray(list) ? list : []).filter((s) => s && s.profile)])).catch(() => {})
+    if (!loadedRef.current) return // M37：首次载入完成前不写草稿，否则挂载初值(空 styleSourceText)会覆盖 IndexedDB 里已存的整本原文样本
+    const t = setTimeout(() => {
+      const payload = { inspiration, targetWords, brief, clarifyQuestions, clarifyAnswers, stylePreset, genreNote, styleNote, styleProfile, styleHabits, styleSamples, styleSourceText, styleMetrics, styleReliable, bible, characters, assetTable, outline, volumes, volumes2 }
+      // 原文样本可能整本书大小：小容量存储只放不含原文的载荷且超配额不中断数据库落盘
+      const { styleSourceText: _omit, ...lightPayload } = payload
+      try {
+        localStorage.setItem(DRAFT_KEY, JSON.stringify(lightPayload))
+      } catch {
+        /* 小容量存储超配额时跳过，数据库那份仍在 */
+      }
+      // M38：写失败不再静默吞掉——置 draftSaveError 让界面明示"草稿未能保存"，避免用户信"刷新不丢"却丢了未落库内容
+      put('drafts', { id: DRAFT_KEY, updatedAt: Date.now(), ...payload })
+        .then(() => setDraftSaveError(''))
+        .catch(() =>
+          setDraftSaveError('草稿未能保存到浏览器数据库（可能存储空间不足）；请尽快「落库成书」或到「我的」页导出备份，否则刷新后未落库内容可能丢失。')
+        )
+    }, 400)
+    return () => clearTimeout(t)
+  }, [inspiration, targetWords, brief, clarifyQuestions, clarifyAnswers, stylePreset, genreNote, styleNote, styleProfile, styleHabits, styleSamples, styleSourceText, styleMetrics, styleReliable, bible, characters, assetTable, outline, volumes, volumes2])
+
+  // 落库前先算一次三表计数，让用户核对后再落库（item 25）
+  // M-10：previewCounts 原先对 6 个大 textarea 每次按键都全量重跑 parseBookAssets+parseAssetTable+backfillChapterNos(含 O(n²) buildLinks)，输入卡顿。
+  // 改用 400ms 防抖快照算计数(仅供第9步 UI 核对)；落库时 saveBook 用当前值即时重算，不吃防抖滞后值，保证落库=用户最后编辑。
+  const [debouncedSrc, setDebouncedSrc] = useState({ assetTable, bible, characters, outline, volumes, volumes2 })
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSrc({ assetTable, bible, characters, outline, volumes, volumes2 }), 400)
+    return () => clearTimeout(t)
+  }, [assetTable, bible, characters, outline, volumes, volumes2])
+  const previewCounts = useMemo(() => computeParsed(debouncedSrc), [debouncedSrc])
+
+  // M34：第7/8步弹窗的 initialPrompt 原先内联重算 digestLines/outlineDigest/foreshadowLinesOf/volumesTail
+  // （对圣经与人物全文各扫多次），大文本下每次按键都重算、弹窗关闭时也照算。改 useMemo 缓存，两个弹窗共享 digestLines 结果，只在上游文本变化时重算。
+  const bibleDigest = useMemo(() => digestLines(bible, 7), [bible])
+  const charsDigest = useMemo(() => digestLines(characters, 17), [characters]) // M36：keep 17 覆盖到第17列"退场方式"(死/离/转化/留+各自触发条件)，否则第7/8步排章不知人物何时以何种方式退场，可能给已死/已离场人物排后续戏份与对白
+  const volumeInitialPrompt = useMemo(
+    () => volumePrompt(resolveVolumeLine(brief, targetWords), bibleDigest, charsDigest, outlineDigest(outline)),
+    [brief, targetWords, bibleDigest, charsDigest, outline]
+  )
+  const volume2InitialPrompt = useMemo(
+    () => volumePrompt2(volumesTail(volumes), bibleDigest, charsDigest, foreshadowLinesOf(outline)),
+    [volumes, bibleDigest, charsDigest, outline]
+  )
+
+  // IndexedDB 草稿覆盖 localStorage 首屏值（IndexedDB 为准，容量大）
+  useEffect(() => {
+    let alive = true
+    getById('drafts', DRAFT_KEY)
+      .then((d) => {
+        if (!alive) return
+        if (d) {
+          setInspiration(d.inspiration || '')
+          setTargetWords(d.targetWords || '1000000')
+          setBrief(d.brief || '')
+          setClarifyQuestions(d.clarifyQuestions || [])
+          setClarifyAnswers(d.clarifyAnswers || null)
+          setStylePreset(d.stylePreset || '')
+          setGenreNote(d.genreNote || '')
+          setStyleNote(d.styleNote || '')
+          setStyleProfile(d.styleProfile || '')
+          setStyleHabits(d.styleHabits || [])
+          setStyleSamples(d.styleSamples || [])
+          setStyleSourceText(d.styleSourceText || '')
+          setStyleMetrics(d.styleMetrics || null)
+          setStyleReliable(!!d.styleReliable)
+          setBible(d.bible || '')
+          setCharacters(d.characters || '')
+          setAssetTable(d.assetTable || '')
+          setOutline(d.outline || '')
+          setVolumes(d.volumes || '')
+          setVolumes2(d.volumes2 || '')
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (alive) loadedRef.current = true // M37：载入流程结束(无论有无草稿/成败)后才放行保存副作用
+      })
+    return () => {
+      alive = false
+    }
   }, [])
 
-  // 进度整体持久化（防抖，避免流式生成时逐字写 localStorage）
-  useEffect(() => {
-    const t = setTimeout(() => saveWizardState(st), 800)
-    return () => clearTimeout(t)
-  }, [st])
-
-  const patch = (p) => setSt((s) => ({ ...s, ...p }))
-  const patchBible = (p) => setSt((s) => ({ ...s, bible: { ...s.bible, ...p } }))
-
-  // ---------- Step 0 文风蒸馏（可选）：选书库小说或粘贴文本，蒸馏「文风指纹」驱动后续写作 ----------
-  const toggleDistillBook = (id) => {
-    const cur = st.styleDistill || { bookIds: [], pasteText: '', distilled: [], blended: null }
-    const ids = cur.bookIds.includes(id) ? cur.bookIds.filter((x) => x !== id) : [...cur.bookIds, id]
-    patch({ styleDistill: { ...cur, bookIds: ids } })
-  }
-  const distillStyle = async () => {
-    if (!apiKey) return onNeedKey()
-    const sd = st.styleDistill || { bookIds: [], pasteText: '', distilled: [], blended: null }
-    if (!sd.bookIds.length && sd.pasteText.trim().length < 200) return setErr('请先在书库勾选小说，或粘贴 ≥200 字文本再蒸馏。')
-    setErr('')
-    setBusy('AI 正在蒸馏文风指纹…')
-    try {
-      const recs = []
-      // Stylist 文风蒸馏师：逐份样本蒸馏（sampleNovel→styleAnalyze→distillStyleBand→sanitizeHabits 内聚在 agent）；
-      // name/forbidden 属页面档案字段，在此补齐后入库（存的就是写作时实际注入的）
-      for (const id of sd.bookIds) {
-        const prev = libStyles.find((s) => s.bookId === id)
-        if (prev && prev.profile) { recs.push(prev); continue }
-        const book = libBooks.find((b) => b.id === id)
-        if (!book || !book.content) continue
-        const base = await stylistAgent.distillOne({ apiKey, text: book.content, bookId: id, progress: progressRef.current })
-        if (base.profile) {
-          const rec = { ...base, name: book.name, forbidden: prev?.forbidden || [] }
-          await put('styles', rec)
-          recs.push(rec)
-        }
-      }
-      if (sd.pasteText.trim().length >= 200) {
-        const base = await stylistAgent.distillOne({ apiKey, text: sd.pasteText, bookId: 'paste:' + Date.now(), progress: progressRef.current })
-        if (base.profile) {
-          const rec = { ...base, name: '粘贴文本', forbidden: [] }
-          await put('styles', rec)
-          recs.push(rec)
-        }
-      }
-      if (!recs.length) return setErr('蒸馏未得到有效文风档案，请重试或换一段更长的文本。')
-      const blended = recs.length > 1 ? stylistAgent.blend(recs) : null
-      setLibStyles((prevList) => [...prevList.filter((s) => !recs.some((r) => r.bookId === s.bookId)), ...recs])
-      patch({ styleDistill: { ...sd, distilled: recs, blended } })
-      setAgentTrace(progressRef.current.snapshot())
-    } catch (e) {
-      setErr(e.message)
-    } finally {
-      setBusy('')
-    }
-  }
-
-  // ---------- Step 1 圣经 ----------
-  const emptyBible = () => ({ fixes: [], world: '', powerRules: [], truths: BIBLE_TRUTH_KINDS.map((k) => ({ id: uid(), kind: k, truth: '', clues: [], locked: false })), anchors: [], mapLayers: [], factions: [], places: [], secrets: [], conflicts: [], locks: { world: false, powerRules: false } })
-
-  // 把 AI 产出并入圣经：锁定项一律保留旧值（用户改过并锁定的内容不被覆盖）
-  const mergeBible = (old, res) => {
-    const b = old || emptyBible()
-    const next = { ...b }
-    if (!b.locks?.world) next.world = String(res.world || b.world || '')
-    if (!b.locks?.powerRules && Array.isArray(res.power_rules) && res.power_rules.length) next.powerRules = res.power_rules.filter(Boolean).map(String)
-    if (Array.isArray(res.fixes) && res.fixes.length) next.fixes = res.fixes.map(String)
-    if (Array.isArray(res.anchors)) {
-      next.anchors = res.anchors
-        .filter((a) => a?.name)
-        .map((a) => {
-          const oldA = (b.anchors || []).find((x) => x.name === a.name)
-          if (oldA?.locked) return oldA
-          return { id: oldA?.id || uid(), name: String(a.name), aliases: Array.isArray(a.aliases) ? a.aliases.map(String).filter(Boolean) : [], identity: String(a.identity || ''), secret: String(a.secret || ''), locked: false }
-        })
-    }
-    if (Array.isArray(res.truths)) {
-      next.truths = BIBLE_TRUTH_KINDS.map((kind) => {
-        const oldT = (b.truths || []).find((t) => t.kind === kind)
-        if (oldT?.locked) return oldT
-        const t = res.truths.find((x) => x?.kind === kind) || {}
-        return { id: oldT?.id || uid(), kind, truth: String(t.truth || ''), clues: Array.isArray(t.clues) ? t.clues.map(String).filter(Boolean) : [], locked: false }
-      })
-    }
-    // 地图分层：同名层保留锁定项；truth 层永不进写作上下文（传闻级隔离，同终极真相机制）
-    if (Array.isArray(res.map_layers)) {
-      next.mapLayers = res.map_layers
-        .filter((m) => m?.name)
-        .map((m, i) => {
-          const oldM = (b.mapLayers || []).find((x) => x.name === m.name)
-          if (oldM?.locked) return oldM
-          return { id: oldM?.id || uid(), name: String(m.name), summary: String(m.summary || ''), rumor: String(m.rumor || ''), truth: String(m.truth || ''), unlockVolume: Number(m.unlock_volume) || i + 1, locked: false }
-        })
-    }
-    // 完整世界观成型（选定灵感后自动生成）：势力盘含登场卷+传闻隔离、冲突线含阶段区间；同名锁定项保留旧值（同地图分层机制）
-    if (Array.isArray(res.factions)) {
-      next.factions = res.factions
-        .filter((f) => f?.name)
-        .map((f) => {
-          const oldF = (b.factions || []).find((x) => x.name === f.name)
-          if (oldF?.locked) return oldF
-          return { id: oldF?.id || uid(), name: String(f.name), desc: String(f.desc || ''), rumor: String(f.rumor || ''), unlockVolume: Number(f.unlock_volume) || 1, locked: false }
-        })
-    }
-    if (Array.isArray(res.conflicts)) {
-      next.conflicts = res.conflicts
-        .filter((c) => c?.name)
-        .map((c) => {
-          const oldC = (b.conflicts || []).find((x) => x.name === c.name)
-          if (oldC?.locked) return oldC
-          return { id: oldC?.id || uid(), name: String(c.name), desc: String(c.desc || ''), startVolume: Number(c.start_volume) || 1, endVolume: Number(c.end_volume) || 0, locked: false }
-        })
-    }
-    return next
-  }
-
-  const genBible = async () => {
-    if (!apiKey) return onNeedKey()
-    if (st.brief.trim().length < 10) return setErr('请先在第一步填写初始提问（含固定人设、固定背景与修补诉求）。')
-    setErr('')
-    setBusy('AI 正在修补逻辑漏洞并搭建圣经…')
-    try {
-      // Worldsmith 世界架构师·第一段：理性化圣经骨架（mergeBible 合并锁定项属页面 state 逻辑，保留在本页）
-      const res = await worldsmithAgent.runRationalize({ apiKey, brief: st.brief, progress: progressRef.current })
-      const merged = mergeBible(st.bible, res)
-      // 自动串接第二段：本书完整世界观（势力盘/冲突线含登场时机，防提前透支）
-      setBusy('正在为这本书生成完整世界观（势力盘与冲突线登场时机）…')
-      try {
-        const wvRes = await worldsmithAgent.runWorldview({ apiKey, brief: st.brief, bible: merged, volumeCount: st.volumeCount, worldviewTemplate: worldviewText(getWorldview(st.genre), 'full'), progress: progressRef.current })
-        patch({ bible: mergeBible(merged, wvRes), step: 1 })
-      } catch (e) {
-        // 显式告警（原为静默吞错）：圣经已成型，世界观可稍后重生成补上，不阻塞主流程
-        setErr(`圣经已生成，但完整世界观生成失败（${e.message}），可在本页重新生成圣经补上。`)
-        patch({ bible: merged, step: 1 })
-      }
-      setAgentTrace(progressRef.current.snapshot())
-    } catch (e) {
-      setErr(e.message)
-    } finally {
-      setBusy('')
-    }
-  }
-
-  // 导入已有章节：分章预览 → 可选由导入内容反推圣经
-  const previewImport = () => {
-    const parts = splitChapters(st.importText)
-    if (!parts.length) return setErr('导入内容为空。')
-    setErr('')
-    patch({ importedChapters: parts, step: 1 })
-  }
-
-  const genBibleFromImport = async () => {
-    if (!apiKey) return onNeedKey()
-    if (!st.importedChapters.length) return setErr('请先粘贴既有正文并点击「分章预览」。')
-    setErr('')
-    setBusy('AI 正在从既有章节反推圣经草稿…')
-    try {
-      // Worldsmith 世界架构师·导入支线：从既有章节反推圣经（text 截断 60000 字在 agent 内做）
-      const text = st.importedChapters.map((c) => `【第${c.no}章 ${c.title}】\n${c.text}`).join('\n\n')
-      const res = await worldsmithAgent.runFromImport({ apiKey, text, progress: progressRef.current })
-      const merged = mergeBible(st.bible, res)
-      setBusy('正在为这本书生成完整世界观（势力盘与冲突线登场时机）…')
-      try {
-        const wvRes = await worldsmithAgent.runWorldview({ apiKey, brief: st.brief, bible: merged, volumeCount: st.volumeCount, worldviewTemplate: worldviewText(getWorldview(st.genre), 'full'), progress: progressRef.current })
-        patch({ bible: mergeBible(merged, wvRes) })
-      } catch (e) {
-        setErr(`圣经草稿已生成，但完整世界观生成失败（${e.message}），可重新生成补上。`)
-        patch({ bible: merged })
-      }
-      setAgentTrace(progressRef.current.snapshot())
-    } catch (e) {
-      setErr(e.message)
-    } finally {
-      setBusy('')
-    }
-  }
-
-  // ---------- Step 2 故事线（Storyliner agent 分段生成 5000-8000 字完整故事线） ----------
-  // storylinerAgent 分 5 段（开局/发展/中盘/高潮/结局）流式撰写，每段完成即回填 textarea（onSegment）；
-  // 前段全文喂后段保证连贯；成书时存入 project.storyline，供长篇写作层把握全局走向、防偏离主线。
-  const genStoryline = async () => {
-    if (!apiKey) return onNeedKey()
-    if (!st.bible?.world) return setErr('请先生成小说圣经，再撰写故事线。')
-    setErr('')
-    setBusy('Storyliner 正在分段撰写完整故事线（5000-8000 字）…')
-    try {
-      const { storyline } = await storylinerAgent.run({
-        apiKey,
-        brief: st.brief,
-        genre: st.genre,
-        bible: st.bible,
-        mainline: st.mainline,
-        totalWords: st.totalWords,
-        volumeCount: st.volumeCount,
-        progress: progressRef.current,
-        onSegment: ({ storyline: acc, wordCount }) => {
-          patch({ storyline: acc })
-          setBusy(`Storyliner 正在撰写故事线… 已生成 ${wordCount} 字`)
-        },
-      })
-      patch({ storyline })
-      setAgentTrace(progressRef.current.snapshot())
-      if (storyline.trim().length < 2000) setErr('故事线偏短（<2000 字），可重新生成以获得更完整的 5000-8000 字通稿。')
-    } catch (e) {
-      setErr(e.message)
-    } finally {
-      setBusy('')
-    }
-  }
-
-  // ---------- Step 3 全书梗概 ----------
-  const genSynopsis = async () => {
-    if (!apiKey) return onNeedKey()
-    if (!st.bible?.world) return setErr('请先生成小说圣经。')
-    setErr('')
-    setBusy('AI 正在撰写全书全景大纲（主线/副线/四层伏笔）…')
-    try {
-      const res = await chatJSON({
-        apiKey,
-        messages: fullSynopsisMessages({ genre: st.genre, bible: st.bible, brief: st.brief, totalWords: st.totalWords * 10000, volumeCount: st.volumeCount, chapterWords: st.chapterWords }),
-        temperature: 0.7,
-      })
-      patch({
-        mainline: String(res.mainline || ''),
-        subplots: Array.isArray(res.subplots) ? res.subplots.filter((s) => s?.name).map((s) => ({ id: uid(), name: String(s.name), theme: String(s.theme || ''), startVolume: Number(s.start_volume) || 1, endVolume: Number(s.end_volume) || st.volumeCount })) : [],
-        foreshadows: Array.isArray(res.foreshadows)
-          ? res.foreshadows
-              .filter((f) => f?.content)
-              .map((f) => ({
-                id: uid(),
-                content: String(f.content),
-                tier: TIERS.includes(f.tier) ? f.tier : '短',
-                relatedChars: Array.isArray(f.related_chars) ? f.related_chars.map(String) : [],
-                plannedVolume: Number(f.planned_volume) || st.volumeCount,
-                hints: Array.isArray(f.hints) ? f.hints.filter((h) => h?.clue).map((h) => ({ chapter: Number(h.chapter) || 0, clue: String(h.clue) })) : [],
-              }))
-          : [],
-      })
-    } catch (e) {
-      setErr(e.message)
-    } finally {
-      setBusy('')
-    }
-  }
-
-  const patchHook = (id, p) => patch({ foreshadows: st.foreshadows.map((f) => (f.id === id ? { ...f, ...p } : f)) })
-  const addHook = () => patch({ foreshadows: [...st.foreshadows, { id: uid(), content: '', tier: '短', relatedChars: [], plannedVolume: 1, hints: [] }] })
-
-  // ---------- Step 4 卷结构 ----------
-  const totalChapters = Math.max(1, Math.round((st.totalWords * 10000) / st.chapterWords))
-  const volumeLength = Math.max(5, Math.round(totalChapters / Math.max(1, st.volumeCount)))
-  // 节奏模板 → 各卷章数（模板与卷数不同时等比重采样适配，形状保持不降级均分）；卷角色供四幕拆幕与提示词侧重使用
-  const rhythmWeights = resampleWeights(RHYTHM_TEMPLATES[st.rhythm], st.volumeCount)
-  const rhythmLengths = chaptersByRhythm(totalChapters, rhythmWeights)
-  const rhythmRoles = rhythmWeights.map((_, i) => volumeRole(i + 1, rhythmWeights))
-
-  // 切换节奏模板：已有卷结构时按新节奏重算各卷章数与起始章（卷名/主舞台等编辑成果保留）
-  const applyRhythm = (id) => {
-    const w = resampleWeights(RHYTHM_TEMPLATES[id], st.volumeCount)
-    const lens = chaptersByRhythm(totalChapters, w)
-    const vols = st.volumes.map((v, i) => ({ ...v, length: lens[i] || v.length }))
-    let startNo = 1
-    for (const v of vols) {
-      v.startChapter = startNo
-      startNo += v.length
-    }
-    patch({ rhythm: id, volumes: vols })
-  }
-
-  const genVolumes = async () => {
-    if (!apiKey) return onNeedKey()
-    if (!st.mainline) return setErr('请先生成全书梗概。')
-    setErr('')
-    setBusy(`AI 正在按「${st.rhythm}」节奏切分 ${st.volumeCount} 卷结构…`)
-    try {
-      // Structurer 结构规划师：卷结构（volumesPlanMessages → 解析 → 情感兜底 → startChapter 累加，内聚在 agent）
-      const { volumes } = await structurerAgent.runVolumes({
-        apiKey, bible: st.bible, mainline: st.mainline, volumeCount: st.volumeCount,
-        lengths: rhythmLengths, roles: rhythmRoles, genre: st.genre, volumeLength,
-        progress: progressRef.current,
-      })
-      patch({ volumes })
-      setAgentTrace(progressRef.current.snapshot())
-    } catch (e) {
-      setErr(e.message)
-    } finally {
-      setBusy('')
-    }
-  }
-
-  const patchVol = (no, p) => patch({ volumes: st.volumes.map((v) => (v.volumeNo === no ? { ...v, ...p } : v)) })
-
-  // ---------- Step 5 幕结构 ----------
-  const genActs = async (vol) => {
-    if (!apiKey) return onNeedKey()
-    setErr('')
-    const role = volumeRole(vol.volumeNo, rhythmWeights)
-    setBusy(`AI 正在按「${role}」角色拆解第 ${vol.volumeNo} 卷四幕结构…`)
-    try {
-      // Structurer 结构规划师：幕结构（volumeRole 定位 + actsPlanMessages → 解析；空数组由 agent 抛错）
-      const { acts, arc } = await structurerAgent.runActs({ apiKey, volume: vol, mainline: st.mainline, weights: rhythmWeights, progress: progressRef.current })
-      patchVol(vol.volumeNo, { acts, arc })
-      setAgentTrace(progressRef.current.snapshot())
-    } catch (e) {
-      setErr(e.message)
-    } finally {
-      setBusy('')
-    }
-  }
-
-  // 四幕手工微调（区间/目标均可改，改后同步弧线与起承转合坐标）
-  const patchAct = (no, i, p) => {
-    const vol = st.volumes.find((x) => x.volumeNo === no)
-    if (!vol) return
-    const acts = vol.acts.map((a, j) => (j === i ? { ...a, ...p } : a))
-    patchVol(no, { acts, arc: actsToArc(acts) })
-  }
-
-  // ---------- Step 6 章名骨架 + 第 1 卷细纲 ----------
-  const runStream = async (messages, field, temperature) => {
-    if (!apiKey) return onNeedKey()
-    setErr('')
-    setBusy('AI 生成中…')
-    patch({ [field]: '' })
-    try {
-      await chatStream({ apiKey, messages, temperature, onDelta: (full) => patch({ [field]: full }) })
-    } catch (e) {
-      setErr(e.message)
-    } finally {
-      setBusy('')
-    }
-  }
-
-  // 分卷生成骨架：卷内再按 ≤ SKELETON_BATCH 章分批（根治超长卷一次性枚举上百章导致的复读/断号/思维链泄漏）；
-  // 每批带 max_tokens 上限截断失控循环、解析后校验缺口、缺章多则重试一次；无卷结构降级为全书一次性生成（旧路径）。
-  // 【健壮性】单批容错：瞬时异常（429 限流/网络/服务抖动）退避重试，单批最终失败只跳过该批、不中止后续批，缺口留给「补生成缺失章」按需回填——
-  // 根治“一次抖动废掉整本、只能全量重来”（真实测试中 500 章书停在 400 章的事故）。
-  const actsTextOf = (v) => {
-    const volStart = v.startChapter || 1
-    return (v.acts || []).length ? v.acts.map((a) => `${a.act}=第${volStart + a.start - 1}-${volStart + a.end - 1}章`).join('；') : ''
-  }
-  // 单批骨架生成（容错封装）：最多 3 次尝试、指数退避（3s/6s）；缺章多再补生成一次（best-effort，异常不致命）；全失败才抛给调用方决定是否跳过
-  const genOneBatch = async ({ v, batchStart, batchEnd, prevTail, usedTitles, label }) => {
-    const batchMaxTokens = (n) => 1500 + n * 220 // 每章约 40~60 tokens，给足冗余又能截断失控的思维链死循环
-    const callOnce = () => chatStream({
-      apiKey,
-      messages: volumeSkeletonMessages({ bible: st.bible, mainline: st.mainline, volume: v, volumeCount: st.volumeCount, prevTail, actsText: actsTextOf(v), rangeStart: batchStart, rangeEnd: batchEnd, usedTitles }),
-      temperature: 0.7,
-      maxTokens: batchMaxTokens(batchEnd - batchStart + 1),
-    }).then((full) => renumberPart(String(full).trim(), batchStart))
-    let text = null
-    let lastErr = null
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        text = await callOnce()
-        lastErr = null
-        break
-      } catch (e) {
-        lastErr = e
-        if (attempt < 3) {
-          setBusy(`${label}：第 ${attempt} 次失败（${e.message}），${attempt * 3} 秒后重试…`)
-          await sleep(attempt * 3000)
-        }
-      }
-    }
-    if (lastErr) throw lastErr
-    const missCount = skeletonMissing(parseSkeleton(text), batchStart, batchEnd).length
-    if (missCount > 1) { // 缺章多则补生成一次，取覆盖更全的一版；补生成失败不致命，保留已得版本
-      try {
-        const retryText = await callOnce()
-        if (skeletonMissing(parseSkeleton(retryText), batchStart, batchEnd).length < missCount) text = retryText
-      } catch { /* 忽略：保留首次结果 */ }
-    }
-    return text
-  }
-  const genSkeleton = async () => {
-    if (!st.volumes.length) {
-      await runStream(chapterSkeletonMessages({ bible: st.bible, mainline: st.mainline, volumes: st.volumes, volumeLength }), 'skeleton', 0.7)
+  // 真蒸馏链路（对齐 novel-local stylistAgent.distillOne）：sampleNovel切样本 → 文风分析提示词经弹窗给用户看/改 → 发送后回复解析 → distillStyleBand(零Token 14维量化)。
+  // WZ-4：habits 存原始值、不在此净化；净化统一放到消费端(LongFormPage 注入成文提示词前)做一次，避免双重净化。
+  const openDistill = () => {
+    setDistillErr('')
+    const smp = sampleNovel(styleSourceText)
+    if (!smp || !smp.length) {
+      setDistillErr('原文太短，切不出样本；请粘贴更长的原文再蒸馏。')
       return
     }
-    if (!apiKey) return onNeedKey()
-    setErr('')
-    patch({ skeleton: '' })
-    const parts = []
-    const usedTitles = [] // A+B：跨卷跨批累积的已定稿章名（喂给 volumeSkeletonMessages 做去重上下文 + dedupeSkeletonBatch 兑底）
-    const failed = []
+    const msgs = styleAnalyzeMessages(smp)
+    setDistillSamples(smp)
+    setDistillSystem(msgs[0] && msgs[0].content ? msgs[0].content : '')
+    setDistillUserPrompt(msgs[1] && msgs[1].content ? msgs[1].content : '')
+    setDistillPromptOpen(true)
+  }
+
+  const adoptDistill = (reply) => {
+    const res = parseJsonReply(reply)
+    if (!res || typeof res !== 'object') {
+      setDistillErr('回复解析不出文风结构表，请在弹窗里调整提示词后点「重发」，或复制回复手动核对。')
+      return
+    }
+    const band = distillStyleBand(distillSamples.join('\n'))
+    setStyleProfile(String(res.style_profile || ''))
+    // WZ-4：落库存原始 habits，不在建书侧净化——净化统一在消费端(LongFormPage composePrompt 注入成文提示词前 sanitizeHabits)做一次。
+    // 原"落库净化+消费端再净化"是双重净化；且预设/书库路径本就不过建书侧净化，口径不一。统一消费端单次净化覆盖所有来源。
+    setStyleHabits(res.habits || [])
+    setStyleSamples((res.samples || []).filter(Boolean).slice(0, 3))
+    setStyleMetrics(band.metrics || null)
+    setStyleReliable(!!band.reliable) // WZ-2：记录指纹是否可靠(样本量足够)，徽标据此区分"含14维指纹"与"样本过短仅供参考"
+    setDistillErr('')
+    setDistillPromptOpen(false)
+  }
+
+  const styleFileRef = useRef(null)
+  const onStyleFile = async (e) => {
+    const file = e.target.files && e.target.files[0]
+    e.target.value = ''
+    if (!file) return
     try {
-      for (let i = 0; i < st.volumes.length; i++) {
-        const v = st.volumes[i]
-        const volStart = v.startChapter || 1
-        const volEnd = volStart + (v.length || volumeLength || 20) - 1
-        let batchStart = volStart
-        while (batchStart <= volEnd) {
-          const batchEnd = Math.min(batchStart + SKELETON_BATCH - 1, volEnd)
-          setBusy(`AI 正在分卷生成章骨架（${i + 1}/${st.volumes.length}）第 ${v.volumeNo} 卷 第 ${batchStart}~${batchEnd} 章…`)
-          // 上一批/上一卷末尾 3 章章行交给本批开头接住，保证衔接不断、不重复
-          const prevTail = parts.length ? parts[parts.length - 1].split('\n').filter(Boolean).slice(-3).join('\n') : ''
-          try {
-            let batchText = await genOneBatch({ v, batchStart, batchEnd, prevTail, usedTitles, label: `第 ${batchStart}~${batchEnd} 章` })
-            // B：残留重复章名确定性唯一化兑底（A 已把 usedTitles 注入 prompt 从源头压制，这里兑住漏网的），并累积本批章名
-            const dedup = dedupeSkeletonBatch(batchText, usedTitles)
-            batchText = dedup.text
-            usedTitles.push(...dedup.newTitles)
-            parts.push(batchText)
-            patch({ skeleton: parts.join('\n\n') })
-          } catch (e) {
-            failed.push(`${batchStart}-${batchEnd}`) // 单批失败不中止：跳过继续后续批，缺口由「补生成缺失章」回填
-          }
-          batchStart = batchEnd + 1
-        }
+      const text = await readDocumentFile(file)
+      setStyleSourceText(text)
+      setDistillErr('')
+    } catch (err) {
+      setDistillErr(err && err.message ? err.message : String(err))
+    }
+  }
+
+  const clearDraft = () => {
+    localStorage.removeItem(DRAFT_KEY)
+    del('drafts', DRAFT_KEY).catch(() => {})
+    setDraftSaveError('') // M38：用户主动清空后，之前的"未能保存"警告不再适用
+    setInspiration('')
+    setTargetWords('1000000')
+    setBrief('')
+    setClarifyQuestions([])
+    setClarifyAnswers(null)
+    setStylePreset('')
+    setGenreNote('')
+    setStyleNote('')
+    setStyleProfile('')
+    setStyleHabits([])
+    setStyleSamples([])
+    setStyleSourceText('')
+    setStyleMetrics(null)
+    setStyleReliable(false)
+    setBible('')
+    setCharacters('')
+    setAssetTable('')
+    setOutline('')
+    setVolumes('')
+    setVolumes2('')
+  }
+
+  const clarifyText = clarifyAnswers
+    ? clarifyAnswers
+        .map((a, i) => {
+          const q = clarifyQuestions[i]
+          if (!q) return ''
+          // L26：选项的 description 承载"方向说明"(clarifyPrompt 要求每个候选方向明显不同)，只取 label 会丢掉用户选中方向的实质内容，AI 只看短标签可能理解成另一个方向
+          const opt = a.option >= 0 && q.options ? q.options[a.option] : null
+          const sel = opt ? (opt.description ? `${opt.label}（${opt.description}）` : opt.label) : ''
+          const val = (a.free || '').trim() || sel
+          return val ? `${q.question} → ${val}` : ''
+        })
+        .filter(Boolean)
+        .join('\n')
+    : ''
+
+  const genClarify = () => {
+    setClarifyErr('')
+    setClarifyPromptOpen(true)
+  }
+
+  const adoptClarify = (reply) => {
+    const data = parseJsonReply(reply)
+    const raw = Array.isArray(data) ? data : Array.isArray(data && data.questions) ? data.questions : []
+    const valid = raw.filter((q) => q && q.question && Array.isArray(q.options) && q.options.length >= 2).slice(0, 10)
+    if (!valid.length) {
+      setClarifyErr('回复解析不出有效的问题列表，请在弹窗里调整提示词后点「重发」。')
+      return
+    }
+    setClarifyQuestions(valid)
+    setClarifyAnswers(null)
+    setClarifyErr('')
+    setClarifyPromptOpen(false)
+    setClarifyOpen(true)
+  }
+
+  const saveBook = async () => {
+    // M-10：落库用当前值即时重算(不吃 previewCounts 的 400ms 防抖滞后值)，保证写进书里的三表=用户最后编辑的内容
+    const parsed = computeParsed({ assetTable, bible, characters, outline, volumes, volumes2 })
+    const date = new Date().toISOString().slice(0, 10)
+    const existing = await getAll('books').catch(() => [])
+    const seq = (existing || []).filter((b) => String(b.name || b.title || '').startsWith(date)).length + 1
+    const bookTitle = `${date}（${seq}）`
+    // 书名优先取简报第一行(前20字，去掉行首序号)，简报为空时回落到日期序号；日期序号始终存进 name 字段
+    const briefFirstLine =
+      String(brief || '')
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean)[0] || ''
+    const titleFromBrief = briefFirstLine.replace(/^\d+\s*[.、．:：]\s*/, '').replace(/^[\u4e00-\u9fa5]{2,8}：/, '').slice(0, 20)
+    const book = {
+      // M40：已落库过则复用原 id/name/createdAt/章节做更新，不再每次新建(否则"重新保存成书"会在书库堆出内容近似的重复书)
+      id: savedBook?.id || `bk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      title: titleFromBrief || bookTitle,
+      name: savedBook?.name || bookTitle,
+      targetWords: Number(targetWords) || 1000000,
+      inspiration,
+      brief,
+      genreNote,
+      styleProfile,
+      styleHabits,
+      styleSamples,
+      styleMetrics, // M39：蒸馏的 14 维量化指纹一并落库，不再丢弃(否则"已蒸馏：含14维量化指纹"徽标是虚假承诺)
+      styleReliable, // WZ-2：指纹可靠标记一并落库，与 styleMetrics 平行存档(供重新打开时徽标正确区分)
+      styleNote, // M39：补充要求也留存
+      bible,
+      characters,
+      assetTable,
+      outline,
+      volumes: `${volumes}\n${volumes2}`,
+      assets: parsed.assets,
+      beats: parsed.beats,
+      foreshadows: parsed.foreshadows,
+      // 卷一实际章数（建书只排卷一，此时节拍最大章号即卷一末章）；长篇页卷号→章号换算用它，续排后不随之膨胀(H5/H6)
+      volOneChapters: parsed.beats.reduce((m, b) => Math.max(m, b.chapter_no || 0), 0),
+      chapters: savedBook?.chapters || [], // M40：重新保存时保留已写章节，不清空
+      wordCount: savedBook?.wordCount || 0,
+      createdAt: savedBook?.createdAt || Date.now(),
+    }
+    try {
+      await put('books', book)
+      // 记住刚建的书，长篇页首屏优先打开它
+      try {
+        localStorage.setItem('na_open_book', book.id)
+      } catch {
+        /* 隐私模式/配额不足，忽略 */
       }
-      if (failed.length) setErr(`以下批次生成失败已跳过：${failed.join('、')}。可点「补生成缺失章」只补缺口，无需重跑全书。`)
+      setSavedBook(book)
+      setSaveErr('')
     } catch (e) {
-      setErr(e.message)
-      if (parts.length) patch({ skeleton: parts.join('\n\n') })
-    } finally {
-      setBusy('')
-    }
-  }
-  // 补生成缺失章：只针对卷规划期望有、但当前骨架缺失的章号区间补生成，按全局章号归并回骨架，不重跑已生成的章（告警“建议重新生成对应卷/批”的兑现）
-  const fillMissingSkeleton = async () => {
-    if (!st.volumes.length || !st.chapterSkeleton.length) return
-    if (!apiKey) return onNeedKey()
-    const have = new Set(st.chapterSkeleton.map((c) => c.chapterNo))
-    const missing = []
-    for (const v of st.volumes) {
-      const s = v.startChapter || 1
-      const e = s + (v.length || volumeLength || 20) - 1
-      for (let n = s; n <= e; n++) if (!have.has(n)) missing.push(n)
-    }
-    if (!missing.length) { setErr(''); return }
-    setErr('')
-    // 缺失章号 → 连续区间（每个区间内再按 SKELETON_BATCH 分批补）
-    const ranges = []
-    let rs = missing[0]
-    let re = missing[0]
-    for (let k = 1; k < missing.length; k++) {
-      if (missing[k] === re + 1) { re = missing[k]; continue }
-      ranges.push([rs, re]); rs = missing[k]; re = missing[k]
-    }
-    ranges.push([rs, re])
-    const usedTitles = st.chapterSkeleton.map((c) => (c.title || '').trim()).filter(Boolean)
-    const byNo = new Map(st.chapterSkeleton.map((c) => [c.chapterNo, c]))
-    const volOf = (no) => st.volumes.find((x) => { const s = x.startChapter || 1; return no >= s && no <= s + (x.length || volumeLength || 20) - 1 }) || st.volumes[st.volumes.length - 1]
-    const newTexts = []
-    const failed = []
-    try {
-      for (const [rangeStart, rangeEnd] of ranges) {
-        let batchStart = rangeStart
-        while (batchStart <= rangeEnd) {
-          const batchEnd = Math.min(batchStart + SKELETON_BATCH - 1, rangeEnd)
-          setBusy(`AI 正在补生成缺失章 第 ${batchStart}~${batchEnd} 章…`)
-          const prev = byNo.get(batchStart - 1) // 紧邻缺口前的那一章，作衔接锚点
-          const prevTail = prev ? `第${prev.chapterNo}章 ${prev.title || ''}${prev.task ? `｜任务：${prev.task}` : ''}` : ''
-          try {
-            let batchText = await genOneBatch({ v: volOf(batchStart), batchStart, batchEnd, prevTail, usedTitles, label: `补第 ${batchStart}~${batchEnd} 章` })
-            const dedup = dedupeSkeletonBatch(batchText, usedTitles)
-            batchText = dedup.text
-            usedTitles.push(...dedup.newTitles)
-            newTexts.push(batchText)
-          } catch (e) {
-            failed.push(`${batchStart}-${batchEnd}`)
-          }
-          batchStart = batchEnd + 1
-        }
-      }
-      if (newTexts.length) patch({ skeleton: mergeSkeletonTexts([st.skeleton, ...newTexts]) })
-      setErr(failed.length ? `补生成仍有批次失败：${failed.join('、')}。可再次点「补生成缺失章」重试。` : '')
-    } catch (e) {
-      setErr(e.message)
-    } finally {
-      setBusy('')
+      // M40：落库失败不静默——不显示"已成书"并给出原因，避免用户以为没成功反复点、堆出更多重复书
+      setSavedBook(null)
+      setSaveErr('落库失败：' + (e && e.message ? e.message : String(e)) + '（可能存储空间不足）')
     }
   }
 
-  // 缺失章号（按卷规划期望 vs 已解析章表）：「补生成缺失章」按钮与骨架告警共用同一份口径，避免分叉。
-  // 仅在非生成态且已有部分骨架时算：生成中途 chapterSkeleton 只含已完成批次，此时算会把“尚未生成的后续章”误判成缺口、闪现假告警。
-  const skeletonGaps = (busy || !st.chapterSkeleton.length) ? [] : (() => {
-    const have = new Set(st.chapterSkeleton.map((c) => c.chapterNo))
-    const gaps = []
-    for (const v of st.volumes) {
-      const s = v.startChapter || 1
-      const e = s + (v.length || volumeLength || 20) - 1
-      for (let n = s; n <= e; n++) if (!have.has(n)) gaps.push(n)
-    }
-    return gaps
-  })()
-  // 骨架崩坏检测：断号缺章 / 重复章名过多 / 缺任务过多 = 疑似填充或生成事故，提醒重新生成（只预警不阻断）
-  const skeletonWarning = busy ? '' : (() => {
-    const list = st.chapterSkeleton
-    if (list.length < 20) return ''
-    const seen = new Set()
-    let dup = 0
-    for (const c of list) {
-      const t = (c.title || '').trim()
-      if (seen.has(t)) dup++
-      else seen.add(t)
-    }
-    const noTask = list.filter((c) => !(c.task || '').trim()).length
-    const gaps = skeletonGaps
-    const msgs = []
-    if (gaps.length) {
-      const ranges = compressRanges(gaps)
-      msgs.push(`断号缺章 ${gaps.length} 处（${ranges.slice(0, 4).join('、')}${ranges.length > 4 ? '…' : ''}）`)
-    }
-    if (dup / list.length > 0.08) msgs.push(`重复章名 ${dup} 处`)
-    if (noTask / list.length > 0.1) msgs.push(`缺任务 ${noTask} 章`)
-    if (msgs.length) return `检测到骨架问题：${msgs.join('、')}，建议重新生成对应卷/批。`
-    return ''
-  })()
-  // 第 1 卷细纲越界扫描（改造前细纲侧零剧情校验：确定性校验全是格式类的 parseSkeleton/skeletonMissing/dedupeSkeletonBatch）。
-  // 扫描基准取「本卷最后一章」而不是第 1 章：细纲覆盖第 1~volEnd 章，若按第 1 章算，本卷内后续章的任务会被误判成「越界消耗后续章任务」。
-  // useMemo 而非每次 render 现算：outlineLeakScan 内是 O(细纲长度 × 比对句长度) 的最长公共子串 DP，细纲 textarea 每敲一键都会触发重渲染。
-  const outlineLeak = useMemo(() => {
-    const empty = { blocked: [], warnings: [] }
-    if (busy || !st.outline.trim() || !st.volumes.length) return empty
-    const vol = st.volumes[0]
-    const volEnd = (vol.startChapter || 1) + (vol.length || volumeLength || 20) - 1
-    // 向导态字段名与成书后的 project 不同（mainline ↔ synopsis），此处对齐成 outlineLeakContextFor 期望的形状
-    const ctx = outlineLeakContextFor(
-      { synopsis: st.mainline, volumes: st.volumes, chapterSkeleton: st.chapterSkeleton, foreshadows: st.foreshadows, bible: st.bible },
-      volEnd,
-    )
-    return outlineLeakScan(st.outline, ctx)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, st.outline, st.mainline, st.volumes, st.chapterSkeleton, st.foreshadows, st.bible])
-
-  // 骨架文本变化时同步解析结构化章表（成书时用）
-  useEffect(() => {
-    const parsed = parseSkeleton(st.skeleton)
-    if (parsed.length && JSON.stringify(parsed) !== JSON.stringify(st.chapterSkeleton)) {
-      patch({ chapterSkeleton: parsed })
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [st.skeleton])
-
-  const genVol1Outline = async () => {
-    const vol = st.volumes[0]
-    if (!apiKey) return onNeedKey()
-    setErr('')
-    setBusy('AI 生成中…')
-    patch({ outline: '' })
-    try {
-      // Outliner 细纲师：第 1 卷精简地图（防剧透——agent 内只喂本卷骨架 skeletonTextForRange，流式回写 onDelta）
-      await outlinerAgent.runVolumeOutline({
-        apiKey, bible: st.bible, volume: vol, chapterSkeleton: st.chapterSkeleton, skeleton: st.skeleton,
-        onDelta: (full) => patch({ outline: full }),
-        progress: progressRef.current,
-      })
-      setAgentTrace(progressRef.current.snapshot())
-    } catch (e) {
-      setErr(e.message)
-    } finally {
-      setBusy('')
-    }
-  }
-
-  // ---------- Step 7 对账成书 ----------
-  // 伏笔回收章锚定（与引擎层 anchorForeshadowResolve 同规则，此处独立计算供对账单展示，成书时由引擎统一锚定）
-  const resolveChapterOf = (f) => {
-    if (f.tier === '终极') {
-      const last = st.volumes[st.volumes.length - 1]
-      return last ? last.startChapter : '—'
-    }
-    const v = st.volumes.find((x) => x.volumeNo === f.plannedVolume)
-    if (!v) return '—'
-    return v.startChapter + Math.max(0, Math.floor((v.length || 20) * 0.7) - 1)
-  }
-
-  const canNext = {
-    0: st.brief.trim().length >= 10,
-    1: !!st.bible?.world,
-    2: st.storyline.trim().length > 0,
-    3: !!st.mainline,
-    4: st.volumes.length > 0,
-    5: st.volumes.length > 0 && st.volumes.every((v) => v.arc),
-    // blocked = 封存真相（终极真相 / 地图分层真相）被写进细纲：这是「真相隔离」的红线，不允许带着它成书；
-    // warnings 只提示不拦（与项目既有「只报警不阻断」风格一致，尊重作者拍板）。
-    6: !!st.outline && !outlineLeak.blocked.length,
-    7: false,
-  }[st.step]
-
-  const createBook = async () => {
-    if (!apiKey) return onNeedKey()
-    setErr('')
-    setCreating('组装书稿档案…')
-    try {
-      const b = st.bible || emptyBible()
-      const proj = newProject(st.bookName.trim() || `${b.anchors[0]?.name || '圣经'}开书`)
-      proj.idea = st.brief
-      proj.genre = st.genre
-      proj.chapterWords = st.chapterWords
-      proj.volumeLength = volumeLength // 持久化向导算出的每卷计划章数（长篇自动断卷用）
-      proj.synopsis = st.mainline
-      proj.storyline = st.storyline // 完整故事线（Storyliner）：供写作层把握全局走向
-      proj.world = b.world
-      // 力量体系绝对规则 → 世界手册规则块（写作时永不省略注入）
-      proj.worldBlocks = (b.powerRules || []).map((r, i) => ({ id: uid(), name: `绝对规则${i + 1}`, aliases: '', kind: '规则', content: r }))
-      // 人物锚点 → 人物档案（秘密留在圣经真相层，不进人物卡防早露）；aliases 必须存数组（设定页/状态回写按数组处理，存字符串曾导致渲染白屏）
-      proj.characters = (b.anchors || []).map((a) => ({ name: a.name, aliases: Array.isArray(a.aliases) ? a.aliases.map(String).filter(Boolean) : [], identity: a.identity, personality: '', description: '', status: '' }))
-      proj.protagonist = b.anchors[0]?.name || ''
-      proj.bible = b
-      // 卷档案补 id（列表渲染的 key 与 patchVolume 都按 id 寻址；向导态的卷没有 id，成书时统一补齐）
-      proj.volumes = st.volumes.map((v) => ({ ...v, id: v.id || uid() })) // 保留 emotion（不再清空）
-      proj.outline = st.outline
-      proj.chapterSkeleton = st.chapterSkeleton
-      proj.storylines = st.subplots.map((s) => ({ name: s.name, type: '支线', progress: s.theme, lastChapter: 0 }))
-      // 四层伏笔入帐：回收卷 → 回收章锚点换算成保护期硬边界（成书时统一锚定）
-      proj.foreshadows = st.foreshadows
-        .filter((f) => f.content.trim())
-        .map((f) => ({
-          id: f.id,
-          content: f.content,
-          relatedChars: f.relatedChars,
-          importance: f.tier === '短' ? '支线' : '主线',
-          tier: f.tier,
-          plannedVolume: f.plannedVolume,
-          hints: f.hints,
-          plantedChapter: 0,
-          minResolveChapter: 0,
-          status: '未回收',
-          resolveChapter: null,
-        }))
-      // 回收章锚定（引擎层规则：终极锚终卷、其余按回收卷中后段与分层下限）
-      const anchored = { ...proj }
-      anchored.foreshadows = proj.foreshadows.map((f) => {
-        const base = 1
-        if (f.tier === '终极') {
-          const last = anchored.volumes[anchored.volumes.length - 1]
-          return { ...f, minResolveChapter: last ? Math.max(base + 20, last.startChapter) : base + 150, resolveAnchored: true }
-        }
-        const gap = { 短: 10, 中: 50, 长: 150 }[f.tier] ?? 10
-        const v = anchored.volumes.find((x) => x.volumeNo === f.plannedVolume)
-        const min = v ? Math.max(base + gap, v.startChapter + Math.max(0, Math.floor((v.length || 20) * 0.7) - 1)) : base + gap
-        return { ...f, minResolveChapter: min, resolveAnchored: true }
-      })
-      // 导入章节逐章入库 + 轻量归档（摘要 + 伏笔检测），章号从 1 连续
-      let cur = anchored
-      for (let i = 0; i < st.importedChapters.length; i++) {
-        const c = st.importedChapters[i]
-        setCreating(`归档导入章节 ${i + 1}/${st.importedChapters.length}…`)
-        const { project: next } = await archiveImportedChapter({ apiKey, project: cur, chapterNo: i + 1, title: c.title || `第${i + 1}章`, text: c.text })
-        cur = next
-      }
-      const lastCh = cur.chapters[cur.chapters.length - 1]
-      if (lastCh?.summary) cur.rollingSummary = lastCh.summary
-      cur.updatedAt = Date.now()
-      // 功能4/5：绑定 step0 蒸馏的文风（distilled 是实际蒸馏结果，涵盖书库选择与粘贴文本两条来源；单份→styleBookId，多份→融合档案存 styles 后绑定其 bookId，复用现有文风层）
-      const sd = st.styleDistill
-      const distilled = (sd && Array.isArray(sd.distilled)) ? sd.distilled.filter((r) => r && r.bookId) : []
-      if (distilled.length === 1) cur.styleBookId = distilled[0].bookId
-      else if (distilled.length > 1 && sd.blended) { await put('styles', sd.blended); cur.styleBookId = sd.blended.bookId }
-      await put('projects', cur)
-      localStorage.setItem('na_open_project', cur.id)
-      // 成书后保留向导进度（不清空）：导入长篇写作后仍可回新手写作修改初始提问/圣经等，再次点成书会新建一本书
-      onOpenLongForm && onOpenLongForm()
-    } catch (e) {
-      setErr(e.message)
-    } finally {
-      setCreating('')
-    }
-  }
-
-  const { step, bible } = st
-  const stepAgent = STEP_AGENTS[step]
-  const inputCls = 'w-full rounded-xl border border-stone-200 p-3 text-sm focus:border-stone-500 focus:outline-none'
-  const btnCls = 'rounded-full bg-stone-800 px-6 py-3 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50'
+  // 门禁：每步的提示词吃哪些上游，就校验哪些上游；缺料时按钮禁用并显示"缺XX"（item 18）
+  const charsMissing = [!hasBrief && '简报', !hasBible && '圣经'].filter(Boolean)
+  const assetTableMissing = [!hasBrief && '简报', !hasBible && '圣经', !hasChars && '人物'].filter(Boolean)
+  const outlineMissing = [!hasBrief && '简报', !hasBible && '圣经', !hasChars && '人物'].filter(Boolean)
+  const volumesMissing = [!hasBrief && '简报', !hasBible && '圣经', !hasChars && '人物', !hasOutline && '大纲'].filter(Boolean)
 
   return (
-    <div className="mx-auto max-w-4xl space-y-4">
-      {!apiKey && <KeyBanner onNeedKey={onNeedKey} />}
-
-      {/* 步骤条 */}
-      <nav className="glass-card flex gap-2 overflow-x-auto rounded-2xl bg-paper p-3 shadow-sm">
-        {STEPS.map((s) => (
-          <button
-            key={s.id}
-            onClick={() => !busy && !creating && patch({ step: s.id })}
-            className={`flex shrink-0 items-center gap-2 rounded-xl px-3.5 py-2 text-sm transition-colors ${step === s.id ? 'bg-stone-800 text-white' : 'text-stone-500 hover:bg-stone-100'}`}
-          >
-            <span className={`flex h-5 w-5 items-center justify-center rounded-full text-xs ${step === s.id ? 'bg-paper/20' : 'bg-stone-200'}`}>{s.id}</span>
-            {s.label}
-          </button>
-        ))}
-      </nav>
-
-      {err && <p className="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">{err}</p>}
-      {busy && <p className="rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-800">{busy}</p>}
-      {stepAgent && (
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-2xl border border-stone-200 bg-white/60 px-4 py-2.5">
-          <span className="text-[11px] font-semibold tracking-wide text-stone-400">本步 agent</span>
-          {stepAgent.ids.map((id) => {
-            const a = AGENT_MAP[id]
-            if (!a) return null
-            const th = ROLE_THEME[a.role] || ROLE_THEME.generate
-            return (
-              <span key={id} className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium ${th.border} ${th.bg} ${th.text}`}>
-                <Ic n={a.icon} /> {a.name} <span className="font-normal opacity-70">{a.cn}</span>
-              </span>
-            )
-          })}
-          <span className="basis-full text-[11px] leading-relaxed text-stone-400">{stepAgent.note}</span>
-        </div>
-      )}
-
-      {/* Step 0 初始提问 */}
-      {step === 0 && (
-        <section className="glass-card space-y-4 rounded-2xl bg-paper p-5 shadow-sm">
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="text-base font-bold"><Ic n="bulb" /> 初始提问：固定项 + 修补诉求</h2>
-            <button
-              onClick={() => setShowInspire(true)}
-              className="flex shrink-0 items-center gap-1 rounded-full bg-stone-800 px-4 py-1.5 text-xs font-medium text-white hover:bg-stone-700"
-              title="AI 构思 5 个爽文开局选题（主角开挂·打脸极快）"
-            >
-              <Ic n="sparkle" /> 灵感
-            </button>
-          </div>
-          <p className="text-xs leading-relaxed text-stone-400">
-            写清三件事：① 固定人设（不许 AI 改的人物）；② 固定背景（题材与核心设定）；③ 想让 AI 修补的逻辑漏洞或合理化诉求。AI 会先修补漏洞，再产出小说圣经。
-          </p>
-          <textarea
-            value={st.brief}
-            onChange={(e) => patch({ brief: e.target.value })}
-            placeholder={'例如：我想写一部末日中期的小说。主角江辰，父母离世，只有一个生病的妹妹，每天要出城捡取材料换取面包和药品，还会被守卫克扣。\n固定人设：江辰、病弱妹妹、双亲亡故；固定背景：末日中期、底层拾荒求生。\n请帮我把故事合理化：为什么必须出城、为什么会被克扣、为什么不能反抗或换营地…'}
-            rows={7}
-            className={`${inputCls} resize-y`}
-          />
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <p className="mb-2 text-xs font-semibold text-stone-500">书名（可留空）</p>
-              <input value={st.bookName} onChange={(e) => patch({ bookName: e.target.value })} placeholder="未命名长篇" className={inputCls} />
-            </div>
-            <div>
-              <p className="mb-2 text-xs font-semibold text-stone-500">题材</p>
-              {/* 用 allGenres 而非 GENRES：含用户在世界观库自建的题材，否则灵感弹窗选中的自定义题材在下拉里显示不出来 */}
-              <select value={st.genre} onChange={(e) => patch({ genre: e.target.value })} className={inputCls}>
-                {allGenres().map((g) => (
-                  <option key={g}>{g}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <p className="mb-2 text-xs font-semibold text-stone-500">目标总字数（万字）</p>
-              <input
-                type="number"
-                min={10}
-                max={500}
-                value={st.totalWords}
-                onChange={(e) => patch({ totalWords: e.target.value === '' ? '' : Number(e.target.value) })}
-                onBlur={() => patch({ totalWords: Math.min(500, Math.max(10, Number(st.totalWords) || 100)) })}
-                className={inputCls}
-              />
-            </div>
-            <div>
-              <p className="mb-2 text-xs font-semibold text-stone-500">卷数（默认六卷，可改）</p>
-              <input
-                type="number"
-                min={2}
-                max={20}
-                value={st.volumeCount}
-                onChange={(e) => patch({ volumeCount: e.target.value === '' ? '' : Number(e.target.value) })}
-                onBlur={() => patch({ volumeCount: Math.min(20, Math.max(2, Number(st.volumeCount) || 6)) })}
-                className={inputCls}
-              />
-            </div>
-          </div>
-          {/* 世界模板确认：仅供灵感低权重参考，不定死世界；选定灵感后由开书流程自动生成本书完整世界观（圣经页可审阅）。修改保存到本机题材库，与长篇写作「世界观」页共用 */}
-          <details className="rounded-xl border border-stone-200 p-4">
-            <summary className="cursor-pointer text-sm font-semibold text-stone-600">
-              <Ic n="globe" /> 世界模板：「{st.genre}」{isOverridden(st.genre) ? '（你改过的版本）' : '（内置模板）'} — 展开查看/编辑
-            </summary>
-            <div className="mt-3">
-              <WorldviewEditor key={st.genre} genre={st.genre} />
-              <p className="mt-2 text-xs text-stone-400">模板仅供灵感参考不定死世界；选定灵感后，完整世界观（势力/冲突含登场时机）会在生成圣经时自动成型，到圣经页审阅。</p>
-            </div>
-          </details>
-          <p className="text-xs text-stone-400">推导：约 {totalChapters} 章 × 每章 {st.chapterWords} 字，每卷约 {volumeLength} 章。</p>
-          <div className="flex flex-wrap gap-3">
-            <button onClick={genBible} disabled={!!busy || st.brief.trim().length < 10} className={btnCls}>
-              {busy ? 'AI 修补中…' : bible?.world ? '重新合理化（锁定项保留）' : 'AI 合理化修补并生成圣经'}
-            </button>
-          </div>
-          {showInspire && (
-            <InspirationModal
-              genre={st.genre}
-              apiKey={apiKey}
-              onPick={(brief, genre) => {
-                // 选题与题材一同绑定：灵感弹窗内选的题材同步到向导，后续圣经/世界观/分卷都按这个题材走
-                patch({ brief, genre })
-                setShowInspire(false)
-              }}
-              onClose={() => setShowInspire(false)}
-            />
-          )}
-
-          {/* 功能4：文风蒸馏（可选）——从书库多选小说或粘贴文本，蒸馏「文风指纹」（profile/habits/samples/forbidden，非原文），驱动后续 AI 写作模拟其文风；严禁照抄原文 */}
-          <details className="rounded-xl border border-stone-200 p-4">
-            <summary className="cursor-pointer text-sm font-semibold text-stone-600">
-              <Ic n="sparkle" /> 文风蒸馏（可选）：选书库小说或粘贴文本，蒸馏文风指纹驱动后续写作
-            </summary>
-            <div className="mt-3 space-y-3">
-              <p className="text-xs text-stone-400">蒸馏只提取「文风指纹」（句式/视角/节奏/对话/描写/用词 + 少量范例）供 AI 内化模仿；严禁照抄原文、人物、专名与情节。可多选融合，也可不选（不影响开书）。</p>
-              {libBooks.length > 0 ? (
-                <div className="max-h-40 space-y-1 overflow-y-auto rounded-lg border border-stone-100 p-2">
-                  {libBooks.map((b) => (
-                    <label key={b.id} className="flex cursor-pointer items-center gap-2 text-xs text-stone-600">
-                      <input type="checkbox" checked={st.styleDistill.bookIds.includes(b.id)} onChange={() => toggleDistillBook(b.id)} className="h-4 w-4" />
-                      <span className="truncate">{b.name || b.id}</span>
-                      {libStyles.some((s) => s.bookId === b.id) && <span className="ml-auto shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] text-emerald-700">已蒸馏</span>}
-                    </label>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-xs text-stone-400">书库暂无小说。可先在「书库」导入，或直接粘贴文本蒸馏。</p>
-              )}
-              <textarea value={st.styleDistill.pasteText} onChange={(e) => patch({ styleDistill: { ...st.styleDistill, pasteText: e.target.value } })} placeholder={"或粘贴一段代表性正文（≥200 字）用于蒸馏…"} rows={4} className={`${inputCls} novel-text resize-y`} />
-              <button onClick={distillStyle} disabled={!!busy} className="rounded-full border border-stone-300 px-4 py-2 text-xs text-stone-600 hover:bg-stone-50 disabled:opacity-50">
-                {busy ? "蒸馏中…" : "蒸馏文风"}
-              </button>
-              {st.styleDistill.distilled.length > 0 && (
-                <div className="space-y-2 rounded-lg bg-stone-50 p-3">
-                  <p className="text-xs font-semibold text-emerald-700">已蒸馏 {st.styleDistill.distilled.length} 份文风指纹{st.styleDistill.blended ? "（多本已融合为混合文风）" : ""}，成书后将自动绑定驱动写作。</p>
-                  {st.styleDistill.distilled.map((s) => (
-                    <div key={s.bookId} className="text-xs text-stone-500">
-                      <span className="font-medium text-stone-600">{s.name || s.bookId}</span>
-                      {" · habits "}{(s.habits || []).length}{" 条 · samples "}{(s.samples || []).length}{" 段"}
-                      <p className="mt-0.5 text-stone-400">{(s.profile || "").slice(0, 80)}{(s.profile || "").length > 80 ? "…" : ""}</p>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </details>
-
-          {/* 可选：已有章节导入 */}
-          <details className="rounded-xl border border-stone-200 p-4">
-            <summary className="cursor-pointer text-sm font-semibold text-stone-600"><Ic n="import" /> 我已有部分章节（可选：分章导入，并可由内容反推圣经）</summary>
-            <textarea value={st.importText} onChange={(e) => patch({ importText: e.target.value })} placeholder={'粘贴已有正文，带「第N章」章头可自动分章…'} rows={6} className={`${inputCls} novel-text mt-3 resize-y`} />
-            <button onClick={previewImport} disabled={!!busy || countWords(st.importText) < 50} className="mt-2 rounded-full border border-stone-300 px-4 py-2 text-xs text-stone-600 hover:bg-stone-50 disabled:opacity-50">
-              分章预览
-            </button>
-            {st.importedChapters.length > 0 && (
-              <div className="mt-3 space-y-1">
-                <p className="text-xs text-emerald-700">已识别 {st.importedChapters.length} 章，成书时将逐章归档入帐。</p>
-                <ul className="max-h-32 space-y-1 overflow-y-auto text-xs text-stone-500">
-                  {st.importedChapters.map((c) => (
-                    <li key={c.no}>第{c.no}章 {c.title || '（无标题）'} · {countWords(c.text)} 字</li>
-                  ))}
-                </ul>
-                <button onClick={genBibleFromImport} disabled={!!busy} className="rounded-full border border-stone-300 px-4 py-2 text-xs text-stone-600 hover:bg-stone-50 disabled:opacity-50">
-                  由导入内容生成/补全圣经
-                </button>
-              </div>
-            )}
-          </details>
-        </section>
-      )}
-
-      {/* Step 1 小说圣经 */}
-      {step === 1 && (
-        <section className="glass-card space-y-4 rounded-2xl bg-paper p-5 shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 className="text-base font-bold"><Ic n="globe" /> 小说圣经 · 永久不变设定</h2>
-            <button onClick={genBible} disabled={!!busy || st.brief.trim().length < 10} className="rounded-full border border-stone-300 px-4 py-2 text-xs text-stone-600 hover:bg-stone-50 disabled:opacity-50">
-              {busy || '重新合理化修补（锁定项保留）'}
-            </button>
-          </div>
-          <p className="text-xs leading-relaxed text-stone-400">
-            真相层（右侧红字区）永不进入写作上下文——写作时 AI 只能看到线索；真相仅供审稿对照。改好的内容点「锁定」，重新生成时不会被覆盖。
-          </p>
-          {!bible ? (
-            <p className="rounded-xl bg-stone-100 px-4 py-3 text-sm text-stone-500">还没有圣经。回到上一步填写初始提问并点击「AI 合理化修补并生成圣经」，或用已有章节反推。</p>
-          ) : (
-            <>
-              {bible.fixes?.length > 0 && (
-                <details className="rounded-xl border border-amber-200 bg-amber-50/60 p-4">
-                  <summary className="cursor-pointer text-xs font-semibold text-amber-800">AI 修补了这些逻辑漏洞（审阅）</summary>
-                  <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-amber-800">
-                    {bible.fixes.map((f, i) => (
-                      <li key={i}>{f}</li>
-                    ))}
-                  </ul>
-                </details>
-              )}
-
-              <div>
-                <div className="mb-2 flex items-center justify-between">
-                  <p className="text-xs font-semibold text-stone-500">合理化后的世界观（闭环解释所有"为什么"）</p>
-                  <button onClick={() => patchBible({ locks: { ...bible.locks, world: !bible.locks?.world } })} className={`rounded-full px-3 py-1 text-xs ${bible.locks?.world ? 'bg-stone-800 text-white' : 'border border-stone-300 text-stone-500'}`}>
-                    {bible.locks?.world ? '已锁定' : '锁定'}
-                  </button>
-                </div>
-                <textarea value={bible.world} onChange={(e) => patchBible({ world: e.target.value })} disabled={!!busy} rows={6} className={`${inputCls} novel-text resize-y`} />
-              </div>
-
-              <div>
-                <div className="mb-2 flex items-center justify-between">
-                  <p className="text-xs font-semibold text-stone-500">力量体系绝对规则（永不改动，写作时永不省略注入）</p>
-                  <button onClick={() => patchBible({ locks: { ...bible.locks, powerRules: !bible.locks?.powerRules } })} className={`rounded-full px-3 py-1 text-xs ${bible.locks?.powerRules ? 'bg-stone-800 text-white' : 'border border-stone-300 text-stone-500'}`}>
-                    {bible.locks?.powerRules ? '已锁定' : '锁定'}
-                  </button>
-                </div>
-                {(bible.powerRules || []).map((r, i) => (
-                  <div key={i} className="mb-1 flex gap-2">
-                    <input value={r} onChange={(e) => patchBible({ powerRules: bible.powerRules.map((x, j) => (j === i ? e.target.value : x)) })} className={inputCls} />
-                    <button onClick={() => patchBible({ powerRules: bible.powerRules.filter((_, j) => j !== i) })} className="shrink-0 rounded-full border border-stone-200 px-3 text-xs text-stone-400 hover:bg-stone-50">删除</button>
-                  </div>
-                ))}
-                <button onClick={() => patchBible({ powerRules: [...(bible.powerRules || []), ''] })} className="rounded-full border border-stone-300 px-4 py-1.5 text-xs text-stone-600 hover:bg-stone-50">+ 添加规则</button>
-              </div>
-
-              <div>
-                <p className="mb-2 text-xs font-semibold text-stone-500">人物锚点（只放你固定的人物；其余人物写作中自然生长，防止 AI 过早亮出全部角色）</p>
-                {(bible.anchors || []).map((a) => (
-                  <div key={a.id} className="mb-2 rounded-xl border border-stone-200 p-3">
-                    <div className="flex flex-wrap gap-2">
-                      <input value={a.name} onChange={(e) => patchBible({ anchors: bible.anchors.map((x) => (x.id === a.id ? { ...x, name: e.target.value } : x)) })} placeholder="姓名" className="w-28 rounded-lg border border-stone-200 px-2 py-1.5 text-sm" />
-                      <input value={(a.aliases || []).join('，')} onChange={(e) => patchBible({ anchors: bible.anchors.map((x) => (x.id === a.id ? { ...x, aliases: e.target.value.split(/[,，、]/).filter(Boolean) } : x)) })} placeholder="别称（逗号分隔）" className="w-40 rounded-lg border border-stone-200 px-2 py-1.5 text-sm" />
-                      <input value={a.identity} onChange={(e) => patchBible({ anchors: bible.anchors.map((x) => (x.id === a.id ? { ...x, identity: e.target.value } : x)) })} placeholder="一句话定位" className="min-w-40 flex-1 rounded-lg border border-stone-200 px-2 py-1.5 text-sm" />
-                      <button onClick={() => patchBible({ anchors: bible.anchors.map((x) => (x.id === a.id ? { ...x, locked: !x.locked } : x)) })} className={`rounded-full px-3 py-1 text-xs ${a.locked ? 'bg-stone-800 text-white' : 'border border-stone-300 text-stone-500'}`}>{a.locked ? '已锁定' : '锁定'}</button>
-                    </div>
-                    <input value={a.secret} onChange={(e) => patchBible({ anchors: bible.anchors.map((x) => (x.id === a.id ? { ...x, secret: e.target.value } : x)) })} placeholder="该人物的隐藏秘密（分层埋藏，可留空）" className={`${inputCls} mt-2`} />
-                  </div>
-                ))}
-                <button onClick={() => patchBible({ anchors: [...(bible.anchors || []), { id: uid(), name: '', aliases: [], identity: '', secret: '', locked: false }] })} className="rounded-full border border-stone-300 px-4 py-1.5 text-xs text-stone-600 hover:bg-stone-50">+ 添加锚点人物</button>
-              </div>
-
-              <div>
-                <p className="mb-2 text-xs font-semibold text-stone-500">四项终极真相（真相层永不进写作上下文；线索层写作时可露出）</p>
-                {(bible.truths || []).map((t) => (
-                  <div key={t.id} className="mb-3 rounded-xl border border-red-200/70 bg-red-50/40 p-3">
-                    <div className="flex items-center justify-between">
-                      <p className="text-sm font-semibold text-red-800">{t.kind}</p>
-                      <button onClick={() => patchBible({ truths: bible.truths.map((x) => (x.id === t.id ? { ...x, locked: !x.locked } : x)) })} className={`rounded-full px-3 py-1 text-xs ${t.locked ? 'bg-stone-800 text-white' : 'border border-stone-300 text-stone-500'}`}>{t.locked ? '已锁定' : '锁定'}</button>
-                    </div>
-                    <textarea value={t.truth} onChange={(e) => patchBible({ truths: bible.truths.map((x) => (x.id === t.id ? { ...x, truth: e.target.value } : x)) })} placeholder="完整真相（大结局才揭露）" rows={2} className={`${inputCls} mt-2 resize-y`} />
-                    <p className="mt-2 text-xs font-semibold text-stone-500">前期可露出的蛛丝马迹（每行一条，写作时只允许露这些）</p>
-                    <textarea
-                      value={(t.clues || []).join('\n')}
-                      onChange={(e) => patchBible({ truths: bible.truths.map((x) => (x.id === t.id ? { ...x, clues: e.target.value.split('\n').filter(Boolean) } : x)) })}
-                      placeholder={'线索1\n线索2'}
-                      rows={2}
-                      className={`${inputCls} mt-1 resize-y`}
-                    />
-                  </div>
-                ))}
-              </div>
-
-              <div>
-                <p className="mb-2 text-xs font-semibold text-stone-500">世界地图分层（传闻级隔离：已解锁层可展开，下一层只能以传闻提及，更高层与真相栏永不进写作上下文）</p>
-                {(bible.mapLayers || []).map((m, idx) => (
-                  <div key={m.id} className="mb-3 rounded-xl border border-emerald-200/70 bg-emerald-50/30 p-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-xs text-stone-400">第{idx + 1}层</span>
-                      <input value={m.name} onChange={(e) => patchBible({ mapLayers: bible.mapLayers.map((x) => (x.id === m.id ? { ...x, name: e.target.value } : x)) })} placeholder="区域名（8字内）" className="w-36 rounded-lg border border-stone-200 px-2 py-1.5 text-sm" />
-                      <label className="text-xs text-stone-500">解锁卷</label>
-                      <select value={m.unlockVolume} onChange={(e) => patchBible({ mapLayers: bible.mapLayers.map((x) => (x.id === m.id ? { ...x, unlockVolume: Number(e.target.value) } : x)) })} className="rounded-lg border border-stone-200 px-2 py-1.5 text-sm">
-                        {Array.from({ length: st.volumeCount }, (_, i) => i + 1).map((n) => (
-                          <option key={n} value={n}>第{n}卷</option>
-                        ))}
-                      </select>
-                      <button onClick={() => patchBible({ mapLayers: bible.mapLayers.map((x) => (x.id === m.id ? { ...x, locked: !x.locked } : x)) })} className={`rounded-full px-3 py-1 text-xs ${m.locked ? 'bg-stone-800 text-white' : 'border border-stone-300 text-stone-500'}`}>{m.locked ? '已锁定' : '锁定'}</button>
-                      <button onClick={() => patchBible({ mapLayers: bible.mapLayers.filter((x) => x.id !== m.id) })} className="rounded-full border border-stone-200 px-3 py-1 text-xs text-stone-400 hover:bg-stone-50">删除</button>
-                    </div>
-                    <input value={m.summary} onChange={(e) => patchBible({ mapLayers: bible.mapLayers.map((x) => (x.id === m.id ? { ...x, summary: e.target.value } : x)) })} placeholder="该层正式设定（解锁后写作可展开）" className={`${inputCls} mt-2`} />
-                    <input value={m.rumor} onChange={(e) => patchBible({ mapLayers: bible.mapLayers.map((x) => (x.id === m.id ? { ...x, rumor: e.target.value } : x)) })} placeholder="前期传闻（未解锁时只允许以传闻形式流传，30字内）" className={`${inputCls} mt-1`} />
-                    <input value={m.truth} onChange={(e) => patchBible({ mapLayers: bible.mapLayers.map((x) => (x.id === m.id ? { ...x, truth: e.target.value } : x)) })} placeholder="深层秘密（真相栏：永不进写作上下文，仅供审核对照，可留空）" className={`${inputCls} mt-1 text-red-800`} />
-                  </div>
-                ))}
-                <button onClick={() => patchBible({ mapLayers: [...(bible.mapLayers || []), { id: uid(), name: '', summary: '', rumor: '', truth: '', unlockVolume: (bible.mapLayers || []).length + 1, locked: false }] })} className="rounded-full border border-stone-300 px-4 py-1.5 text-xs text-stone-600 hover:bg-stone-50">+ 添加地图层</button>
-              </div>
-
-              <div>
-                <p className="mb-2 text-xs font-semibold text-stone-500">世界势力盘（选定灵感后自动生成；登场卷之前写作层只见传闻一句，防 AI 提前透支新世界）</p>
-                {(bible.factions || []).map((f) => (
-                  <div key={f.id} className="mb-2 rounded-xl border border-sky-200/70 bg-sky-50/30 p-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <input value={f.name} onChange={(e) => patchBible({ factions: bible.factions.map((x) => (x.id === f.id ? { ...x, name: e.target.value } : x)) })} placeholder="势力名（8字内）" className="w-36 rounded-lg border border-stone-200 px-2 py-1.5 text-sm" />
-                      <label className="text-xs text-stone-500">登场卷</label>
-                      <select value={f.unlockVolume} onChange={(e) => patchBible({ factions: bible.factions.map((x) => (x.id === f.id ? { ...x, unlockVolume: Number(e.target.value) } : x)) })} className="rounded-lg border border-stone-200 px-2 py-1.5 text-sm">
-                        {Array.from({ length: st.volumeCount }, (_, i) => i + 1).map((n) => (
-                          <option key={n} value={n}>第{n}卷</option>
-                        ))}
-                      </select>
-                      <button onClick={() => patchBible({ factions: bible.factions.map((x) => (x.id === f.id ? { ...x, locked: !x.locked } : x)) })} className={`rounded-full px-3 py-1 text-xs ${f.locked ? 'bg-stone-800 text-white' : 'border border-stone-300 text-stone-500'}`}>{f.locked ? '已锁定' : '锁定'}</button>
-                      <button onClick={() => patchBible({ factions: bible.factions.filter((x) => x.id !== f.id) })} className="rounded-full border border-stone-200 px-3 py-1 text-xs text-stone-400 hover:bg-stone-50">删除</button>
-                    </div>
-                    <input value={f.desc} onChange={(e) => patchBible({ factions: bible.factions.map((x) => (x.id === f.id ? { ...x, desc: e.target.value } : x)) })} placeholder="定位、立场、与主角初始关系（登场后写作可展开）" className={`${inputCls} mt-2`} />
-                    <input value={f.rumor} onChange={(e) => patchBible({ factions: bible.factions.map((x) => (x.id === f.id ? { ...x, rumor: e.target.value } : x)) })} placeholder="登场前传闻（不含实情，写作层只见这一句，30字内）" className={`${inputCls} mt-1`} />
-                  </div>
-                ))}
-                <button onClick={() => patchBible({ factions: [...(bible.factions || []), { id: uid(), name: '', desc: '', rumor: '', unlockVolume: 1, locked: false }] })} className="rounded-full border border-stone-300 px-4 py-1.5 text-xs text-stone-600 hover:bg-stone-50">+ 添加势力</button>
-              </div>
-
-              <div>
-                <p className="mb-2 text-xs font-semibold text-stone-500">主要冲突线（阶段控制：start 卷之前完全不进写作上下文，防后期冲突提前引爆）</p>
-                {(bible.conflicts || []).map((c) => (
-                  <div key={c.id} className="mb-2 rounded-xl border border-violet-200/70 bg-violet-50/30 p-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <input value={c.name} onChange={(e) => patchBible({ conflicts: bible.conflicts.map((x) => (x.id === c.id ? { ...x, name: e.target.value } : x)) })} placeholder="冲突线名（8字内）" className="w-36 rounded-lg border border-stone-200 px-2 py-1.5 text-sm" />
-                      <label className="text-xs text-stone-500">第</label>
-                      <select value={c.startVolume} onChange={(e) => patchBible({ conflicts: bible.conflicts.map((x) => (x.id === c.id ? { ...x, startVolume: Number(e.target.value) } : x)) })} className="rounded-lg border border-stone-200 px-2 py-1.5 text-sm">
-                        {Array.from({ length: st.volumeCount }, (_, i) => i + 1).map((n) => (
-                          <option key={n} value={n}>{n}</option>
-                        ))}
-                      </select>
-                      <label className="text-xs text-stone-500">~</label>
-                      <select value={c.endVolume || st.volumeCount} onChange={(e) => patchBible({ conflicts: bible.conflicts.map((x) => (x.id === c.id ? { ...x, endVolume: Number(e.target.value) } : x)) })} className="rounded-lg border border-stone-200 px-2 py-1.5 text-sm">
-                        {Array.from({ length: st.volumeCount }, (_, i) => i + 1).map((n) => (
-                          <option key={n} value={n}>{n}</option>
-                        ))}
-                      </select>
-                      <label className="text-xs text-stone-500">卷</label>
-                      <button onClick={() => patchBible({ conflicts: bible.conflicts.map((x) => (x.id === c.id ? { ...x, locked: !x.locked } : x)) })} className={`rounded-full px-3 py-1 text-xs ${c.locked ? 'bg-stone-800 text-white' : 'border border-stone-300 text-stone-500'}`}>{c.locked ? '已锁定' : '锁定'}</button>
-                      <button onClick={() => patchBible({ conflicts: bible.conflicts.filter((x) => x.id !== c.id) })} className="rounded-full border border-stone-200 px-3 py-1 text-xs text-stone-400 hover:bg-stone-50">删除</button>
-                    </div>
-                    <input value={c.desc} onChange={(e) => patchBible({ conflicts: bible.conflicts.map((x) => (x.id === c.id ? { ...x, desc: e.target.value } : x)) })} placeholder="冲突内涵（贯穿全书的主要矛盾，非单卷事件）" className={`${inputCls} mt-2`} />
-                  </div>
-                ))}
-                <button onClick={() => patchBible({ conflicts: [...(bible.conflicts || []), { id: uid(), name: '', desc: '', startVolume: 1, endVolume: st.volumeCount, locked: false }] })} className="rounded-full border border-stone-300 px-4 py-1.5 text-xs text-stone-600 hover:bg-stone-50">+ 添加冲突线</button>
-              </div>
-            </>
-          )}
-        </section>
-      )}
-
-      {/* Step 2 故事线（Storyliner agent 分段生成 5000-8000 字完整故事线） */}
-      {step === 2 && (
-        <section className="glass-card space-y-4 rounded-2xl bg-paper p-5 shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 className="text-base font-bold"><Ic n="thread" /> 完整故事线（5000-8000 字把整个故事讲完）</h2>
-            <button onClick={genStoryline} disabled={!!busy || !st.bible?.world} className={btnCls}>{busy || (st.storyline ? '重新生成故事线' : '生成故事线')}</button>
-          </div>
-          <p className="text-xs leading-relaxed text-stone-500">
-            本步由 <span className="font-semibold text-amber-700">Storyliner 故事线作家</span> 负责：分 5 段（开局 / 发展 / 中盘 / 高潮 / 结局）流式撰写，把从第 1 章到大结局的整个故事连贯讲完，成书后存入书稿档案，供长篇写作层随时把握全局走向、防止写着写着偏离主线。与下一步「全书梗概」的结构化里程碑（主线 / 副线 / 四层伏笔）互补。
-          </p>
-          {!st.bible?.world && <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">请先返回上一步生成小说圣经，再撰写故事线。</p>}
-          <div>
-            <div className="mb-1 flex items-center justify-between text-xs text-stone-500">
-              <span>故事线全文（可手动编辑）</span>
-              <span className="tabular-nums">{st.storyline.trim().length} 字{st.storyline.trim().length >= 5000 ? ' · 已达标' : st.storyline.trim().length > 0 ? ' · 建议 5000-8000 字' : ''}</span>
-            </div>
-            <textarea
-              value={st.storyline}
-              onChange={(e) => patch({ storyline: e.target.value })}
-              rows={18}
-              placeholder="点击「生成故事线」，Storyliner 将分段撰写完整故事线，边写边显示…"
-              className="w-full rounded-xl border border-stone-200 bg-white/60 p-3 text-sm leading-relaxed focus:border-stone-500 focus:outline-none"
-            />
-          </div>
-        </section>
-      )}
-
-      {/* Step 3 全书梗概 */}
-      {step === 3 && (
-        <section className="glass-card space-y-4 rounded-2xl bg-paper p-5 shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 className="text-base font-bold"><Ic n="map" /> 全书总故事线（主线里程碑 + 副线 + 四层伏笔）</h2>
-            <button onClick={genSynopsis} disabled={!!busy || !st.bible?.world} className={btnCls}>{busy || (st.mainline ? '重新生成梗概' : '生成全书梗概')}</button>
-          </div>
-          <div>
-            <p className="mb-2 text-xs font-semibold text-stone-500">主线：开局 → 重大里程碑（带章号锚点）→ 大结局形态</p>
-            <textarea value={st.mainline} onChange={(e) => patch({ mainline: e.target.value })} disabled={!!busy} rows={10} className={`${inputCls} novel-text resize-y`} />
-          </div>
-          <div>
-            <p className="mb-2 text-xs font-semibold text-stone-500">副线（0~3 条，全程贯穿；开书即登记入故事线档案）</p>
-            {st.subplots.map((s) => (
-              <div key={s.id} className="mb-1 flex flex-wrap gap-2">
-                <input value={s.name} onChange={(e) => patch({ subplots: st.subplots.map((x) => (x.id === s.id ? { ...x, name: e.target.value } : x)) })} placeholder="副线名" className="w-28 rounded-lg border border-stone-200 px-2 py-1.5 text-sm" />
-                <input value={s.theme} onChange={(e) => patch({ subplots: st.subplots.map((x) => (x.id === s.id ? { ...x, theme: e.target.value } : x)) })} placeholder="主题" className="min-w-40 flex-1 rounded-lg border border-stone-200 px-2 py-1.5 text-sm" />
-                <span className="flex items-center text-xs text-stone-400">第 {s.startVolume}~{s.endVolume} 卷</span>
-                <button onClick={() => patch({ subplots: st.subplots.filter((x) => x.id !== s.id) })} className="rounded-full border border-stone-200 px-3 text-xs text-stone-400 hover:bg-stone-50">删除</button>
-              </div>
-            ))}
-            <button onClick={() => patch({ subplots: [...st.subplots, { id: uid(), name: '', theme: '', startVolume: 1, endVolume: st.volumeCount }] })} className="rounded-full border border-stone-300 px-4 py-1.5 text-xs text-stone-600 hover:bg-stone-50">+ 添加副线</button>
-          </div>
-          <div>
-            <p className="mb-2 text-xs font-semibold text-stone-500">四层伏笔登记（每条锚定回收卷——这是长埋点能存在的根本）</p>
-            {st.foreshadows.map((f) => (
-              <div key={f.id} className="mb-2 rounded-xl border border-stone-200 p-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <select value={f.tier} onChange={(e) => patchHook(f.id, { tier: e.target.value })} className="rounded-lg border border-stone-200 px-2 py-1.5 text-sm">
-                    {TIERS.map((t) => (
-                      <option key={t} value={t}>{t}线</option>
-                    ))}
-                  </select>
-                  <select value={f.plannedVolume} onChange={(e) => patchHook(f.id, { plannedVolume: Number(e.target.value) })} className="rounded-lg border border-stone-200 px-2 py-1.5 text-sm">
-                    {Array.from({ length: st.volumeCount }, (_, i) => i + 1).map((n) => (
-                      <option key={n} value={n}>{f.tier === '终极' && n === st.volumeCount ? `终卷（第${n}卷）` : `第${n}卷回收`}</option>
-                    ))}
-                  </select>
-                  <button onClick={() => patch({ foreshadows: st.foreshadows.filter((x) => x.id !== f.id) })} className="ml-auto rounded-full border border-stone-200 px-3 text-xs text-stone-400 hover:bg-stone-50">删除</button>
-                </div>
-                <p className="mt-1 text-[11px] text-stone-400">{TIER_DESC[f.tier]}</p>
-                <input value={f.content} onChange={(e) => patchHook(f.id, { content: e.target.value })} placeholder="伏笔内容" className={`${inputCls} mt-1`} />
-                {f.hints?.length > 0 && (
-                  <p className="mt-1 text-xs text-stone-500">线索露出计划：{f.hints.map((h) => `约第${h.chapter}章露「${h.clue}」`).join('；')}</p>
-                )}
-              </div>
-            ))}
-            <button onClick={addHook} className="rounded-full border border-stone-300 px-4 py-1.5 text-xs text-stone-600 hover:bg-stone-50">+ 手动登记伏笔</button>
-          </div>
-        </section>
-      )}
-
-      {/* Step 4 卷结构 */}
-      {step === 4 && (
-        <section className="glass-card space-y-4 rounded-2xl bg-paper p-5 shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 className="text-base font-bold"><Ic n="mountain" /> 卷结构（{st.volumeCount} 卷 · 节奏：{st.rhythm}）</h2>
-            <button onClick={genVolumes} disabled={!!busy || !st.mainline} className={btnCls}>{busy || (st.volumes.length ? '重新切分卷结构' : 'AI 切分卷结构')}</button>
-          </div>
-          <div>
-            <p className="mb-1 text-xs font-semibold text-stone-500">分卷节奏（不均分：短卷短而密快入局/快回收，长卷承载地图深耕与伏笔发酵）</p>
-            <div className="flex flex-wrap gap-2">
-              {Object.entries(RHYTHM_TEMPLATES).map(([name, w]) => (
-                <button
-                  key={name}
-                  onClick={() => applyRhythm(name)}
-                  className={`rounded-full px-4 py-1.5 text-xs ${st.rhythm === name ? 'bg-stone-800 text-white' : 'border border-stone-300 text-stone-500 hover:bg-stone-50'}`}
-                >
-                  {name}（{w.join('-')}）
-                </button>
-              ))}
-            </div>
-            {st.volumes.length > 0 && <p className="mt-1 text-[11px] text-stone-400">当前各卷章数：{st.volumes.map((v) => `第${v.volumeNo}卷${v.length}章`).join('、')}；切换模板会重算章数，卷名与编辑内容保留</p>}
-          </div>
-          {st.volumes.length === 0 && <p className="rounded-xl bg-stone-100 px-4 py-3 text-sm text-stone-500">还没有卷结构，点击上方按钮生成，或先回上一步完成梗概。</p>}
-          {st.volumes.map((v) => (
-            <div key={v.volumeNo} className="rounded-xl border border-stone-200 p-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <p className="text-sm font-bold">第{v.volumeNo}卷</p>
-                <input value={v.name} onChange={(e) => patchVol(v.volumeNo, { name: e.target.value })} placeholder="卷名" className="w-32 rounded-lg border border-stone-200 px-2 py-1.5 text-sm" />
-                <span className="text-xs text-stone-400">第{v.startChapter}~{v.startChapter + v.length - 1}章</span>
-                <label className="ml-auto text-xs text-stone-500">计划章数</label>
-                <input type="number" min={5} value={v.length} onChange={(e) => patchVol(v.volumeNo, { length: Math.max(5, Number(e.target.value) || v.length) })} className="w-20 rounded-lg border border-stone-200 px-2 py-1.5 text-sm" />
-              </div>
-              <textarea
-                value={v.arcStory || ''}
-                onChange={(e) => patchVol(v.volumeNo, { arcStory: e.target.value })}
-                placeholder="本卷故事（本卷限定的具体事件：新对手/新局面/明确目标，在本卷内起承转合完整解决——长篇不单故事化的关键）"
-                rows={2}
-                className={`${inputCls} mt-2 resize-y border-sky-200 bg-sky-50/40`}
-              />
-              <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                <input value={v.theme} onChange={(e) => patchVol(v.volumeNo, { theme: e.target.value })} placeholder="本卷核心主题" className={inputCls} />
-                <input value={v.conflict} onChange={(e) => patchVol(v.volumeNo, { conflict: e.target.value })} placeholder="本卷核心冲突" className={inputCls} />
-                <input value={v.gain} onChange={(e) => patchVol(v.volumeNo, { gain: e.target.value })} placeholder="主角本卷收获" className={inputCls} />
-                <input value={v.endHook} onChange={(e) => patchVol(v.volumeNo, { endHook: e.target.value })} placeholder="卷末大悬念（留给下一卷）" className={inputCls} />
-                <input value={v.location || ''} onChange={(e) => patchVol(v.volumeNo, { location: e.target.value })} placeholder="本卷主舞台（具体地名，随卷递进）" className={inputCls} />
-                <div className="flex items-center gap-2">
-                  <label className="shrink-0 text-xs text-stone-500">解锁地图层</label>
-                  <select value={v.unlockLayer || 0} onChange={(e) => patchVol(v.volumeNo, { unlockLayer: Number(e.target.value) })} className="flex-1 rounded-lg border border-stone-200 px-2 py-1.5 text-sm">
-                    <option value={0}>未设置</option>
-                    {(bible?.mapLayers || []).map((m, i) => (
-                      <option key={m.id} value={i + 1}>第{i + 1}层 {m.name || '未命名'}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              <textarea value={v.strategy} onChange={(e) => patchVol(v.volumeNo, { strategy: e.target.value })} placeholder="本卷战略" rows={2} className={`${inputCls} mt-2 resize-y`} />
-              {/* 情感走向：生成卷结构时 AI 已按本卷故事走向逐卷生成；不满意可手改或从题材×基调库换一个（跳过其他卷已用的） */}
-              <div className="mt-2 flex items-center gap-2">
-                <input value={v.emotion || ''} onChange={(e) => patchVol(v.volumeNo, { emotion: e.target.value })} placeholder="本卷情感走向（如：压抑→憋屈→爆发→短暂喘息）" className={inputCls} />
-                <button
-                  onClick={() => patchVol(v.volumeNo, { emotion: fallbackVolumeEmotion({ genre: st.genre, volumeNo: v.volumeNo + st.volumes.length, used: st.volumes.filter((x) => x.volumeNo !== v.volumeNo).map((x) => x.emotion) }) })}
-                  className="shrink-0 rounded-full border border-stone-300 px-3 py-1.5 text-xs text-stone-600 hover:bg-stone-50"
-                >
-                  换一个
-                </button>
-              </div>
-              <div className="mt-2">
-                <p className="text-xs font-semibold text-stone-500">本卷绝对不回收的长线伏笔（勾选后写作提示词硬禁回收）</p>
-                <div className="mt-1 flex flex-wrap gap-2">
-                  {st.foreshadows.filter((f) => f.tier !== '短' && f.content).map((f) => {
-                    const on = (v.forbiddenForeshadowIds || []).includes(f.id)
-                    return (
-                      <button
-                        key={f.id}
-                        onClick={() => patchVol(v.volumeNo, { forbiddenForeshadowIds: on ? v.forbiddenForeshadowIds.filter((x) => x !== f.id) : [...(v.forbiddenForeshadowIds || []), f.id] })}
-                        className={`rounded-full px-3 py-1 text-xs ${on ? 'bg-stone-800 text-white' : 'border border-stone-300 text-stone-500'}`}
-                      >
-                        [{f.tier}] {f.content.slice(0, 18)}{f.content.length > 18 ? '…' : ''}
-                      </button>
-                    )
-                  })}
-                  {!st.foreshadows.some((f) => f.tier !== '短' && f.content) && <span className="text-xs text-stone-400">（暂无中长线伏笔，先在上一步登记）</span>}
-                </div>
-              </div>
-            </div>
-          ))}
-        </section>
-      )}
-
-      {/* Step 5 幕结构 */}
-      {step === 5 && (
-        <section className="glass-card space-y-4 rounded-2xl bg-paper p-5 shadow-sm">
-          <h2 className="text-base font-bold"><Ic n="film" /> 卷内四幕：起幕 → 发展幕 → 冲突幕 → 高潮落幕</h2>
-          <p className="text-xs text-stone-400">每卷按其叙事角色（开卷/腹地深耕/扩张过渡/收割）给不同比例参考，禁止每卷同构均分；区间与目标可手工微调，章头起承转合标签按此对齐。</p>
-          {st.volumes.map((v) => (
-            <div key={v.volumeNo} className="rounded-xl border border-stone-200 p-4">
-              <div className="flex items-center justify-between">
-                <p className="text-sm font-bold">第{v.volumeNo}卷《{v.name || '未命名'}》<span className="ml-2 rounded-full bg-stone-100 px-2 py-0.5 text-[11px] font-normal text-stone-500">{volumeRole(v.volumeNo, rhythmWeights)}·{v.length}章</span></p>
-                <button onClick={() => genActs(v)} disabled={!!busy} className="rounded-full border border-stone-300 px-4 py-1.5 text-xs text-stone-600 hover:bg-stone-50 disabled:opacity-50">
-                  {busy ? '生成中…' : v.acts.length ? '重新拆幕' : 'AI 拆四幕'}
-                </button>
-              </div>
-              <p className="mt-1 text-[11px] text-stone-400">比例参考：{ACT_RATIO_GUIDE[volumeRole(v.volumeNo, rhythmWeights)] || ''}（可合理偏离）</p>
-              {v.acts.length > 0 ? (
-                <ul className="mt-2 space-y-2">
-                  {v.acts.map((a, i) => (
-                    <li key={i} className="flex flex-wrap items-center gap-2 text-sm text-stone-600">
-                      <span className="w-16 shrink-0 font-semibold">{a.act}</span>
-                      <span className="text-xs text-stone-400">卷内</span>
-                      <input type="number" min={1} max={v.length} value={a.start} onChange={(e) => patchAct(v.volumeNo, i, { start: Math.max(1, Number(e.target.value) || a.start) })} className="w-16 rounded-lg border border-stone-200 px-2 py-1 text-sm" />
-                      <span className="text-xs text-stone-400">~</span>
-                      <input type="number" min={1} max={v.length} value={a.end} onChange={(e) => patchAct(v.volumeNo, i, { end: Math.min(v.length, Number(e.target.value) || a.end) })} className="w-16 rounded-lg border border-stone-200 px-2 py-1 text-sm" />
-                      <span className="text-xs text-stone-400">章</span>
-                      <input value={a.goal} onChange={(e) => patchAct(v.volumeNo, i, { goal: e.target.value })} placeholder="本幕目标" className="min-w-40 flex-1 rounded-lg border border-stone-200 px-2 py-1 text-sm" />
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-2 text-xs text-stone-400">未拆幕（该卷将按默认弧线缩放定位）</p>
-              )}
-            </div>
-          ))}
-        </section>
-      )}
-
-      {/* Step 6 章名骨架 + 第 1 卷细纲 */}
-      {step === 6 && (
-        <section className="glass-card space-y-4 rounded-2xl bg-paper p-5 shadow-sm">
-          <h2 className="text-base font-bold"><Ic n="notepad" /> 全书章名骨架 + 第 1 卷完整细纲</h2>
-          <div>
-            <div className="mb-2 flex items-center justify-between">
-              <p className="text-xs font-semibold text-stone-500">全书章名骨架（每章一行：章名 + 唯一剧情任务；仅作方向锚点，进卷再细化）</p>
-              <button onClick={genSkeleton} disabled={!!busy || !st.mainline} className="rounded-full border border-stone-300 px-4 py-1.5 text-xs text-stone-600 hover:bg-stone-50 disabled:opacity-50">
-                {busy ? '生成中…' : st.skeleton ? '重新生成骨架' : 'AI 生成全书章名骨架'}
-              </button>
-            </div>
-            <textarea value={st.skeleton} onChange={(e) => patch({ skeleton: e.target.value })} disabled={!!busy} rows={10} placeholder={'第1章 章名｜任务：本章唯一要完成的一件事\n第2章 …'} className={`${inputCls} novel-text resize-y`} />
-            {st.chapterSkeleton.length > 0 && <p className="mt-1 text-xs text-emerald-700">已解析 {st.chapterSkeleton.length} 章骨架（按卷分次生成，每卷只展开本卷剧情）。</p>}
-            {skeletonWarning && <p className="mt-1 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">{skeletonWarning}</p>}
-            {skeletonGaps.length > 0 && (
-              <button onClick={fillMissingSkeleton} disabled={!!busy} className="mt-2 rounded-full border border-amber-400 bg-amber-50 px-4 py-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-100 disabled:opacity-50">
-                {busy ? '补生成中…' : `补生成缺失章（${skeletonGaps.length} 章：${compressRanges(skeletonGaps).slice(0, 3).join('、')}${compressRanges(skeletonGaps).length > 3 ? '…' : ''}）`}
-              </button>
-            )}
-          </div>
-          <div>
-            <div className="mb-2 flex items-center justify-between">
-              <p className="text-xs font-semibold text-stone-500">第 1 卷完整细纲（覆盖第 1~{st.volumes[0]?.length || volumeLength} 章，含起承转合定位）</p>
-              <button onClick={genVol1Outline} disabled={!!busy || !st.skeleton} className="rounded-full border border-stone-300 px-4 py-1.5 text-xs text-stone-600 hover:bg-stone-50 disabled:opacity-50">
-                {busy ? '生成中…' : st.outline ? '重新生成第1卷细纲' : 'AI 展开第 1 卷细纲'}
-              </button>
-            </div>
-            <textarea value={st.outline} onChange={(e) => patch({ outline: e.target.value })} disabled={!!busy} rows={12} className={`${inputCls} novel-text resize-y`} />
-            {outlineLeak.blocked.length > 0 && (
-              <div className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">
-                <p className="font-semibold">细纲越界（红线，{outlineLeak.blocked.length} 处）：封存真相被提前写进细纲，成书已锁定，请重新生成或直接改掉下列句子。</p>
-                <ul className="mt-1 space-y-1">
-                  {outlineLeak.blocked.map((b, i) => (
-                    <li key={i}>· [{b.kind}] {b.evidence}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            {outlineLeak.warnings.length > 0 && (
-              <div className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                <p className="font-semibold">细纲疑似越界（{outlineLeak.warnings.length} 处，只提示不阻断，确认是合理铺垫可直接采用）：</p>
-                <ul className="mt-1 space-y-1">
-                  {outlineLeak.warnings.slice(0, 8).map((w, i) => (
-                    <li key={i}>· [{w.kind}] {w.hit} —— {w.evidence}</li>
-                  ))}
-                  {outlineLeak.warnings.length > 8 && <li>…另有 {outlineLeak.warnings.length - 8} 处</li>}
-                </ul>
-              </div>
-            )}
-            <p className="mt-1 text-xs text-stone-400">后续卷细纲在长篇写作页按"细纲将尽时滚动续写"生成，不提前锁死。</p>
-          </div>
-        </section>
-      )}
-
-      {/* Step 7 对账成书 */}
-      {step === 7 && (
-        <section className="glass-card space-y-4 rounded-2xl bg-paper p-5 shadow-sm">
-          <h2 className="text-base font-bold"><Ic n="ok" /> 开写前对账（结构化渲染，零 AI 调用——检查的和写的是同一份事实）</h2>
-
-          <div>
-            <p className="mb-2 text-xs font-semibold text-stone-500">伏笔闭环表（埋设 → 线索露出 → 回收章锚点；肉眼查断头伏笔）</p>
-            <div className="overflow-x-auto rounded-xl border border-stone-200">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-stone-100 text-stone-500">
-                  <tr>
-                    <th className="px-3 py-2">伏笔</th>
-                    <th className="px-3 py-2">层级</th>
-                    <th className="px-3 py-2">回收卷</th>
-                    <th className="px-3 py-2">回收章锚点</th>
-                    <th className="px-3 py-2">线索计划</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {st.foreshadows.filter((f) => f.content).map((f) => (
-                    <tr key={f.id} className="border-t border-stone-100">
-                      <td className="px-3 py-2">{f.content}</td>
-                      <td className="whitespace-nowrap px-3 py-2">{f.tier}线</td>
-                      <td className="px-3 py-2">第{f.plannedVolume}卷</td>
-                      <td className="px-3 py-2">约第{resolveChapterOf(f)}章起可回收</td>
-                      <td className="px-3 py-2">{f.hints?.length ? f.hints.map((h) => `第${h.chapter}章`).join('、') : f.tier === '短' ? '（短线无需）' : <span className="text-red-500">缺线索计划</span>}</td>
-                    </tr>
-                  ))}
-                  {!st.foreshadows.some((f) => f.content) && (
-                    <tr><td colSpan={5} className="px-3 py-3 text-center text-stone-400">还没有伏笔</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <div>
-            <p className="mb-2 text-xs font-semibold text-stone-500">卷结构总览</p>
-            <ul className="space-y-1 text-sm text-stone-600">
-              {st.volumes.map((v) => (
-                <li key={v.volumeNo}>
-                  第{v.volumeNo}卷《{v.name}》第{v.startChapter}~{v.startChapter + v.length - 1}章：{v.theme || '（无主题）'}；卷末悬念：{v.endHook || '（无）'}{v.arc ? `；弧线：${v.arc}` : ''}
-                  {v.arcStory ? <span className="mt-0.5 block text-xs text-stone-500">本卷故事：{v.arcStory}</span> : null}
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          <p className="text-xs text-stone-500">
-            成书内容：圣经（真相隔离）· 力量规则入世界手册 · 锚点人物入档案 · {st.foreshadows.filter((f) => f.content).length} 条伏笔入帐（回收章硬边界）· {st.volumes.length} 卷档案 · {st.chapterSkeleton.length} 章骨架 · 第 1 卷细纲
-            {st.importedChapters.length > 0 ? ` · ${st.importedChapters.length} 章导入正文（逐章归档）` : ''}
-          </p>
-          <button onClick={createBook} disabled={!!creating || !canNextBook(st)} className={btnCls}>
-            {creating || '确认无误，一键成书 → 进入长篇写作'}
-          </button>
-        </section>
-      )}
-
-      {/* 上一步 / 下一步 */}
-      <div className="flex justify-between">
-        <button onClick={() => patch({ step: Math.max(0, step - 1) })} disabled={step === 0 || !!busy || !!creating} className="rounded-full border border-stone-300 px-5 py-2.5 text-sm text-stone-600 hover:bg-paper disabled:opacity-40">
-          ← 上一步
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-xl font-bold">新手写作 · 搭建故事框架</h2>
+        <p className="mt-1 text-sm text-stone-500">
+          自顶向下把整个故事搭好；每一步的提示词都会弹窗给你看、给你改，确认后才发给 AI。上游产物自动带入下游；任何一步可随时回来重生成或手改。资产带「知情人/透出卷/传闻卷」；排章分两步（前20章 + 后段并回填章号，防超长截断）；落库前先算好资产/节拍/伏笔三表计数供你核对，确认后再写进书里。
+        </p>
+        <button onClick={clearDraft} className="text-xs text-stone-400 underline hover:text-stone-600">
+          清空本页草稿（内容会自动存到浏览器本地）
         </button>
-        {step < 7 && (
-          <button onClick={() => patch({ step: step + 1 })} disabled={!canNext || !!busy || !!creating} className="rounded-full bg-stone-800 px-5 py-2.5 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-40">
-            下一步 →
-          </button>
-        )}
+        {draftSaveError && <p className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">{draftSaveError}</p>}
       </div>
+
+      <section className="rounded-xl border border-stone-200 bg-paper p-5">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <h3 className="font-semibold">第 1 步 · 灵感扩写</h3>
+          <div className="flex gap-2">
+            <button onClick={genClarify} disabled={!inspiration.trim()} className={genBtn}>
+              {clarifyAnswers ? '重新生成补全问题' : '生成补全问题'}
+            </button>
+            <button onClick={() => setInspireOpen(true)} disabled={!inspiration.trim()} className={genBtn}>
+              {brief ? '重新扩充灵感' : '扩充灵感'}
+            </button>
+          </div>
+        </div>
+        <label className={label}>一句话灵感</label>
+        <input
+          value={inspiration}
+          onChange={(e) => setInspiration(e.target.value)}
+          placeholder="例：末日迷雾降临，少年觉醒异能，从校园成长到域主。"
+          className={`${line} mb-3`}
+        />
+        <label className={label}>目标总字数（下游数量锚，由你定）</label>
+        <input value={targetWords} onChange={(e) => setTargetWords(e.target.value.replace(/[^0-9]/g, ''))} className={`${line} mb-3`} />
+        {!inspiration.trim() && <p className={hint}>先填一句话灵感，再点扩充。</p>}
+        {(clarifyAnswers || clarifyErr) && (
+          <div className="mb-3 flex flex-wrap items-center gap-3">
+            {clarifyAnswers && (
+              <span className="text-xs text-stone-500">
+                已补全 {clarifyAnswers.filter((a) => a.option >= 0 || (a.free || '').trim()).length} 题，将带入扩充灵感
+              </span>
+            )}
+            {clarifyErr && <span className="text-xs text-red-400">{clarifyErr}</span>}
+          </div>
+        )}
+        <textarea value={brief} onChange={(e) => setBrief(e.target.value)} rows={9} placeholder="创作简报(brief,含目标体量/设定支点/成长曲线)会填到这里，可直接手改。" className={box} />
+      </section>
+
+      <section className="rounded-xl border border-stone-200 bg-paper p-5">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="font-semibold">第 2 步 · 文风 + 题材</h3>
+          <button onClick={() => setStyleOpen(true)} disabled={styleEmpty} className={genBtn}>
+            {styleProfile ? '重新生成文风' : '生成文风档案'}
+          </button>
+        </div>
+        <label className={label}>参考文风（可选预设）</label>
+        <select
+          value={stylePreset}
+          onChange={(e) => {
+            const next = e.target.value
+            // M41：切换预设会覆盖已蒸馏的文风范例(samples)与写作习惯(habits)；若已蒸馏出 14 维指纹，先二次确认并明示会替换哪些字段，
+            // 且一并清空 styleMetrics（否则第2步"已蒸馏：含14维量化指纹"徽标会与实际已被换掉的 samples/habits 不一致）
+            if (styleMetrics) {
+              const ok = window.confirm('当前已从原文蒸馏出文风（含 14 维量化指纹）。切换预设会替换「文风范例」与「写作习惯」，并清空蒸馏指纹。确定继续吗？')
+              if (!ok) return
+            }
+            setStylePreset(next)
+            const p = PRESET_STYLES.find((s) => s.bookName === next)
+            if (p) {
+              setStyleSamples(p.samples || [])
+              setStyleHabits(p.habits || [])
+            } else {
+              setStyleSamples([])
+              setStyleHabits([])
+            }
+            setStyleMetrics(null)
+            setStyleReliable(false) // WZ-2：清指纹时一并清可靠标记，避免徽标残留"样本过短"提示
+          }}
+          className={`${line} mb-3`}
+        >
+          <option value="">自定义（不用预设）</option>
+          {PRESET_STYLES.map((s) => (
+            <option key={s.bookName} value={s.bookName}>
+              {s.bookName}
+            </option>
+          ))}
+        </select>
+        <label className={label}>题材 / 类型（可选）</label>
+        <input value={genreNote} onChange={(e) => setGenreNote(e.target.value)} placeholder="例：末世异能升级流、悬疑修仙。" className={`${line} mb-3`} />
+        <label className={label}>补充要求（可选）</label>
+        <input value={styleNote} onChange={(e) => setStyleNote(e.target.value)} placeholder="例：对话要多、句子偏短、少用比喻。" className={`${line} mb-3`} />
+        {/* L10：已粘贴/导入原文样本时给准确引导——"生成文风档案"走预设/题材/补充要求(不消费原文)，故按钮仍禁用，但提示改指向"从原文蒸馏文风"，不再让用户误以为必须先随便填个题材 */}
+        {styleEmpty && (
+          <p className={hint}>
+            {styleSourceText.trim()
+              ? '已粘贴原文样本：可直接点「从原文蒸馏文风」；或选预设 / 填题材 / 补充要求之一后再用「生成文风档案」。'
+              : '请至少选预设、填题材或补充要求之一——零输入生成的文风会污染全书笔触。'}
+          </p>
+        )}
+        <label className={label}>原文样本（粘贴或导入小说原文，用于真蒸馏）</label>
+        <input ref={styleFileRef} type="file" accept={READ_ACCEPT} className="hidden" onChange={onStyleFile} />
+        <textarea
+          value={styleSourceText}
+          onChange={(e) => setStyleSourceText(e.target.value)}
+          rows={5}
+          placeholder="粘贴你想模仿的小说原文（建议3000字以上），点「从原文蒸馏文风」。"
+          className={`${box} mb-3`}
+        />
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          <button
+            onClick={() => styleFileRef.current && styleFileRef.current.click()}
+            className="rounded-lg border border-stone-300 bg-stone-50 px-4 py-1.5 text-sm text-stone-700 hover:border-stone-400 hover:bg-stone-100"
+          >
+            导入原文文件
+          </button>
+          <button onClick={openDistill} disabled={!styleSourceText.trim()} className={genBtn}>
+            从原文蒸馏文风
+          </button>
+          {styleMetrics && (
+            <span className="text-xs text-stone-500">
+              {styleReliable ? '已蒸馏：含14维量化指纹' : '已蒸馏：样本过短，指纹仅供参考'}
+            </span>
+          )}
+          {distillErr && <span className="text-xs text-red-400">{distillErr}</span>}
+        </div>
+        <label className={label}>文风档案（生成或蒸馏后可手改）</label>
+        <textarea value={styleProfile} onChange={(e) => setStyleProfile(e.target.value)} rows={8} placeholder="六维度文风档案会填到这里。" className={box} />
+      </section>
+
+      <section className="rounded-xl border border-stone-200 bg-paper p-5">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="font-semibold">第 3 步 · 世界观圣经</h3>
+          <button onClick={() => setBibleOpen(true)} disabled={!hasBrief} className={genBtn}>
+            {bible ? '重新生成圣经' : '生成圣经'}
+          </button>
+        </div>
+        {!hasBrief && <p className={hint}>请先完成第 1 步（brief），世界观基于简报展开。</p>}
+        <textarea value={bible} onChange={(e) => setBible(e.target.value)} rows={12} placeholder="世界/机制/力量(≥6级含战力标尺)/势力(≥8方含功能位)/地点(≥12个按层级)/真相(≥3条)会填到这里；时序用卷序。" className={box} />
+      </section>
+
+      <section className="rounded-xl border border-stone-200 bg-paper p-5">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="font-semibold">第 4 步 · 常驻人物 + 群像</h3>
+          <button onClick={() => setCharsOpen(true)} disabled={charsMissing.length > 0} className={genBtn}>
+            {characters ? '重新生成人物' : '生成人物'}
+          </button>
+        </div>
+        {charsMissing.length > 0 && <p className={hint}>本步提示词要吃简报/圣经，缺{charsMissing.join('、')}，先补齐上游再生成。本步设计贯穿人物(含战力定位/语气示例/秘密/高光卷序)+群像，各卷反派在第 6 步分卷结构表里按卷定义。</p>}
+        <textarea value={characters} onChange={(e) => setCharacters(e.target.value)} rows={12} placeholder="主角+长期配角(至少6人,17字段含刻画)+群像会填到这里。" className={box} />
+      </section>
+
+      <section className="rounded-xl border border-stone-200 bg-paper p-5">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="font-semibold">第 5 步 · 资产表（人物分层 / 地点 / 势力 / 道具）</h3>
+          <button onClick={() => setAssetTableOpen(true)} disabled={assetTableMissing.length > 0} className={genBtn}>
+            {assetTable ? '重新生成资产表' : '生成资产表'}
+          </button>
+        </div>
+        {assetTableMissing.length > 0 && <p className={hint}>本步提示词要吃简报/圣经/人物，缺{assetTableMissing.join('、')}，先补齐上游再生成。本步独立产出完整资产表：主角/配角/普通角色分层 + 地点/势力/道具，每个资产带透出卷，落库后正文按章透出时可用的资产更充足。</p>}
+        <textarea value={assetTable} onChange={(e) => setAssetTable(e.target.value)} rows={12} placeholder="完整资产表会填到这里：【主角】【配角】【普通角色】【地点】【势力】【道具】六段，每行尾部统一是 透出卷｜传闻卷｜知情人。" className={box} />
+      </section>
+
+      <section className="rounded-xl border border-stone-200 bg-paper p-5">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="font-semibold">第 6 步 · 结构大纲 + 情绪曲线</h3>
+          <button onClick={() => setOutlineOpen(true)} disabled={outlineMissing.length > 0} className={genBtn}>
+            {outline ? '重新生成大纲' : '生成大纲'}
+          </button>
+        </div>
+        {outlineMissing.length > 0 && <p className={hint}>本步提示词要吃简报/圣经/人物，缺{outlineMissing.join('、')}，先补齐上游再生成。</p>}
+        <textarea value={outline} onChange={(e) => setOutline(e.target.value)} rows={12} placeholder="分卷结构表/关键转折(12-18)/每卷事件节点/情绪曲线(强度+蓄力配比+主爽点类型)/伏笔(分级发酵)/悬念账本/终局会填到这里。" className={box} />
+      </section>
+
+      <section className="rounded-xl border border-stone-200 bg-paper p-5">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="font-semibold">第 7 步 · 第1卷前20章（每章200字梗概）</h3>
+          <button onClick={() => setVolumesOpen(true)} disabled={volumesMissing.length > 0} className={genBtn}>
+            {volumes ? '重新生成卷章' : '生成卷章'}
+          </button>
+        </div>
+        {volumesMissing.length > 0 && <p className={hint}>本步提示词要吃简报/圣经/人物/大纲，缺{volumesMissing.join('、')}，先补齐上游再生成。每卷含主反派/新势力/新地图/钩子；本步排第1至20章，每章200字梗概带视角人物/节拍/钩子。</p>}
+        <textarea value={volumes} onChange={(e) => setVolumes(e.target.value)} rows={12} placeholder="分卷(至少3卷)+第1卷第1至20章(每章200字梗概带视角人物/节拍/钩子)会填到这里。" className={box} />
+      </section>
+
+      <section className="rounded-xl border border-stone-200 bg-paper p-5">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="font-semibold">第 8 步 · 第21章起续排 + 资产章号回填</h3>
+          <button onClick={() => setVolumes2Open(true)} disabled={!volumes || volumesMissing.length > 0} className={genBtn}>
+            {volumes2 ? '重新生成后段章表' : '生成后段章表+回填'}
+          </button>
+        </div>
+        {!volumes && <p className={hint}>先完成第 7 步。本步承接前20章的结尾钩子续排第21章起（每章约100字梗概），并把全部资产的透出卷/传闻卷细化成透出章/传闻章。</p>}
+        <textarea value={volumes2} onChange={(e) => setVolumes2(e.target.value)} rows={10} placeholder="第21章起的简表(章号｜章名｜梗概约100字｜透出资产｜情绪节拍)+资产章号回填清单会填到这里。" className={box} />
+      </section>
+
+      <section className="rounded-xl border border-stone-200 bg-paper p-5">
+        <h3 className="mb-3 font-semibold">第 9 步 · 落库成书</h3>
+        <p className="mb-3 text-xs text-stone-400">书名取简报第一行(前20字)，简报为空时用当前日期+序号兜底。</p>
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          <span className="text-sm text-stone-600">
+            待落库计数：资产 {previewCounts.assets.length} / 节拍 {previewCounts.beats.length} / 伏笔 {previewCounts.foreshadows.length}
+          </span>
+          <span className="text-xs text-stone-400">先核对这三个数，再落库</span>
+        </div>
+        <div className="flex items-center gap-3">
+          <button onClick={saveBook} className={genBtn}>
+            {savedBook ? '重新保存成书' : '落库成书'}
+          </button>
+          {savedBook && (
+            <span className="text-sm text-stone-600">
+              已成书：《{savedBook.title}》（资产 {savedBook.assets.length} / 节拍 {savedBook.beats.length} / 伏笔 {savedBook.foreshadows.length}）
+              <button onClick={onOpenLongForm} className="ml-3 rounded-lg bg-stone-800 px-3 py-1.5 text-sm text-white hover:bg-stone-700">
+                去长篇写作
+              </button>
+            </span>
+          )}
+          {saveErr && <span className="text-sm text-red-500">{saveErr}</span>}
+        </div>
+        <p className="mt-2 text-xs text-stone-400">落库时：资产来自第 5 步资产表（没生成资产表时回落到圣经/人物解析），节拍来自卷章表、伏笔来自大纲；上面的计数就是即将写进书里的数量，供你先核对。</p>
+      </section>
+
+      <ClarifyModal
+        open={clarifyOpen}
+        questions={clarifyQuestions}
+        onClose={() => setClarifyOpen(false)}
+        onSubmit={(answers) => {
+          setClarifyAnswers(answers)
+          setClarifyOpen(false)
+          setInspireOpen(true)
+        }}
+      />
+      <PromptEditorModal
+        open={inspireOpen}
+        title="第 1 步 · 灵感扩写（提示词可编辑）"
+        initialPrompt={inspirePrompt(targetWords || '1000000', clarifyText) + inspiration}
+        onClose={() => setInspireOpen(false)}
+        onAdopt={(reply, finalPrompt) => {
+          setBrief(reply)
+          // WZ-3：模板以"一句话灵感："结尾、inspiration 拼在其后。回写取"第一个"该标记之后的全部内容(=用户灵感全文)。
+          // 不用 split(...)[1]：灵感自身含"一句话灵感："时会被切成多段、只取到第一段(截断)；也不用 lastIndexOf：会丢掉灵感前半。
+          const marker = '一句话灵感：'
+          const idx = String(finalPrompt || '').indexOf(marker)
+          if (idx >= 0) setInspiration(finalPrompt.slice(idx + marker.length).trim())
+          setInspireOpen(false)
+        }}
+      />
+      <PromptEditorModal
+        open={styleOpen}
+        title="第 2 步 · 文风+题材（提示词可编辑）"
+        initialPrompt={styleInitialPrompt}
+        onClose={() => setStyleOpen(false)}
+        onAdopt={(reply) => {
+          setStyleProfile(reply)
+          setStyleOpen(false)
+        }}
+      />
+      <PromptEditorModal
+        open={bibleOpen}
+        title="第 3 步 · 世界观圣经（提示词可编辑）"
+        initialPrompt={biblePrompt(brief)}
+        onClose={() => setBibleOpen(false)}
+        onAdopt={(reply) => {
+          setBible(reply)
+          setBibleOpen(false)
+        }}
+      />
+      <PromptEditorModal
+        open={charsOpen}
+        title="第 4 步 · 常驻人物+群像（提示词可编辑）"
+        initialPrompt={charPrompt(brief, bible)}
+        onClose={() => setCharsOpen(false)}
+        onAdopt={(reply) => {
+          setCharacters(reply)
+          setCharsOpen(false)
+        }}
+      />
+      <PromptEditorModal
+        open={assetTableOpen}
+        title="第 5 步 · 资产表（提示词可编辑）"
+        initialPrompt={assetTablePrompt(brief, bible, characters)}
+        onClose={() => setAssetTableOpen(false)}
+        onAdopt={(reply) => {
+          setAssetTable(reply)
+          setAssetTableOpen(false)
+        }}
+      />
+      <PromptEditorModal
+        open={outlineOpen}
+        title="第 6 步 · 结构大纲+情绪曲线（提示词可编辑）"
+        initialPrompt={outlinePrompt(brief, bible, characters)}
+        onClose={() => setOutlineOpen(false)}
+        onAdopt={(reply) => {
+          setOutline(reply)
+          setOutlineOpen(false)
+        }}
+      />
+      <PromptEditorModal
+        open={volumesOpen}
+        title="第 7 步 · 分卷+前20章（提示词可编辑）"
+        initialPrompt={volumeInitialPrompt}
+        onClose={() => setVolumesOpen(false)}
+        onAdopt={(reply) => {
+          setVolumes(reply)
+          setVolumesOpen(false)
+        }}
+      />
+      <PromptEditorModal
+        open={volumes2Open}
+        title="第 8 步 · 后段章表+章号回填（提示词可编辑）"
+        initialPrompt={volume2InitialPrompt}
+        onClose={() => setVolumes2Open(false)}
+        onAdopt={(reply) => {
+          setVolumes2(reply)
+          setVolumes2Open(false)
+        }}
+      />
+      <PromptEditorModal
+        open={clarifyPromptOpen}
+        title="生成补全问题（提示词可编辑）"
+        initialPrompt={clarifyPrompt(inspiration)}
+        thinking
+        onClose={() => setClarifyPromptOpen(false)}
+        onAdopt={adoptClarify}
+      />
+      <PromptEditorModal
+        open={distillPromptOpen}
+        title="从原文蒸馏文风（提示词可编辑）"
+        systemPrompt={distillSystem}
+        initialPrompt={distillUserPrompt}
+        onClose={() => setDistillPromptOpen(false)}
+        onAdopt={adoptDistill}
+      />
     </div>
   )
-}
-
-// 成书前置条件：圣经世界观 + 主线 + 卷结构 + 第 1 卷细纲
-function canNextBook(st) {
-  return !!st.bible?.world && !!st.mainline && !!st.storyline && st.volumes.length > 0 && !!st.outline
 }

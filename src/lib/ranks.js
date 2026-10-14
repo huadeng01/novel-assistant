@@ -95,7 +95,6 @@ export function listsByGender(source, gender) {
   return lists.filter((l) => normalizeGender(l.gender) === gender || normalizeGender(l.gender) === '全部')
 }
 
-// 汇总统计：成功平台数、总书目数——供 UI 顶部概览展示。
 export function ranksSummary(data) {
   const sources = (data && Array.isArray(data.sources)) ? data.sources : []
   const okCount = sources.filter((s) => s && s.ok).length
@@ -104,7 +103,6 @@ export function ranksSummary(data) {
   return { platformCount: sources.length, okCount, failCount, bookCount }
 }
 
-// 把 generatedAtLocal 缺失时用 generatedAt(ISO) 兜底成可读本地时间串。
 export function generatedLabel(data) {
   if (!data) return ''
   if (data.generatedAtLocal) return data.generatedAtLocal

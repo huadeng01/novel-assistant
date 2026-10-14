@@ -1,142 +1,93 @@
-// 世界观库入口：内置题材世界模板（每题材一个文件，八字段结构化，供灵感参考不定死世界）
-// + 用户覆盖/自定义题材（localStorage），供灵感生成、新手写作「世界观确认」、长篇写作「世界观」页共用。
-// 完整世界观（势力/冲突/底牌含登场时机）由用户选定灵感后在开书流程中由 AI 自动生成，存入书籍圣经，不在本库；
-// 本库的 factions/geography 等字段只给「该题材通常长什么样」的类型学参考，不是某本书的具体设定。
-// 注入分两档（见 worldviewText）：brief 给灵感选题（维持低权重参考定位、不膨胀），full 给圣经生成。
-// 文件名一律用拼音：中文文件名在 Mac 打包 → Windows 解压时会因 zip 未设 UTF-8 标志位而变成乱码，
-// 乱码文件名会让下面的 import 路径失效、整个项目跑不起来。键名（BUILTIN_WORLDVIEWS）仍保留中文题材名，
-// UI 显示、getWorldview(genre) 查找、localStorage 里的用户覆盖数据全都按中文键走，故此处改名不影响任何既有数据。
-import xuanhuan from './xuanhuan.js'  // 玄幻
-import xianxia from './xianxia.js'  // 仙侠
-import xiuzhen from './xiuzhen.js'  // 修真
-import dushi from './dushi.js'  // 都市
-import xianshi from './xianshi.js'  // 现实
-import kehuan from './kehuan.js'  // 科幻
-import moshi from './moshi.js'  // 末世
-import qihuan from './qihuan.js'  // 奇幻
-import xuanyi from './xuanyi.js'  // 悬疑
-import tuili from './tuili.js'  // 推理
-import kongbu from './kongbu.js'  // 恐怖
-import yanqing from './yanqing.js'  // 言情
-import gudaiYanqing from './gudai-yanqing.js'  // 古代言情
-import lishi from './lishi.js'  // 历史
-import wuxia from './wuxia.js'  // 武侠
-import junshi from './junshi.js'  // 军事
-import youxi from './youxi.js'  // 游戏
-import wuxianliu from './wuxianliu.js'  // 无限流
-import jingji from './jingji.js'  // 竞技
-import qingxiaoshuo from './qingxiaoshuo.js'  // 轻小说
-
-export const BUILTIN_WORLDVIEWS = {
-  玄幻: xuanhuan,
-  仙侠: xianxia,
-  修真: xiuzhen,
-  都市: dushi,
-  现实: xianshi,
-  科幻: kehuan,
-  末世: moshi,
-  奇幻: qihuan,
-  悬疑: xuanyi,
-  推理: tuili,
-  恐怖: kongbu,
-  言情: yanqing,
-  古代言情: gudaiYanqing,
-  历史: lishi,
-  武侠: wuxia,
-  军事: junshi,
-  游戏: youxi,
-  无限流: wuxianliu,
-  竞技: jingji,
-  轻小说: qingxiaoshuo,
+// 暗箱流水线废弃处置 A：worldviews 原含 BUILTIN_WORLDVIEWS / 20 题材模板 / worldviewText /
+// chapterParties / scenesForChapter / genreStyleOf / projectStyleOf 等，均只被废弃的
+// longform/continuity/threads 消费，已删除；对 threads.js 的 import 一并切断。
+// 因第 5.3 节 genre 增强要激活 genreSkinOf → benchmarkRefOf，此处拆分保留题材→基准书形态参照的
+// 单一出处：GENRE_STYLE_TABLE + benchmarkRefOf。
+//
+// 🔴【文风层修复·任务A bug2：paraBandFor 已恢复】paraBandFor 曾在本处置里被连带删除且无人登记，
+//   而它是「段长数字」的唯一出处（min = round(apl×2/3)、max = round(apl×4/3)）。删除后
+//   presetStyles.js 注释与 profile/habits 里「每段字数带宽以写作端那条段长硬要求为准」成了悬空指代
+//   （写作端再无数字可指）。现按方案 E 第①步把它连同 PARA_BAND_MIN_RATIO / PARA_BAND_MAX_RATIO
+//   一并恢复到此文件（原出处），逐字对齐 novel-local worldviews/index.js 的实现（约 11 行纯算术）。
+//   ✅ 已接线：LongFormPage 用 `paraBandFor(avgParaLenFor(book))` 渲染「每段写到约 N~M 字再断行」；
+//     avgParaLenFor(见文件末)从题材档/绑定文风指纹推真实段长，未配时 paraBandFor 回落默认档 30。
+//
+// benchmark 字段 = 题材 → 基准书形态参照的单一出处（不在别处另设第二张表）。
+// direct: true  = 这本基准书的题材就是本内置题材；缺省 = 仅「同族形态参照」。
+// 无 benchmark 字段 = 六本语料里没有该题材形态的书，或族指向不唯一 → 诚实标为无参照，不硬贴。
+const GENRE_STYLE_TABLE = {
+  仙侠: { chapterWords: 10000, avgParaLen: 48, evidence: '章字数 p10·p50·p90 = 5296·9440·17166；段长 39.9·48.7·59.5', benchmark: { genreZh: '仙侠', direct: true } },
+  历史: { chapterWords: 4300, avgParaLen: 30, evidence: '' },
+  // 🔴【文风层收尾·prometheus 删除的连带处理】恐怖/悬疑/推理 原映射 benchmark.genreZh='蒸汽朋克怪谈'（= preset:prometheus《普罗之主》）。
+  //   prometheus 整份档案已删除（合成范例替代逐字原文改造），「蒸汽朋克怪谈」这一 genreZh 在 PRESET_STYLES 里已无对应档案。
+  //   故移除这 3 题材的 benchmark 字段 ⟹ benchmarkRefOf 返回 null ⟹ genreSkinOf matched=false ⟹ 回落到默认主导嗓音
+  //   （skinScore 最高者 = preset:perfect 玄幻），与历史/都市/科幻等 8 个未映射题材同路；「实际回落到谁」的留痕由 genreSkinOf/resolveStyleRec 的 note 自动生成。
+  //   evidence 里的怪谈形态实测数据保留（供章字数/段长参照，不依赖 benchmark）。
+  恐怖: { chapterWords: 4300, avgParaLen: 30, evidence: '怪谈形态：章字数 3304·4295·7505；段长 23.5·28.4·34.0（原基准书 preset:prometheus 已删 → 回落默认主导嗓音）' },
+  悬疑: { chapterWords: 4300, avgParaLen: 30, evidence: '同怪谈族（未单独实测）（原基准书 preset:prometheus 已删 → 回落默认主导嗓音）' },
+  推理: { chapterWords: 3200, avgParaLen: 30, evidence: '（原基准书 preset:prometheus 已删 → 回落默认主导嗓音）' },
+  玄幻: { chapterWords: 3200, avgParaLen: 38, evidence: '章字数 2890·3203·3862；段长 31.1·36.2·39.8', benchmark: { genreZh: '玄幻', direct: true } },
+  修真: { chapterWords: 3200, avgParaLen: 38, evidence: '同玄幻族（未单独实测）', benchmark: { genreZh: '玄幻' } },
+  奇幻: { chapterWords: 3200, avgParaLen: 38, evidence: '同玄幻族（未单独实测）', benchmark: { genreZh: '玄幻' } },
+  武侠: { chapterWords: 3200, avgParaLen: 38, evidence: '同玄幻族（未单独实测）', benchmark: { genreZh: '玄幻' } },
+  无限流: { chapterWords: 3200, avgParaLen: 30, evidence: '同题材唯一样本被判「不合格」（节选本，实解析 119 章）：章字数 2094·2332·3862 出自该失真样本，不得作实测依据。本档 3200 字 / 段长 30 沿用同族归档默认值（非实测）。', benchmark: { genreZh: '无限流', direct: true } },
+  都市: { chapterWords: 3200, avgParaLen: 30, evidence: '' },
+  现实: { chapterWords: 3200, avgParaLen: 30, evidence: '' },
+  科幻: { chapterWords: 3200, avgParaLen: 30, evidence: '' },
+  末世: { chapterWords: 3200, avgParaLen: 30, evidence: '' },
+  军事: { chapterWords: 3200, avgParaLen: 30, evidence: '' },
+  言情: { chapterWords: 2000, avgParaLen: 38, evidence: '女频形态：章字数 1670·1992·2186；段长 28.9·35.5·40.8', benchmark: { genreZh: '女频综影视/后宫' } },
+  古代言情: { chapterWords: 2000, avgParaLen: 38, evidence: '同女频族（未单独实测）', benchmark: { genreZh: '女频综影视/后宫' } },
+  轻小说: { chapterWords: 2000, avgParaLen: 30, evidence: '' },
+  游戏: { chapterWords: 2000, avgParaLen: 38, evidence: '系统流形态：章字数 2069·2092·2137；段长 35.5·41.8·50.1', benchmark: { genreZh: '全民/系统流' } },
+  竞技: { chapterWords: 2000, avgParaLen: 30, evidence: '' },
 }
 
-const LS_KEY = 'na_worldview_overrides' // 用户修改/新增的题材世界模板（覆盖内置，不污染内置文件；旧版数据缺字段按空串降级，见 getWorldview）
+// 题材 → 基准书形态参照。认不出的题材（自定义 / null / 脏数据）返回 null，永不抛错。
+// 只负责「映射」这一件事；参照书是否合格由语料档案 profiles.json 判定，不在这里复制一份。
+export function benchmarkRefOf(genre) {
+  const g = String(genre == null ? '' : genre).trim()
+  const hit = Object.prototype.hasOwnProperty.call(GENRE_STYLE_TABLE, g) ? GENRE_STYLE_TABLE[g] : null
+  if (!hit || !hit.benchmark || !hit.benchmark.genreZh) return null
+  return { genre: g, genreZh: hit.benchmark.genreZh, direct: hit.benchmark.direct === true }
+}
 
-// 题材模板的八字段清单——本文件是 WorldviewEditor（渲染表单）与 worldviewText（拼装注入文本）的唯一事实源，
-// 两处都从这里读，避免字段清单在 UI 与提示词之间漂移（漏字段会让某维度的设定永远进不了上下文）。
-// min/max 是字数目标区间（按 20 个内置模板的实际字数分布校准，内置模板全部落在区间内）：
-// 只用于编辑器提示与写作时的自我校准，不做硬校验、不阻断保存。
-export const WORLDVIEW_FIELDS = [
-  { key: 'world', label: '世界架构', min: 140, max: 240, rows: 4, placeholder: '世界构成、层级、舞台格局、驱动世界运转的核心稀缺物…（模板参考，非定死设定）' },
-  { key: 'power', label: '力量体系', min: 150, max: 265, rows: 4, placeholder: '阶位/境界阶梯（逐级列名）、获取途径、突破门槛、天花板与代价…（公认框架，具体细节留给本书）' },
-  { key: 'factions', label: '势力格局', min: 160, max: 230, rows: 4, placeholder: '该题材典型的 4~6 类势力与常见对立轴（给类型与立场逻辑，不给具体名字）' },
-  { key: 'geography', label: '地理与舞台分层', min: 130, max: 210, rows: 3, placeholder: '开局之地 → 中期舞台 → 终局舞台的三级空间阶梯（供世界地图分层参考）' },
-  { key: 'taboo', label: '禁忌与代价', min: 130, max: 205, rows: 3, placeholder: '世界硬规则、不可触碰的红线、能力的代价与反噬' },
-  { key: 'tropes', label: '高频套路清单', min: 68, max: 125, rows: 3, placeholder: '该题材最容易撞车的 4~6 种开局/金手指/冲突，供灵感生成主动规避' },
-  { key: 'antiTropes', label: '反套路切口', min: 125, max: 195, rows: 3, placeholder: '与高频套路对应的差异化方向，供灵感选题分头落点' },
-  { key: 'motifs', label: '意象与专名词库', min: 60, max: 125, rows: 2, placeholder: '顿号分隔的标志性意象、器物、场所类型词（是词库不是句子）' },
-]
+// ==================== 段长数字唯一出处（paraBandFor，任务A bug2 恢复）====================
+// avgParaLen（本书/本题材的平均段长目标）→ 写作端喂给模型的段长带宽 { minPara, maxPara }。
+// 系数与 novel-local worldviews/index.js 逐字一致：下沿 2/3、上沿 4/3（T-paraband-caliber 标定 v2）。
+// 缺字段/非法值一律回退默认档 30（= novel-local DEFAULT_GENRE_STYLE.avgParaLen，也是 GENRE_STYLE_TABLE
+//   里 8 个未映射题材共用的 avgParaLen），不抛错。这是全项目段长数字的唯一出处，别处不得再写第二个数。
+export const PARA_BAND_MIN_RATIO = 2 / 3
+export const PARA_BAND_MAX_RATIO = 4 / 3
+export const PARA_BAND_DEFAULT_AVG_PARA_LEN = 30
 
-export const EMPTY_WORLDVIEW = Object.fromEntries(WORLDVIEW_FIELDS.map((f) => [f.key, '']))
+export function paraBandFor(avgParaLen) {
+  const n = Number(avgParaLen)
+  const target = Number.isFinite(n) && n > 0 ? n : PARA_BAND_DEFAULT_AVG_PARA_LEN
+  const minPara = Math.max(8, Math.round(target * PARA_BAND_MIN_RATIO))
+  const maxPara = Math.max(minPara + 4, Math.round(target * PARA_BAND_MAX_RATIO))
+  return { minPara, maxPara, target, defaulted: !(Number.isFinite(n) && n > 0) }
+}
 
-// 注入档位：brief = 世界架构 + 力量体系 + 意象词库（灵感选题用，约 400~620 字，维持「低权重参考」定位）；
-// full = 八字段带小标题全拼（新手写作 Step1 圣经生成用，约 1100~1600 字，让 AI 有足够维度可对齐）。
-const BRIEF_KEYS = ['world', 'power', 'motifs']
-
-function readLS() {
-  try {
-    return JSON.parse(localStorage.getItem(LS_KEY) || '{}') || {}
-  } catch {
-    return {}
+// B-H3：从 book 推导真实 avgParaLen（段长目标），供 LongFormPage 的 paraBandFor 消费（此前恒传 book.avgParaLen=undefined → 段长恒默认档）。
+// 确定性推导、无写入点也能算，优先级：
+//   ① book.avgParaLen 显式值（若将来建书/绑书时落了值）；
+//   ② 绑定文风的蒸馏指纹 styleMetrics.paraMedian.mean —— 该书**真实**段长中位数（最准，兼容 styleMetrics 是 metrics 对象或整份 band 两种形状）；
+//   ③ 题材默认档 GENRE_STYLE_TABLE[book.genre].avgParaLen；
+//   ④ 都拿不到 → 返回 undefined，paraBandFor 自动回落默认档 30（不抛错）。
+export function avgParaLenFor(book) {
+  const b = book || {}
+  const explicit = Number(b.avgParaLen)
+  if (Number.isFinite(explicit) && explicit > 0) return explicit
+  const sm = b.styleMetrics || {}
+  const metrics = sm.paraMedian ? sm : (sm.metrics || {})
+  const pm = metrics.paraMedian
+  const pmMean = pm && typeof pm === 'object' ? Number(pm.mean) : Number(pm)
+  if (Number.isFinite(pmMean) && pmMean > 0) return Math.round(pmMean)
+  const g = String(b.genre == null ? '' : b.genre).trim()
+  if (g && Object.prototype.hasOwnProperty.call(GENRE_STYLE_TABLE, g)) {
+    const gv = Number(GENRE_STYLE_TABLE[g].avgParaLen)
+    if (Number.isFinite(gv) && gv > 0) return gv
   }
-}
-
-function writeLS(o) {
-  localStorage.setItem(LS_KEY, JSON.stringify(o))
-}
-
-// 全部题材 = 内置 20 个 + 用户自定义新增
-export function allGenres() {
-  const custom = Object.keys(readLS()).filter((g) => !BUILTIN_WORLDVIEWS[g])
-  return [...Object.keys(BUILTIN_WORLDVIEWS), ...custom]
-}
-
-// 取某题材世界模板：用户覆盖优先，否则内置模板。
-// 以 EMPTY_WORLDVIEW 打底再展开源数据：旧版 localStorage 只有 world/power 两字段，其余六字段自动降级为空串
-// （编辑器显示为可补填的空框、拼装注入时按空跳过），不报错也不丢用户已存的内容。
-export function getWorldview(genre) {
-  const o = readLS()
-  const src = o[genre] || BUILTIN_WORLDVIEWS[genre]
-  if (!src) return null
-  return { ...EMPTY_WORLDVIEW, ...src }
-}
-
-export function isOverridden(genre) {
-  return !!readLS()[genre]
-}
-
-export function saveWorldview(genre, wv) {
-  const o = readLS()
-  o[genre] = wv
-  writeLS(o)
-}
-
-export function resetWorldview(genre) {
-  const o = readLS()
-  delete o[genre]
-  writeLS(o)
-}
-
-// 拼成提示词可用的世界模板文本（注入灵感生成等；定位是参考模板，不是定死的设定）
-// level='brief'：只拼世界架构 + 力量体系 + 意象词库；level='full'：八字段带小标题全拼。
-// 空字段整块跳过（不输出空标题），因此旧数据在 full 档下等同于旧的 brief 输出。
-export function worldviewText(wv, level = 'brief') {
-  if (!wv) return '（暂无世界模板）'
-  const keys = level === 'full' ? WORLDVIEW_FIELDS.map((f) => f.key) : BRIEF_KEYS
-  const labelOf = (k) => WORLDVIEW_FIELDS.find((f) => f.key === k)?.label || k
-  const lines = keys.filter((k) => String(wv[k] || '').trim()).map((k) => `${labelOf(k)}：${String(wv[k]).trim()}`)
-  return lines.length ? lines.join('\n') : '（暂无世界模板）'
-}
-
-// 套路对照块：只输出「高频套路清单 + 反套路切口」，供灵感生成把「反套路」从模型的自由发挥变成照单规避。
-// 两字段都为空（旧数据/自定义题材未填）时返回空串，调用方据此降级回原有措辞。
-export function worldviewTropeBlock(wv) {
-  if (!wv) return ''
-  const tropes = String(wv.tropes || '').trim()
-  const anti = String(wv.antiTropes || '').trim()
-  if (!tropes && !anti) return ''
-  const parts = []
-  if (tropes) parts.push(`【该题材高频套路（下列一个都不得出现，换皮改名也不行）】\n${tropes}`)
-  if (anti) parts.push(`【可用的反套路切口（本批选题须分头落在这些方向上）】\n${anti}`)
-  return parts.join('\n\n')
+  return undefined
 }

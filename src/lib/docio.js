@@ -21,13 +21,11 @@ export const EXPORT_FORMATS = [
   { id: 'docx', label: 'DOCX（Word）', ext: 'docx', mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' },
 ]
 
-// 取小写扩展名（不含点）；无扩展名返回 ''
 export function extOf(filename = '') {
   const m = String(filename).toLowerCase().match(/\.([a-z0-9]+)$/)
   return m ? m[1] : ''
 }
 
-// 剥离末尾扩展名，得到基础名（用于展示 / 拼导出名）
 export function baseName(filename = '') {
   return String(filename).replace(/\.[a-z0-9]+$/i, '').trim()
 }
@@ -49,14 +47,12 @@ async function loadMammoth() {
   return _mammoth
 }
 
-// .docx（ArrayBuffer）→ 纯文本
 export async function docxToText(arrayBuffer) {
   const mammoth = await loadMammoth()
   const res = await mammoth.extractRawText({ arrayBuffer })
   return String(res?.value ?? '').replace(/\r\n/g, '\n')
 }
 
-// 读取用户选择的文档文件 → 纯文本。支持 txt/md/docx；doc 抛错提示转存。
 export async function readDocumentFile(file) {
   const ext = extOf(file?.name)
   if (ext === 'doc') {
@@ -70,7 +66,6 @@ export async function readDocumentFile(file) {
   return await file.text()
 }
 
-// 纯文本 → .docx（Blob）。逐行成段，保留空行；docx 库产出标准 OOXML。
 export async function textToDocxBlob(text) {
   const { Document, Packer, Paragraph, TextRun } = await import('docx')
   const lines = String(text ?? '').split(/\r?\n/)
@@ -79,7 +74,6 @@ export async function textToDocxBlob(text) {
   return await Packer.toBlob(doc)
 }
 
-// 纯文本 → Word 兼容 HTML 字符串（存成 .doc，Word / WPS 可直接打开）。零依赖。
 export function textToDocHtml(text) {
   const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   const body = String(text ?? '')
@@ -100,7 +94,6 @@ function triggerDownload(filename, blob) {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-// 统一导出入口：按 format 组装 Blob 并触发下载，返回实际使用的文件名。
 export async function exportDocument(base, text, format = 'txt', { suffix } = {}) {
   const f = EXPORT_FORMATS.find((x) => x.id === format) || EXPORT_FORMATS[0]
   const filename = buildExportName(base, f.id, { suffix })

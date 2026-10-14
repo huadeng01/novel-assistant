@@ -17,24 +17,35 @@ const TABS = [
   { id: 'profile', label: '我的', icon: 'user' },
 ]
 
+// M13：localStorage 读取包 try/catch——隐私模式/存储被禁用/配额满时 getItem 抛错会让 useState 初始化失败 → 整个 App 白屏(点导航都没反应)
+const safeGetItem = (key) => {
+  try {
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
 export default function App() {
   // 记住上次停留的页签：中断/刷新后重进直接回到原页面，配合长篇页的书级恢复实现无缝续写
-  const [tab, setTabState] = useState(() => localStorage.getItem('na_tab') || 'revise')
+  const [tab, setTabState] = useState(() => safeGetItem('na_tab') || 'revise')
   const setTab = (t) => {
-    localStorage.setItem('na_tab', t)
+    // L16：localStorage 写入在隐私模式/存储被禁用/配额满时会抛错；若不保护，抛错会让后面的 setTabState 不执行 → 点导航栏页签完全没反应(界面像卡死)
+    try {
+      localStorage.setItem('na_tab', t)
+    } catch {
+      /* 记忆失败不影响本次切换 */
+    }
     setTabState(t)
   }
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('ds_api_key') || '')
-  const [qwenKey, setQwenKey] = useState(() => localStorage.getItem('qwen_api_key') || '')
-  const [glmKey, setGlmKey] = useState(() => localStorage.getItem('glm_api_key') || '')
+  const [apiKey, setApiKey] = useState(() => safeGetItem('ds_api_key') || '')
+  const [qwenKey, setQwenKey] = useState(() => safeGetItem('qwen_api_key') || '')
 
   const refreshKey = () => {
-    setApiKey(localStorage.getItem('ds_api_key') || '')
-    setQwenKey(localStorage.getItem('qwen_api_key') || '')
+    setApiKey(safeGetItem('ds_api_key') || '')
+    setQwenKey(safeGetItem('qwen_api_key') || '')
   }
-  const refreshGlmKey = () => setGlmKey(localStorage.getItem('glm_api_key') || '')
-  // 写作引擎（DeepSeek / 通义千问）选择状态；下发给各页面的 Key 始终对应当前选中的引擎，
-  // 缺 Key 引导也自然指向对应引擎；GLM 审核引擎独立不受影响。
+  // 写作引擎（DeepSeek / 通义千问）选择状态；下发给各页面的 Key 始终对应当前选中的引擎，缺 Key 引导也自然指向对应引擎。
   const [provider, setProviderState] = useState(() => writerProvider())
   const changeProvider = (p) => {
     setWriterProvider(p)
@@ -43,7 +54,7 @@ export default function App() {
   const activeKey = provider === 'qwen' ? qwenKey : apiKey
 
   return (
-    <div className="min-h-screen text-stone-800">
+    <div className="min-h-screen text-ink">
       <header className="sticky top-0 z-20 glass border-b border-stone-200/70 bg-paper/85 backdrop-blur">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-2 px-4 py-3">
           <h1 className="flex shrink-0 items-center gap-2 text-lg font-bold tracking-wide">
@@ -75,11 +86,12 @@ export default function App() {
 
       <main className="mx-auto max-w-6xl px-4 py-6 pb-16">
         {tab === 'revise' && <RevisePage apiKey={activeKey} onNeedKey={() => setTab('profile')} />}
-        {tab === 'continue' && <ContinuePage apiKey={activeKey} onNeedKey={() => setTab('profile')} onOpenLongForm={() => setTab('longform')} />}
-        {tab === 'longform' && <LongFormPage apiKey={activeKey} glmKey={glmKey} onNeedKey={() => setTab('profile')} />}
-        {tab === 'wizard' && <WizardPage apiKey={activeKey} onNeedKey={() => setTab('profile')} onOpenLongForm={() => setTab('longform')} />}
+        {tab === 'continue' && <ContinuePage apiKey={activeKey} onNeedKey={() => setTab('profile')} />}
+        {/* LF-5：LongFormPage 已自管 Key 读取与缺 Key 引导，不再从 App 接收 apiKey/onNeedKey（A 区已改） */}
+        {tab === 'longform' && <LongFormPage />}
+        {tab === 'wizard' && <WizardPage onOpenLongForm={() => setTab('longform')} />}
         {tab === 'ranks' && <RanksPage />}
-        {tab === 'profile' && <ProfilePage apiKey={apiKey} qwenKey={qwenKey} provider={provider} onProviderChange={changeProvider} onKeyChange={refreshKey} glmKey={glmKey} onGlmKeyChange={refreshGlmKey} />}
+        {tab === 'profile' && <ProfilePage apiKey={apiKey} qwenKey={qwenKey} provider={provider} onProviderChange={changeProvider} onKeyChange={refreshKey} />}
       </main>
     </div>
   )
