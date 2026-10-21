@@ -14,14 +14,16 @@
 //
 // benchmark 字段 = 题材 → 基准书形态参照的单一出处（不在别处另设第二张表）。
 // direct: true  = 这本基准书的题材就是本内置题材；缺省 = 仅「同族形态参照」。
-// 无 benchmark 字段 = 六本语料里没有该题材形态的书，或族指向不唯一 → 诚实标为无参照，不硬贴。
-const GENRE_STYLE_TABLE = {
+// 无 benchmark 字段 = 五本语料里没有该题材形态的书，或族指向不唯一 → 诚实标为无参照，不硬贴。
+// A#6：整表 export——WizardPage 第7步体量锚 namespace 探测 worldviews.GENRE_STYLE_TABLE，直接读 chapterWords 作模糊兜底
+//   （chapterWordsFor 精确未命中时，由该页用 g.includes(k) 模糊回退；本表仍是题材章字数单一出处，别处不得另写第二份）。
+export const GENRE_STYLE_TABLE = {
   仙侠: { chapterWords: 10000, avgParaLen: 48, evidence: '章字数 p10·p50·p90 = 5296·9440·17166；段长 39.9·48.7·59.5', benchmark: { genreZh: '仙侠', direct: true } },
   历史: { chapterWords: 4300, avgParaLen: 30, evidence: '' },
   // 🔴【文风层收尾·prometheus 删除的连带处理】恐怖/悬疑/推理 原映射 benchmark.genreZh='蒸汽朋克怪谈'（= preset:prometheus《普罗之主》）。
   //   prometheus 整份档案已删除（合成范例替代逐字原文改造），「蒸汽朋克怪谈」这一 genreZh 在 PRESET_STYLES 里已无对应档案。
   //   故移除这 3 题材的 benchmark 字段 ⟹ benchmarkRefOf 返回 null ⟹ genreSkinOf matched=false ⟹ 回落到默认主导嗓音
-  //   （skinScore 最高者 = preset:perfect 玄幻），与历史/都市/科幻等 8 个未映射题材同路；「实际回落到谁」的留痕由 genreSkinOf/resolveStyleRec 的 note 自动生成。
+  //   （skinScore 最高者 = preset:perfect 玄幻），与历史/都市/科幻等其余 8 个未映射题材同路（连同本 3 题材，全表共 11 个题材无 benchmark）；「实际回落到谁」的留痕由 genreSkinOf/resolveStyleRec 的 note 自动生成。
   //   evidence 里的怪谈形态实测数据保留（供章字数/段长参照，不依赖 benchmark）。
   恐怖: { chapterWords: 4300, avgParaLen: 30, evidence: '怪谈形态：章字数 3304·4295·7505；段长 23.5·28.4·34.0（原基准书 preset:prometheus 已删 → 回落默认主导嗓音）' },
   悬疑: { chapterWords: 4300, avgParaLen: 30, evidence: '同怪谈族（未单独实测）（原基准书 preset:prometheus 已删 → 回落默认主导嗓音）' },
@@ -30,7 +32,7 @@ const GENRE_STYLE_TABLE = {
   修真: { chapterWords: 3200, avgParaLen: 38, evidence: '同玄幻族（未单独实测）', benchmark: { genreZh: '玄幻' } },
   奇幻: { chapterWords: 3200, avgParaLen: 38, evidence: '同玄幻族（未单独实测）', benchmark: { genreZh: '玄幻' } },
   武侠: { chapterWords: 3200, avgParaLen: 38, evidence: '同玄幻族（未单独实测）', benchmark: { genreZh: '玄幻' } },
-  无限流: { chapterWords: 3200, avgParaLen: 30, evidence: '同题材唯一样本被判「不合格」（节选本，实解析 119 章）：章字数 2094·2332·3862 出自该失真样本，不得作实测依据。本档 3200 字 / 段长 30 沿用同族归档默认值（非实测）。', benchmark: { genreZh: '无限流', direct: true } },
+  无限流: { chapterWords: 3200, avgParaLen: 105, evidence: '同题材唯一样本被判「不合格」（节选本，实解析 119 章）：章字数 2094·2332·3862 出自该失真样本，不得作实测依据。章字数 3200 沿用同族归档默认值；段长决策2 改 105（对齐 presetStyles《无限恐怖》paraMedian=105.63 实测，使「绑指纹」与「只选题材无指纹」两条路给出一致的长段落，原 30 与指纹路差约 3.5 倍）。', benchmark: { genreZh: '无限流', direct: true } },
   都市: { chapterWords: 3200, avgParaLen: 30, evidence: '' },
   现实: { chapterWords: 3200, avgParaLen: 30, evidence: '' },
   科幻: { chapterWords: 3200, avgParaLen: 30, evidence: '' },
@@ -44,7 +46,7 @@ const GENRE_STYLE_TABLE = {
 }
 
 // 题材 → 基准书形态参照。认不出的题材（自定义 / null / 脏数据）返回 null，永不抛错。
-// 只负责「映射」这一件事；参照书是否合格由语料档案 profiles.json 判定，不在这里复制一份。
+// 只负责「映射」这一件事；参照书是否合格的实测出处见项目外部报告（仓库内不含 profiles.json），不在这里复制一份。
 export function benchmarkRefOf(genre) {
   const g = String(genre == null ? '' : genre).trim()
   const hit = Object.prototype.hasOwnProperty.call(GENRE_STYLE_TABLE, g) ? GENRE_STYLE_TABLE[g] : null
@@ -52,14 +54,27 @@ export function benchmarkRefOf(genre) {
   return { genre: g, genreZh: hit.benchmark.genreZh, direct: hit.benchmark.direct === true }
 }
 
+// A#6：题材 → 该题材档的每章字数目标（chapterWords），供 WizardPage 第7步体量锚兜底（替代硬编码 PER_CHAPTER_WORDS=2500，
+//   否则仙侠「章均约1万字」被按2500估成约4倍章数、排章体量锚失真）。与 benchmarkRefOf/avgParaLenFor 共用 GENRE_STYLE_TABLE 单一出处。
+// 入参兼容两种形状（以 A 区探测为准）：字符串题材 chapterWordsFor('仙侠')，或对象 chapterWordsFor({ genre })——WizardPage 实际调的是后者。
+// 题材精确未命中 / 脏数据一律返回 undefined（不返 0/NaN），让调用方安全回落到它自己的默认值、不阻断；模糊命中(g.includes)交给 WizardPage 读表兜底那条路径。
+export function chapterWordsFor(arg) {
+  const raw = arg && typeof arg === 'object' ? arg.genre : arg
+  const g = String(raw == null ? '' : raw).trim()
+  if (!g) return undefined
+  const hit = Object.prototype.hasOwnProperty.call(GENRE_STYLE_TABLE, g) ? GENRE_STYLE_TABLE[g] : null
+  const cw = hit ? Number(hit.chapterWords) : NaN
+  return Number.isFinite(cw) && cw > 0 ? cw : undefined
+}
+
 // ==================== 段长数字唯一出处（paraBandFor，任务A bug2 恢复）====================
 // avgParaLen（本书/本题材的平均段长目标）→ 写作端喂给模型的段长带宽 { minPara, maxPara }。
 // 系数与 novel-local worldviews/index.js 逐字一致：下沿 2/3、上沿 4/3（T-paraband-caliber 标定 v2）。
 // 缺字段/非法值一律回退默认档 30（= novel-local DEFAULT_GENRE_STYLE.avgParaLen，也是 GENRE_STYLE_TABLE
-//   里 8 个未映射题材共用的 avgParaLen），不抛错。这是全项目段长数字的唯一出处，别处不得再写第二个数。
-export const PARA_BAND_MIN_RATIO = 2 / 3
-export const PARA_BAND_MAX_RATIO = 4 / 3
-export const PARA_BAND_DEFAULT_AVG_PARA_LEN = 30
+//   里 11 个未映射题材共用的 avgParaLen），不抛错。这是全项目段长数字的唯一出处，别处不得再写第二个数。
+const PARA_BAND_MIN_RATIO = 2 / 3 // B28：仅 paraBandFor 内部用，去 export
+const PARA_BAND_MAX_RATIO = 4 / 3 // B28：仅 paraBandFor 内部用，去 export
+const PARA_BAND_DEFAULT_AVG_PARA_LEN = 30 // B28：仅 paraBandFor 内部用，去 export
 
 export function paraBandFor(avgParaLen) {
   const n = Number(avgParaLen)
@@ -74,20 +89,44 @@ export function paraBandFor(avgParaLen) {
 //   ① book.avgParaLen 显式值（若将来建书/绑书时落了值）；
 //   ② 绑定文风的蒸馏指纹 styleMetrics.paraMedian.mean —— 该书**真实**段长中位数（最准，兼容 styleMetrics 是 metrics 对象或整份 band 两种形状）；
 //   ③ 题材默认档 GENRE_STYLE_TABLE[book.genre].avgParaLen；
-//   ④ 都拿不到 → 返回 undefined，paraBandFor 自动回落默认档 30（不抛错）。
+//   ④ 兜底：book.genre 缺失/未命中时，从 book.genreNote 自由文本里识别题材词（只填了题材说明未选枚举的书也能命中）；
+//   ⑤ 都拿不到 → 返回 undefined，paraBandFor 自动回落默认档 30（不抛错）。
 export function avgParaLenFor(book) {
   const b = book || {}
-  const explicit = Number(b.avgParaLen)
+  // item4：布尔/数组/对象等脏数据先挡在 Number() 之外——Number(true)=1 会伪装成合法段长（→ paraBandFor 得 {8,12}），
+  //   仅接受 number 或非空数字串。（原守卫 Number.isFinite&&>0 挡不住布尔：Number(true)=1 恰好 isFinite 且 >0。）
+  const rawApl = b.avgParaLen
+  const explicit = (typeof rawApl === 'number' || (typeof rawApl === 'string' && rawApl.trim() !== '')) ? Number(rawApl) : NaN
   if (Number.isFinite(explicit) && explicit > 0) return explicit
   const sm = b.styleMetrics || {}
   const metrics = sm.paraMedian ? sm : (sm.metrics || {})
   const pm = metrics.paraMedian
   const pmMean = pm && typeof pm === 'object' ? Number(pm.mean) : Number(pm)
   if (Number.isFinite(pmMean) && pmMean > 0) return Math.round(pmMean)
-  const g = String(b.genre == null ? '' : b.genre).trim()
-  if (g && Object.prototype.hasOwnProperty.call(GENRE_STYLE_TABLE, g)) {
-    const gv = Number(GENRE_STYLE_TABLE[g].avgParaLen)
-    if (Number.isFinite(gv) && gv > 0) return gv
+  const genreAvg = (key) => {
+    const k = String(key == null ? '' : key).trim()
+    if (k && Object.prototype.hasOwnProperty.call(GENRE_STYLE_TABLE, k)) {
+      const v = Number(GENRE_STYLE_TABLE[k].avgParaLen)
+      if (Number.isFinite(v) && v > 0) return v
+    }
+    return null
+  }
+  const byGenre = genreAvg(b.genre)
+  if (byGenre != null) return byGenre
+  // ④ genreNote 兜底：按题材词长度降序匹配（「古代言情」先于「言情」，避免子串误命中），命中即用该题材默认档。
+  //   item3：否定片段里的题材词要跳过——「不要写仙侠、要都市」此前命中仙侠(48)，实际该命中都市(30)。
+  //   判据：题材词首次出现处、同一分句内（前面不隔 、，,。；; 换行）若被「不要/别写/避免/非…」等否定引导，则跳过。
+  //   （coordinator 提的「取 indexOf 最小的命中键」不解决本例：仙侠在都市之前，min-indexOf 仍取仙侠；故用否定前瞻。）
+  const note = String(b.genreNote == null ? '' : b.genreNote)
+  if (note) {
+    const NEG_BEFORE = /(不要|不想|不用|不写|别写|避免|拒绝|排除|非(?!常|洲|凡))[^、，,。；;\n]{0,3}$/
+    for (const k of Object.keys(GENRE_STYLE_TABLE).sort((x, y) => y.length - x.length)) {
+      const idx = note.indexOf(k)
+      if (idx === -1) continue
+      if (NEG_BEFORE.test(note.slice(0, idx))) continue
+      const v = genreAvg(k)
+      if (v != null) return v
+    }
   }
   return undefined
 }

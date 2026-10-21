@@ -1,5 +1,7 @@
 // 文风活簇——从 longform.js 抽出（暗箱流水线废弃处置 A）。
-// 页面层（WizardPage/useLibrary/RevisePage/ContinuePage）真正使用的 longform 部分即此文件。
+// 页面层真正使用的 longform 部分即此文件，均经 longform.js 的 `export * from './style.js'` re-export 间接消费：
+//   WizardPage(distillStyleBand) / useLibrary(distillStyleBand) / RevisePage(resolveStyleRec)。
+//   B29 订正：原消费方列表含 ContinuePage，但续写页已删文风块、实测不 import longform/style（零引用），故移除。
 // longform.js 通过 `export * from './style.js'` re-export，保证既有 import 不断。
 import { PRESET_STYLES } from '../corpus/presetStyles.js'
 import { benchmarkRefOf } from './worldviews/index.js'
@@ -52,16 +54,22 @@ function blendHabits(recs, skin, opts = {}) {
 // 多本文风档案融合成一个混合文风：habits 按来源书配额取，forbidden 跨全体档案并集去重，profile/samples 择一（主导嗓音）。
 // 主导嗓音优先：skin 池优先取 origin==='user' 子集；无用户书时回退全体（预置档案里按 skinScore 择一）。
 export function blendStyles(styleRecs, opts = {}) {
-  const recs = (Array.isArray(styleRecs) ? styleRecs : []).filter((s) => s && (s.profile || (Array.isArray(s.habits) && s.habits.length)))
+  // item1：过滤放宽到 forbidden——一份只有禁用词（无 profile/habits）的档案此前被滤掉，它的 forbidden 进不了并集
+  const recs = (Array.isArray(styleRecs) ? styleRecs : []).filter((s) => s && (s.profile || (Array.isArray(s.habits) && s.habits.length) || (Array.isArray(s.forbidden) && s.forbidden.length)))
   if (!recs.length) return null
-  if (recs.length === 1) return recs[0]
+  if (recs.length === 1) {
+    // item2：返回**浅拷贝**而非入参原引用——单档时 recs[0] 可能就是 PRESET_STYLES 里的对象，直接交出去会被调用方 mutate 污染预置档案；
+    //   顺带补齐 thresholds/skinFrom 归一，使单档与多档返回形状一致。
+    const only = recs[0]
+    return { ...only, thresholds: only.thresholds || metricsToThresholds(only.metrics || null), skinFrom: only.skinFrom || only.bookId || '来源' }
+  }
   // 池内选「皮肤最丰富」的源为主：profile 最长（权重×2）→ tie 取 samples 最多 → tie 取首个（确定性）。
   // 🔴【任务A bug1：显式 skinScore 覆盖】档案若带数值字段 skinScore，直接用它、不再按 profile 文案长度现算。
   //   原因（方案文档 §2.3）：presetStyles 的 profile 曾为「去原书指纹」被改写（用户裁定 feedback-style-profile-no-fingerprint），
   //   profile 字数随之变化，而 skinScore=profile×2+samples段数 会让默认主导嗓音被一次纯文案改写静默改掉
-  //   ——实测狐狸精（女频后宫，profile 558 字→score 1119）反超普罗之主（408 字→819），导致 8 个未映射题材
+  //   ——实测狐狸精（女频后宫，profile 558 字→score 1119）反超普罗之主（408 字→819），导致 11 个未映射题材
   //   （科幻/军事/都市等）+ genre 空路径全被灌女频后宫嗓音。给预置档案写死一个与文案长度解耦的 skinScore，
-  //   恢复改写前的既定排序（普罗之主最高），文案再改也不会漂移默认嗓音。用户蒸馏档无此字段→仍按现算口径。
+  //   恢复改写前的既定排序（prometheus《普罗之主》skinScore 曾最高、现已删 ⟹ 现最高为 preset:perfect 1829，见 presetStyles 文件头排序），文案再改也不会漂移默认嗓音。用户蒸馏档无此字段→仍按现算口径。
   const skinScore = (s) => (typeof s.skinScore === 'number' && Number.isFinite(s.skinScore)
     ? s.skinScore
     : String(s.profile || '').length * 2 + (Array.isArray(s.samples) ? s.samples.filter((x) => typeof x === 'string' && x.trim()).length : 0))
@@ -95,7 +103,7 @@ export function genreSkinOf(genre, presets = PRESET_STYLES) {
   if (!g) return { genre: '', genreZh: '', bookId: '', matched: false, note: '未提供题材（genre 为空串/缺失）⟹ 主导嗓音选择不参与题材映射，走既有默认（skinScore 最高者）' }
   const ref = benchmarkRefOf(g)
   if (!ref || !ref.genreZh) {
-    return { genre: g, genreZh: '', bookId: '', matched: false, note: `本题材「${g}」在 GENRE_STYLE_TABLE 里没有 benchmark.genreZh（= 六本语料里没有该题材形态的书，或族指向不唯一）⟹ 无对应文风档案` }
+    return { genre: g, genreZh: '', bookId: '', matched: false, note: `本题材「${g}」在 GENRE_STYLE_TABLE 里没有 benchmark.genreZh（= 五本语料里没有该题材形态的书，或族指向不唯一）⟹ 无对应文风档案` }
   }
   const hit = list.find((s) => s && s.genreZh === ref.genreZh)
   if (!hit || !hit.bookId) {
@@ -105,7 +113,7 @@ export function genreSkinOf(genre, presets = PRESET_STYLES) {
 }
 
 // 统一解析「当前生效的文风档案」——把散落的 libStyles.find(styleBookId) 收敛成一处。
-//  · styleBookId 命中某档案 → 该书主导 skin，habits 取 3 条排最前，其余各 1 条；此分支刻意完全不看 genre。
+//  · styleBookId 命中某档案 → 该书主导 skin，habits 取 HABIT_SKIN_QUOTA(3) 条排最前，其余每本按 quota 条（quota=ceil((HABIT_BUDGET−HABIT_SKIN_QUOTA)/其余本数)；5 本预置时其余各 2 条、合计 11 条）；此分支刻意完全不看 genre。
 //  · styleBookId==='' 或未命中 → 默认预置聚合基调；若传了 genre 且能映射到某本预置档案、且无用户蒸馏档案，那本 preset 顶到主导嗓音位。
 // 第三参 genre 缺省 ''；传了就在返回值上多挂一个 genreSkin 留痕对象。
 export function resolveStyleRec(styleBookId, libStyles, genre = '') {
@@ -150,7 +158,8 @@ export function dialogueVerbScan(text, opts = {}) {
 export const STYLE_FUNC_WORDS = ['的', '了', '着', '是', '在', '而', '却', '便', '都', '就', '也', '还', '把', '被', '让', '向', '从', '到']
 // 参与指纹聚合的数值维度（computeStyleMetrics 的键子集，排除 chars 这类规模量）
 export const STYLE_METRIC_KEYS = ['sentMean', 'sentStd', 'longPct', 'paraMedian', 'ultrashortPct', 'comma', 'exclaim', 'question', 'ellipsis', 'emdash', 'shuoRatio', 'daoRatio', 'runOnMax', 'funcWordRatio']
-// 各维度中文名（供 UI 漂移面板展示，与 STYLE_METRIC_KEYS 一一对应，单一事实源）
+// 各维度中文名（与 STYLE_METRIC_KEYS 一一对应，单一事实源）。
+// item8(档3)：当前**零消费方**——原消费方 UI 漂移面板(styleDriftScan)已随暗箱流水线删除；与仍被 computeStyleMetrics 使用的 STYLE_METRIC_KEYS 配对，作为将来恢复量化校验的预留保留（不删，删了会破坏 KEYS↔LABELS 一一映射）。
 export const STYLE_METRIC_LABELS = { sentMean: '平均句长', sentStd: '句长波动', longPct: '长句占比', paraMedian: '段落中位长', ultrashortPct: '超短段占比', comma: '逗号密度', exclaim: '叹号密度', question: '问号密度', ellipsis: '省略号密度', emdash: '破折号密度', shuoRatio: '「说」引导密度', daoRatio: '「道」引导密度', runOnMax: '最长无停顿串', funcWordRatio: '虚词占比' }
 
 // 单份文本的多维文体计量（点值）。空/纯空白安全返回全零，绝不抛异常。

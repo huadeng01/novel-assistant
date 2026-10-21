@@ -25,7 +25,7 @@ export default function ClarifyModal({ open, questions = [], title = '补全逻�
 
   return (
     // L28：已答过题(answeredCount>0)时遮罩不响应点击，避免误点弹窗外丢弃全部答案(重答需重新生成问题=一次 AI 调用)；× 与「取消」按钮仍可关闭
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" onClick={answeredCount > 0 ? undefined : onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" onClick={answeredCount > 0 ? undefined : onClose} role="dialog" aria-modal="true" aria-label="补全问题">
       <div
         className="flex max-h-[88vh] w-[min(640px,94vw)] flex-col overflow-hidden rounded-2xl bg-paper shadow-2xl"
         onClick={(e) => e.stopPropagation()}

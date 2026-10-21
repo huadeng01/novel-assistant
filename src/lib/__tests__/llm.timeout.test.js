@@ -189,13 +189,9 @@ describe('超时预算与错误构造（纯函数）', () => {
     expect(llmTimeoutError({ by: 'idle', idleMs: 1000, attempts: 1 }).name).not.toBe('AbortError')
   })
 
-  it('LLM_TIMEOUT 预设自洽：空闲阈值 < 总时长兜底，场景级比整章级更紧', () => {
+  it('LLM_TIMEOUT 预设自洽：空闲阈值 < 总时长兜底（SCENE_*/CHAPTER_TOTAL/REVIEW_JSON 四个死预设已删，只剩流式/JSON 默认档）', () => {
     expect(LLM_TIMEOUT.STREAM_IDLE).toBe(300_000)
     expect(LLM_TIMEOUT.JSON).toBe(120_000)
     expect(LLM_TIMEOUT.STREAM_IDLE).toBeLessThan(LLM_TIMEOUT.STREAM_TOTAL)
-    expect(LLM_TIMEOUT.SCENE_IDLE).toBeLessThanOrEqual(LLM_TIMEOUT.STREAM_IDLE)
-    expect(LLM_TIMEOUT.SCENE_TOTAL).toBeLessThan(LLM_TIMEOUT.CHAPTER_TOTAL)
-    expect(LLM_TIMEOUT.CHAPTER_TOTAL).toBeLessThan(LLM_TIMEOUT.STREAM_TOTAL)
-    expect(LLM_TIMEOUT.REVIEW_JSON).toBeGreaterThan(LLM_TIMEOUT.JSON)
   })
 })

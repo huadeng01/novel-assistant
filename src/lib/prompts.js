@@ -41,6 +41,7 @@ export function styleAnalyzeMessages(samples) {
 //   只在扫描时用、不进提示词——否则禁词表会变成一份作者读不完的噪音清单。
 //
 // ⚠ 收词口径（六本真书每万字频次实测，出处 _PROMPT_AUDIT_R18.md 的 5.2 表；复现见该文件「临时脚本」节）：
+//   注：此「六本」指禁词表**标定当时**的语料（含已删的 prometheus《普罗之主》），下方逐本频次是当时的实测数据、不随档案删减改写（改数字会与列出的 6 个频次自相矛盾）；现预置语料为五本。
 //   只收「AI 腔高辨识度指纹」，不收真书高频词。两处按此口径修正：
 //   · 「瞬间」已移出禁词表：真书实测 0.44~5.26 次/万字（6 本里 5 本 >1.4；亡灵 5.26、狐狸精 4.81、无限 3.66、
 //     完美 1.73、剑来 1.40、普罗 0.44），一章 3319 字约命中 17 次 ⟹ 禁它等于禁掉一个正常汉语时间副词，
@@ -48,7 +49,7 @@ export function styleAnalyzeMessages(samples) {
 //     所以移除对检测侧零影响（纯提示词侧松绑）。
 //   · 「不由」→「不由得」：此前提示词禁「不由」而检测器只认「不由得」，两侧口径分叉。统一取「不由得」
 //     （固定副词短语，AI 腔指纹明确；「不由」单独出现多属「不由自主」等正常搭配，禁它误伤更高）。
-export const AI_FLAVOR_BANNED_WORDS = [
+const AI_FLAVOR_BANNED_WORDS = [ // B28：仅下方 system 提示词内部拼接用，去 export
   '宛如', '犹如', '恰似', '仿佛画卷', '空气仿佛凝固', '如诗如画', '意味深长',
   '嘴角勾起', '嘴角扬起', '眸光微闪', '眼神闪过', '眼底闪过', '眸中闪过',
   '不禁', '不由得', '心中暗想', '心中五味杂陈',
@@ -80,28 +81,30 @@ export const NO_AI_FLAVOR_RULE = `【去除 AI 味】请像一位真实的作者
 // （逗号 6.68/百字 vs 原著 7.6、run-on 0、均句长 39.8 vs 40.2）；而旧版把「长句/连缀/无引号」也一并补上纪律后过度矫正：
 // 均句长掉到 21.9（原著 40.2）、长句% 13.1（原著 38.6）、感叹号 15→1、独立判官 9→4/16——把作品推向了不像原著的方向。
 // 不改写与标点无关的习惯，幂等（补过一次的 habit 因已含「顿号」不会重补）。
-const HABIT_DROP_RE = /(不用标点|不加标点|省略标点|无标点|不要标点|省掉标点|不带标点|不需标点)/
+// item17：verb×object 组合补全——此前只认「(不用|不加|省略|无|不要|省掉|不带|不需)标点」，漏掉「不用逗号」(object 缺逗号) 与「少用标点」(verb 缺少用/少加/减少)；
+//   两类都会让模型少用标点、产出 run-on 长串却不被剔除。改成 (verb)(object) 组合、object 含逗号（顿号不纳入：不用顿号多以逗号替代，不致 run-on，纳入反而误伤正当习惯）。
+const HABIT_DROP_RE = /(不用|不加|省略|省掉|不带|不需|不要|无|少用|少加|减少)(标点|逗号)/
 // DROP 的**否定式豁免**（L33 项3）：上面那条只认字面、不分极性，于是「…不连成无标点字串」这种**要求用标点**
-// 的 habit 被整条剔除。实测两条真实损失：玄幻路径 preset:perfect habits[2]（「密集使用四字短语与排比堆叠气势…
-// 不连成无标点字串」= 辰东的四字格招牌动作，而 TEMPLATE_RULES（已随暗箱流水线删除）的 habit-landing (a) 正等着清单里有「具象意象/
-// 动作罗列」类习惯才落地）、默认路径 preset:prometheus habits[0]（= resolveStyleRec('',[]) 的 rec.habits[0]）；
-// 两条路径到达模型都是 8 → 7 条。豁免口径刻意窄：必须是「否定词 + 写成/连成 + ≤4 字 + 无标点/无分隔」这个形状，
+// 的 habit 被整条剔除。历史实测曾有两条真实损失（玄幻路径 preset:perfect 与默认路径 preset:prometheus 各一条含「不连成无标点字串」的 habits）。
+//   ⚠ 订正(M-K4)：那两条 habits 已随档3「每本 habits 精简到 3 条」被改写、prometheus 整份档案亦已删除 ⟹ 原举的「perfect habits[2] 四字短语排比」「到达模型 8→7 条」等具体字面/条数均已过时；
+//   此处只保留**豁免机制本身**的 why：DROP 只剔「肯定式省标点」，否定式（实为要求用标点）必须豁免。
+// 豁免口径刻意窄：必须是「否定词 + 写成/连成 + ≤4 字 + 无标点/无分隔」这个形状，
 // ⟹「不用标点」「省略标点」这类**肯定式**指令不含「写成/连成」，一条都不会被豁免，DROP 原有威力一字不减。
-const HABIT_DROP_NEG_RE = /(不|严禁|不得|不要)(写成|连成|写成一片|连成一片)[^。；]{0,4}(无标点|无分隔)/
+const HABIT_DROP_NEG_RE = /(不|严禁|不得|不要)(写成|连成|写成一片|连成一片)[^。；]{0,4}(无标点|无分隔|无逗号)/
 const HABIT_PATCH_RE = /(排比|罗列|列举|一气呵成|连成一片|五个以上|四个以上|三个以上)/
 const HABIT_PATCH_TAIL = '（项与项之间用顿号或逗号分隔，不得连成无分隔的字串）'
 // ④（审计 R18-B2 的残留缺口）直角引号口径的 habit **就地改写**成中文双引号：
-// 病因 —— utils.QUOTE_PAIRS_DOUBLE 只认弯双引号与直双引号（窄口径是刻意的：直角引号在详纲与正文里大量用于
+// 病因 —— 原 utils.QUOTE_PAIRS_DOUBLE（已随 utils M12 删除）只认弯双引号与直双引号（窄口径是刻意的：直角引号在详纲与正文里大量用于
 //   专名、术语、系统面板、书名，纳入判据等于让专名引用也能把整章判失败），而规划侧提示词要求对白一律用
 //   中文双引号 ⟹ 只要 habit 让模型用直角引号写台词，那句台词就落在原 scriptedDialogueMissing（hard blocker，已随暗箱流水线删除）
 //   的视野之外，「详纲写好的台词有没有兑现」静默假阴。
-// 为什么拦在这里：预置 6 本档案的该字面量已在 presetStyles.js 就地改过（B2 那一路），但用户自己蒸馏的档案
-//   仍会把「直角引号」写进 habits，并随 longform.blendHabits 的配额进注入清单（实测 resolveStyleRec('',[该档案])
+// 为什么拦在这里：预置 5 本档案的该字面量已在 presetStyles.js 就地改过（B2 那一路），但用户自己蒸馏的档案
+//   仍会把「直角引号」写进 habits，并随 style.js blendHabits 的配额进注入清单（实测 resolveStyleRec('',[该档案])
 //   → 注入 7 条里含 1 条）。净化只在注入端这个 choke point 做一次，存量档案与新蒸馏档案一并生效。
 // 触发口径刻意窄（只认「把直角引号当对白口径写」的 habit）：① 出现「直角引号」这个词；② 空引号对；
 //   ③ 开引号紧贴对白类关键词（中间不跨逗号/句号/分号/顿号/括号，至多 4 字）。
 //   ⟹ 预置档案里「提示语从简（「道」「笑道」或直接省略）」这种**引用词语**的直角引号不在射程内
-//   （它前面隔着逗号与全角括号，且引号内非空），不会被误伤：6 本预置档案 habits 逐条不变，见 a1StyleBlend。
+//   （它前面隔着逗号与全角括号，且引号内非空），不会被误伤：5 本预置档案 habits 逐条不变（原守门测试 a1StyleBlend 已随暗箱流水线删除）。
 // 与前三条的差别：DROP 整条剔除、SHORTEN/PATCH 加尾注，本条改的是字符本身；改写后**不 continue**，
 //   仍继续走 SHORTEN/PATCH 判定（同一条 habit 可能既要改引号又要加尾注）。幂等：改写完的字面里已无触发词。
 const HABIT_QUOTE_RE = /(直角引号|「」|(?:对白|台词|对话|心声|独白|引号)[^，。；、（）]{0,4}「)/
@@ -155,15 +158,15 @@ export function sanitizeHabits(habits) {
 //   原 styleBlockOf（正文端专用，块一个不少；已删）与 styleSkinBlockOf（其余成文路径用，现存活）两处**内插同一份**，
 //   不写第二份字面量（COMMON §4.8：两份手写副本必然漂移）。styleBlockOf 的渲染结果曾与改造前逐字节相同：
 //   块的顺序、条件、措辞、换行一律未动（本段代码由 scripts/p4d_shared/patch_styleblock.mjs 从旧实现程序化
-//   取出后重排，字面量没有手抄），钉在 src/lib/__tests__/p4dSharedCut.test.js。
+//   取出后重排，字面量没有手抄）。原钉在 src/lib/__tests__/p4dSharedCut.test.js（已随暗箱流水线删除）；styleBlockOf 本体亦删，现仅 styleSkinBlockOf 一处内插、只被 versionMessages 消费。
 // M12：VERBATIM_LEAK_MIN_LEN（原「连续 N 字与范例雷同即视为抄袭」的门限）已删除——检测器 verbatimLeakScan 早随暗箱流水线删除，
 //   styleProfileBlock 的【防原文】句在方案 E 改轻量版后也不再引用它 ⟹ 零消费方的死符号。（samples 现为合成范例，防照抄真书的门已无意义。）
 const styleProfileBlock = (style) => (style ? `\n\n【作者文风档案 — 这是本次写作的笔触标杆，必须逐条落实到字里行间】\n${style}\n落笔要求：主动模仿上述句式长短、对话密度与提示语用法、段落节奏、描写取舍与用词修辞，让成文的“笔触感”与档案一致；但内容、人物、情节必须完全原创，只学“怎么写”，不抄“写什么”。【度约束】模仿笔触不等于牺牲叙事节奏与张力：长短句必须错落，动作戏用短句，严禁为形似而堆砌长句、生僻字或文白夹杂导致节奏拖沓；宁可形似七分而节奏流畅，不要形似十分而神散。【标点纪律·硬要求】原著的长句之所以能读，靠的是逗号/顿号/分号把小句切开，而不是不用标点：【长句照写】句长节奏一律以本书文风档案蒸馏出的语言指纹为准，不要为了“安全”而把全书改写成一片短句；档案里写明长句占比高的，铺陈背景与心理处就照它本来的节奏写长句，动作与对话处用短句，两者必须交错；但长句内部必须逗号密集，任何相邻标点之间不得超过 40 字；若本书文风确有排比或罗列同类项的笔法，项与项之间必须用顿号或逗号分隔，严禁写成无分隔的字串（本书风格不含排比时不必强造）；内心独白/心声同样适用本纪律，不得因为不用引号就连标点一并省掉。【对白引号·硬要求】凡角色开口说出的话（有声对白）必须用中文双引号“”完整包裹，严禁把说出口的话不加引号直接混进叙述；但角色没说出口的内心独白/心声沿用原著笔法，可以不用引号，按其原有的引出方式或直接融入叙事段落——区分标准只有一个：说给别人听的必须加引号，只在心里想的可不加。本条只规范引号有无，绝不改变句长、逗号密度或任何其他文风特征（防止重蹈旧版把引号与长句纪律捆绑后的过度矫正）。【防原文】文风范例仅供内化笔触，严禁在正文照抄其原句、人物、专名或情节。` : '')
   // 无条件场景级落笔底线（不依赖是否绑定文风书）：未绑文风书时上面【作者文风档案】整块不输出，
   // 模型堆感官形容的默认倾向就毫无对抗力（《慈航市》第一幕 ch2/ch3 实测：对话往返被连续多段环境/感官描写冲散）。
-// 🔴 其中「对白段的主体是台词」那一段（源码口径 227 字）抽成常量单独内插：它是 COMMON §3.4 红线点名的
-//   而 l44DialogueParaBody.test.js 把它的设计意图登记为「所有成文路径的唯一入口、无条件渲染」⟹
-//   8 个被绕开的层照样拿到它（少省 227 字是刻意的代价，不是漏改）。
+// 🔴 其中「对白段的主体是台词」那一段（源码口径 227 字）抽成常量单独内插：它是 COMMON §3.4 红线点名的成员，无条件渲染。
+//   ⚠ 现状（第11轮更正）：原守门测试 l44DialogueParaBody.test.js、以及「所有成文路径唯一入口 / 8 个被绕开的层」这套多路径架构，均已随暗箱流水线删除；
+//   现 DIALOGUE_PARA_BODY_RULE 只经 styleSkinBlockOf 注入，而 styleSkinBlockOf 仅 versionMessages（改写四版）1 条成文路径消费（少省 227 字仍是刻意代价，不是漏改）。
 const DIALOGUE_PARA_BODY_RULE = `【对白段的主体是台词】带引号的对白段，这一段的主体必须是引号里那句台词本身：说话归因只写一个简短点名（形如“某某道”，写在引号前或引号后都可以），随之而来的动作、神态与即时反应至多一两个短句；要写透的动作、神态、环境与心理一律另起一段成独立的叙述段，不得挂在台词前后把这一段撑长——一段只装一名说话人这一轮说的话，装不下的另起一段。对白段要写足，靠的是把这一轮台词本身说够、说到位，不是靠往这一段里堆叙述；严禁为了把对白段写长而把不相干的动作神态并进来。`
 
 const habitsBlockOf = (habits) => {
@@ -174,7 +177,8 @@ const habitsBlockOf = (habits) => {
 const samplesBlockOf = (samples) => (samples && samples.length ? `\n\n【文风范例（few-shot：先内化其句长节奏、对话与描写的取舍、标点习惯，再用你自己的原创内容复刻同样的笔触；严禁照抄其内容、人物、专名与情节）】\n` + samples.map((s) => `【范例】${s}`).join('\n') : '')
 const forbiddenBlockOf = (forbidden) => (forbidden && forbidden.length ? `\n\n【自定义禁用词，严禁出现】\n${forbidden.join('、')}` : '')
 
-// 轻量文风注入（路 D）：其余 8 个成文路径（修订 / 段级 / 试写 / 润色 / 四版 / 续写×2 / 想法级）用这一份。
+// 轻量文风注入（路 D）：原设计供其余 8 个成文路径（修订 / 段级 / 试写 / 润色 / 四版 / 续写×2 / 想法级）共用这一份。
+//   ⚠ 现状（第11轮更正）：暗箱流水线删除后——续写×2 / 修订 / 想法级已删 styleSkinBlockOf、段级 / 试写 / 润色随暗箱删除，现仅 versionMessages（四版）1 条路径消费这一份。
 // 刻意**不带**的三件，以及为什么：
 //   ①【反模板感规则】块 —— 本路要治的就是「拿规则当材料」：规则只在正文端生效（那里有详纲、场景清单、
 //     段长带宽与自检闭环兜着），改字/续写/试写这些短路径照着档案与清单写就够，再背一份规则只会稀释权重
@@ -188,6 +192,8 @@ const forbiddenBlockOf = (forbidden) => (forbidden && forbidden.length ? `\n\n�
 // 保留「对白段的主体是台词」那一段的理由见上面 DIALOGUE_PARA_BODY_RULE 那段注释（红线成员，不从任何成文路径摘掉）。
 // 保留【自定义禁用词】与【文风范例】：它们是**数据驱动**的（用户在书库里设的禁用词、蒸馏时留存的真书样本），
 //   为空即 0 字 ⟹ 对骸架与每次调用口径的字数收益零影响，而摘掉它们等于让润色/续写/修订端不再遵守作者设的禁用词。
+// ⚠⚠ 现状更正（第11轮）：下面「路 E 件2」整段关于「试写 / 8→7 个成文路径 / 试写回归 styleBlockOf / segmentRewriteMessages·chapterRewriteMessages 清理债」的论证，
+//   其对象均已随暗箱流水线物理删除；现 styleSkinBlockOf 仅 versionMessages 1 条成文路径消费。下文按旧裁定（COMMON §4.7 原文一字不删）作为历史设计记录保留，其中数字与符号名不代表现状。
 // 🔴 提示词重写第4组 · 路 E（件2）· 监督方裁定②：上面那段反向设计注释**原文一字不删**（COMMON §4.7），
 //   但其中「8 个成文路径」与清单里的「试写」两项已被本批更正 ⟹ 现在是 **7 个**，试写档回归 styleBlockOf（已随暗箱流水线删除）全量注入。
 //   逐字引用被推翻的那一句（上面第 ① 条）：「【反模板感规则】块 —— 本路要治的就是『拿规则当材料』：规则只在
@@ -271,10 +277,13 @@ export function sampleNovel(content, segments = 7, perLength = 2500) {
     cur += (cur ? '\n' : '') + p
   }
   if (cur) chunks.push(cur)
-  if (chunks.length <= segments) return chunks
+  // item18：段数下限钳到 2——segments<=1 时 step=(n-1)/(segments-1) 除零得 Infinity，i*step 出 NaN，
+  //   idx 混入 NaN → 返回数组含 undefined（下游拼成「【片段N】undefined」）。钳到 2 至少给首+尾两块，与「强制含首尾」语义一致。
+  const seg = Math.max(2, segments)
+  if (chunks.length <= seg) return chunks
   const idx = new Set([0, chunks.length - 1])
-  const step = (chunks.length - 1) / (segments - 1)
-  for (let i = 0; i < segments; i++) idx.add(Math.round(i * step))
+  const step = (chunks.length - 1) / (seg - 1)
+  for (let i = 0; i < seg; i++) idx.add(Math.round(i * step))
   return [...idx].sort((a, b) => a - b).map((i) => chunks[i])
 }
 
@@ -317,37 +326,47 @@ export function analyzeMessages({ text }) {
   ]
 }
 
+// 资产分析提示词里允许 AI 写的资产类型词（七类）。单一出处：【新资产】的类型列、【资产流转】的资产类型列都用这一份行文，
+//   parseAssets.parseAnalyze 也 import 它来识别「资产类型」列 ⟹ 改词表两侧自动同步，不靠注释维系一致。
+//   选词口径：全部能被 assets.js typeKeyOf 归一到 7 个英文 key（灵兽→beast、群像→group、功法→skill…）。
+export const ASSET_TYPE_WORDS = ['人物', '群像', '势力', '地点', '道具', '功法', '灵兽']
+
 // 资产库分析（长篇页「结算本章状态」+ 续写页「分析原文→资产」共用）：对照已建档名册读本章原文，
 //   产出四段（+可选伏笔推进）｜分列纯文本，交给 parseAnalyze 解析，再由页面做「预览勾选→落库」。
 // 🔴 红线（用户已裁定）：AI 只做**提取**，采纳与否由用户勾选，系统不判断对错、不拦截、不打分
 //   （区别于已删的暗箱 settlement.scale / foreshadowCanonGate —— 那些是自动打分与自动拦截，本提示词一个都没有）。
-// 契约签名（A/C 接线依赖，勿改）：analyzeAssetsMessages({ roster, source, chapterNo }) → messages[]
+// 契约签名（A/C 接线依赖）：analyzeAssetsMessages({ roster, source, chapterNo, unit?, chapterLine? }) → messages[]
 //   roster：已建档资产名册，可传渲染好的字符串，或传 [{name,type,detail}] 数组（本函数内部渲染成名册文本）。
-//   source：本章原文；chapterNo：当前章号（用于「生效章/章号」列的参照）。
+//   source：本章/本段原文；chapterNo：当前章号（用于「生效章/章号」列的参照）。
+//   item35（统筹裁定·参数化，不硬改「本段」）：unit（默认 '章'）+ chapterLine（默认「【当前章号】第 N 章」）两个**可选**入参，
+//     让同一提示词对两种调用都成立——长篇页「结算本章状态」分析真·本章，用默认值（unit='章'，叙述措辞与位置行逐字不变）；
+//     续写页「分析原文→资产」分析的是整本/粘贴原文的切片（非按章），传 unit='段'（叙述措辞变「本段原文」）+ chapterLine 说明分段范围，
+//     不再对续写页谎称「本章 / 第 0 章」。⚠ 只参数化**叙述性**「本章」；输出列名「透出章/生效章/章号」是 parseAnalyze 的解析锚，保持不变。
 // ⚠ ASSET_ANALYZE_SYSTEM 定义在函数体内（不是模块级 const）：它内插 LANG_RULE，而 LANG_RULE 声明在本文件末尾，
 //   模块级提前求值会触发 TDZ；放函数体内则调用时 LANG_RULE 早已初始化。
-export function analyzeAssetsMessages({ roster, source, chapterNo }) {
+export function analyzeAssetsMessages({ roster, source, chapterNo, unit = '章', chapterLine }) {
   const rosterText = Array.isArray(roster)
     ? roster.filter((a) => a && a.name).map((a) => `${a.name}(${a.type || ''})：${String(a.detail || '').slice(0, 60)}`).join('\n')
     : String(roster || '')
-  const ASSET_ANALYZE_SYSTEM = `你是一位小说资产管理员。下面给你一份【已建档资产名册】和【本章原文】，请对照名册、只从本章原文里提取资产与状态的变化，供作者勾选确认后再入库。
+  const ASSET_ANALYZE_SYSTEM = `你是一位小说资产管理员。下面给你一份【已建档资产名册】和【本${unit}原文】，请对照名册、只从本${unit}原文里提取资产与状态的变化，供作者勾选确认后再入库。
 【铁律】
-1. 只提取本章原文**明确写到、已确立**的事实；推测、暗示、可能性一律不写。原文没提到的资产不要凭空新增。
+1. 只提取本${unit}原文**明确写到、已确立**的事实；推测、暗示、可能性一律不写。原文没提到的资产不要凭空新增。
 2. 你只负责「提取」，不负责「判断对错」：不要评价剧情是否合理、不要指出前后矛盾、不要给修改建议、不要打分。
-3. 资产名一律用名册里的准确名字（便于系统匹配）；名册里没有的、本章新出现的才放进【新资产】。
+3. 资产名一律用名册里的准确名字（便于系统匹配）；名册里没有的、本${unit}新出现的才放进【新资产】。
 4. 全程口语化、直白：不要输出 JSON、不要字段名、不要英文标签（如 injured / gain），状态词一律用中文人话（如「受伤」「金丹中期」「在青冥山」「已死亡」）。
-5. ${LANG_RULE}
-【输出格式】严格按下面五段输出，每行用竖线｜分隔各列；某段本章没有内容，就在该段标题下单独写一行「无」：
-【已有资产更新】资产名｜本章更新内容一句话｜新状态（活跃/死亡/毁坏/隐藏/升迁 等人话词）
-【新资产】类型（人物/群像/势力/地点/道具）｜名字｜描述一句话｜透出章（数字：读者从第几章起可知道它；不确定填 0）
-【状态变更】资产名｜维度（生理/修为/位置/持有/剧情，五选一）｜新状态词｜说明一句话｜生效章（数字）
-【资产流转】人物名｜获得/失去/损坏/消耗（四选一）｜资产名｜章号（数字）
+5. 每个资产都标出它属于哪一类：${ASSET_TYPE_WORDS.join('/')}。【新资产】与【资产流转】两段都要带上这一类。
+6. ${LANG_RULE}
+【输出格式】严格按下面五段输出，每行用竖线｜分隔各列；某段本${unit}没有内容，就在该段标题下单独写一行「无」：
+【已有资产更新】资产名｜本${unit}更新内容一句话｜新状态（活跃/死亡/毁坏/隐藏/升迁 等人话词）
+【新资产】类型（${ASSET_TYPE_WORDS.join('/')}）｜名字｜描述一句话｜透出章（数字：读者从第几章起可知道它；不确定填 0）
+【状态变更】资产名｜维度（生理/修为/位置/心理/身份社会/剧情，六选一；「得到或失去某件道具」不写这里、改用下面的【资产流转】段）｜新状态词｜说明一句话｜生效章（数字）
+【资产流转】人物名｜获得/失去/损坏/消耗（四选一）｜资产名｜章号（数字）｜资产类型（${ASSET_TYPE_WORDS.join('/')}，写这条流转里那个资产自己属于哪一类）
 【伏笔推进】伏笔名｜提及/推进/回收/推后（四选一）｜说明一句话｜章号（数字）
-【维度口径】生理＝伤病死残等身体状态；修为＝境界/突破/闭关/走火入魔等；位置＝现在何处/移动/失踪/被囚；持有＝得到或失去某件道具；剧情＝登场/退场/秘密曝光等叙事节点。
-【伏笔纪律】只有本章**回答或推翻**了某伏笔才写「回收」；只是又提了一嘴写「提及」或「推进」；不要因为「本章没提到」就推断它被废弃。`
+【维度口径】生理＝伤病死残等身体状态；修为＝境界/突破/闭关/走火入魔等；位置＝现在何处/移动/失踪/被囚；心理＝愤怒/恐惧/绝望/顿悟等情绪；身份社会＝身份地位/归属/升迁/被通缉/婚配等；剧情＝登场/退场/秘密曝光等叙事节点。（得到或失去某件道具属【资产流转】，不写进状态变更）
+【伏笔纪律】只有本${unit}**回答或推翻**了某伏笔才写「回收」；只是又提了一嘴写「提及」或「推进」；不要因为「本${unit}没提到」就推断它被废弃。`
   return [
     { role: 'system', content: ASSET_ANALYZE_SYSTEM },
-    { role: 'user', content: `【当前章号】第 ${Number(chapterNo) || 0} 章\n\n【已建档资产名册】\n${rosterText || '（暂无已建档资产）'}\n\n【本章原文】\n${String(source || '')}\n\n请对照名册，只从本章原文提取上面五段（没有内容的段写「无」）。` },
+    { role: 'user', content: `${chapterLine || `【当前章号】第 ${Number(chapterNo) || 0} 章`}\n\n【已建档资产名册】\n${rosterText || '（暂无已建档资产）'}\n\n【本${unit}原文】\n${String(source || '')}\n\n请对照名册，只从本${unit}原文提取上面五段（没有内容的段写「无」）。` },
   ]
 }
 
@@ -360,6 +379,10 @@ export const CONTINUE_ANGLES = [
   { title: '版本四', temp: 0.9, desc: '更大胆地发挥，探索剧情可能的不同处理方式，确保与其他三个版本在叙述和走向上有明显区别。' },
 ]
 
+// item19：续写目标字数单一出处——continueSystem / followupSystem 的规则6此前各手抄一份「约 1500 字」，
+//   改一处漏一处会让「自定义续写」与「探索后续」两条路径的长度要求分叉。
+const CONTINUE_TARGET_WORDS = 1500
+
 function continueSystem(angle) {
   return `你是一位职业小说作者。请根据用户提供的原文与设定，以「${angle.title}」的要求续写接下来的内容。
 【本版本要求】${angle.desc}
@@ -369,7 +392,7 @@ function continueSystem(angle) {
 3. 保持原文的叙事视角、人称和文风。
 4. 只使用用户提供的世界观、人物卡和大纲中出现的设定与人物；用户未提供时只基于原文已出现的人物和设定；人物卡里用户补充的设定，只要与原文结尾一致即视为既定事实自然纳入（如人物卡写明某角色是「皇子」就按此设定走）。
 5. 四个版本内容必须各不相同，本版本要在叙述方式、节奏或细节处理上与其他版本拉开差异。
-6. 续写长度约 1500 字。
+6. 续写长度约 ${CONTINUE_TARGET_WORDS} 字。
 7. 直接输出续写正文，输出内容只有正文本身。`
 }
 
@@ -394,9 +417,9 @@ export function summarizeMessages({ text }) {
 
 // 续写页文风策略（方案 E · 续写删文风块）：续写起点就是用户提供的原文，原文结尾本身即最好的文风范例，
 //   故续写不再注入蒸馏文风档案块（styleSkinBlockOf 的 profile/habits），改为一句「参照原文风格续写」。
-//   style/habits/forbidden/samples 四个入参保留为**可选**（向后兼容：ContinuePage 现仍会传，C 下一波删其文风 UI 后即不传），
-//   传入也一律忽略、不注入文风块。改写(versionMessages)/探索后续(followupMessages)/纳入改写(incorporateReviseMessages)
-//   三条路径仍各自保留 styleSkinBlockOf —— 本条只改续写这一路。
+//   style/habits/samples 三个入参保留为**可选且忽略**（向后兼容：ContinuePage 现仍会传，C 删其文风 UI 后即不传）；
+//   forbidden（用户自定义禁用词）仍**消费**（item11）——forbiddenBlockOf 数据驱动、空即 0 字，不违方案 E 删文风块初衷。
+//   探索后续(followupMessages)/纳入改写(incorporateReviseMessages) 同此策略（均已删 styleSkinBlockOf、保留 forbiddenBlockOf）；仅改写(versionMessages)仍注入文风档案块。
 const CONTINUE_STYLE_HINT = '\n\n【文风】参照上方原文（尤其结尾段落）的行文风格、句式节奏、用词习惯与叙事笔触续写，保持笔触前后一致；原文本身就是最好的文风范例，不另附文风档案。'
 export function continueMessages({ text, summary, world, characters, outline, timeline, style, habits, forbidden, samples, instruction, index }) {
   const angle = CONTINUE_ANGLES[index] || CONTINUE_ANGLES[0]
@@ -416,7 +439,7 @@ export function continueMessages({ text, summary, world, characters, outline, ti
   }
   const bg = ctx.trim()
   return [
-    { role: 'system', content: continueSystem(angle) + NO_AI_FLAVOR_RULE + CONTINUE_STYLE_HINT },
+    { role: 'system', content: continueSystem(angle) + NO_AI_FLAVOR_RULE + CONTINUE_STYLE_HINT + forbiddenBlockOf(forbidden) },
     { role: 'user', content: `${bg ? `${bg}\n\n` : ''}以下是小说原文（续写起点只有一个：这段原文的最后一句）：\n\n${text}\n\n请以「${angle.title}」的要求，紧接上面原文的结尾续写。` },
   ]
 }
@@ -440,7 +463,7 @@ function followupSystem(angle) {
 3. 保持原文的世界观、人物性格、叙事视角和文风一致。
 4. 本版本必须在剧情走向、事件发展或人物命运上与其他三个版本有本质区别，不能只是叙述方式或措辞不同。
 5. 以原文和【人物卡】等背景资料为准，不要凭空捏造新人物或全新世界观；可以基于已有伏笔和人物关系合理发展。人物卡补充的设定只要不与原文矛盾即视为既定事实，自然纳入后续。
-6. 续写长度约 1500 字。
+6. 续写长度约 ${CONTINUE_TARGET_WORDS} 字。
 7. 直接输出续写正文，输出内容只有正文本身。`
 }
 
@@ -460,7 +483,7 @@ export function followupMessages({ text, summary, world, characters, outline, ti
   }
   const bg = ctx.trim()
   return [
-    { role: 'system', content: followupSystem(angle) + NO_AI_FLAVOR_RULE + CONTINUE_STYLE_HINT },
+    { role: 'system', content: followupSystem(angle) + NO_AI_FLAVOR_RULE + CONTINUE_STYLE_HINT + forbiddenBlockOf(forbidden) },
     { role: 'user', content: `${bg ? `${bg}\n\n` : ''}以下是小说原文（续写起点只有一个：这段原文的最后一句）：\n\n${text}\n\n请以「${angle.title}」的剧情走向，紧接上面原文的结尾续写。` },
   ]
 }
@@ -486,7 +509,7 @@ export function incorporateReviseMessages({ context, text, note, style, habits, 
     note ? `【修改想法（最高优先级，必须落实）】\n${note}` : '',
   ].filter(Boolean).join('\n\n')
   return [
-    { role: 'system', content: INCORPORATE_REVISE_SYSTEM + NO_AI_FLAVOR_RULE },
+    { role: 'system', content: INCORPORATE_REVISE_SYSTEM + NO_AI_FLAVOR_RULE + forbiddenBlockOf(forbidden) },
     { role: 'user', content: `${bg ? `${bg}\n\n` : ''}【待修订正文】\n${text}\n\n请按上面的修改想法改写这段正文，只动该动的地方，其余原样保留，直接输出修订后的完整正文。` },
   ]
 }
@@ -496,7 +519,7 @@ export function incorporateReviseMessages({ context, text, note, style, habits, 
 // 过多关键事件」是缺陷，乙处 DIAGNOSE_SYSTEM 的 pace_issues 明令不许这么判）。stage2 把每章台阶从 2 抬到约 14 之后，
 // 这两条同时生效 ⟹ 生成端被要求写满台阶、审校端把写满台阶判成缺陷，两端都被罚、无解，只能烧满重写轮。
 // 修法不是「两边各加一句例外说明」（模型会各自引用对自己方便的那半），而是**判据只留一份字符串**、两端都内插它。
-// 消费点（三处，改这份口径前先全部读一遍）：
+// 消费点（原三处；⚠ 第11轮更正：甲 CONSISTENCY_SYSTEM、丙 stepsBlockOf 已随暗箱流水线删除，现仅乙 DIAGNOSE_SYSTEM 一处内插本常量）：
 //   甲 CONSISTENCY_SYSTEM 检查项 5「节奏过快」—— 一致性审校（consistencyAgent 章内 critic + runPostChapter 章后归档），
 //      它报的 hard 条目会进 blockers 触发 Polisher 重写，是唯一能烧重写轮的那一处；
 //   乙 DIAGNOSE_SYSTEM 的 pace_issues —— 全局诊断看板（DiagnosePanel，给人看，不进重写流水线）；
@@ -508,13 +531,13 @@ export function incorporateReviseMessages({ context, text, note, style, habits, 
 //   普罗之主 10.75 / 亡灵 9.1 个台阶每章，密度 3.5~4.5 个/千字）。
 // 🔴 prompts.js 是刻意维持的叶子模块（^import 恒为 1，绝不许 import boundary.js，会成环）。
 //   跨模块要用这份口径：import 本常量，或在注释里写明出处，**不得复制文本**（复制就是下一个甲处）。
-export const PACE_DENSITY_CALIBER = '**不得把「一章承载的台阶多」本身报成缺陷**：真书一章平均 9~14.5 个台阶（每台阶 220~240 字，密度 3.5~4.5 个/千字，3200 字档约 14 个），台阶多是信息量足的表现，其中**认知台阶**（读者多知道一件事，如世界观词汇表、人物翻案）与情节台阶同样算推进，"本章没有状态变化"不等于"本章没有内容"；节奏快慢与篇幅本身都不是缺陷，只有下列四种形态才算：① 跳过了本应展开的过程（关键转折缺乏铺垫、该写透的场面被一句带过）；② 过早回收伏笔（尤其是仍在保护期内的伏笔）；③ 同一个台阶被写了两遍（换措辞、换视角、换人称都算）；④ 台阶数明显少于本章字数该有的量（字数 ÷ 230）'
+const PACE_DENSITY_CALIBER = '**不得把「一章承载的台阶多」本身报成缺陷**：真书一章平均 9~14.5 个台阶（每台阶 220~240 字，密度 3.5~4.5 个/千字，3200 字档约 14 个），台阶多是信息量足的表现，其中**认知台阶**（读者多知道一件事，如世界观词汇表、人物翻案）与情节台阶同样算推进，"本章没有状态变化"不等于"本章没有内容"；节奏快慢与篇幅本身都不是缺陷，只有下列四种形态才算：① 跳过了本应展开的过程（关键转折缺乏铺垫、该写透的场面被一句带过）；② 过早回收伏笔（尤其是仍在保护期内的伏笔）；③ 同一个台阶被写了两遍（换措辞、换视角、换人称都算）；④ 台阶数明显少于本章字数该有的量（字数 ÷ 230）'
 
 // ---------- 全局诊断看板 ----------
 const DIAGNOSE_SYSTEM = `你是一位资深小说编辑，负责对给定的小说内容进行全局诊断。
 请输出以下内容：
 1. storylines：梳理现有故事线（主线 + 各支线），每条用一句话概括当前进展与悬而未决的问题；
-2. pace_issues：节奏问题诊断，重点关注：进程过快（关键转折缺乏铺垫）、伏笔收得太早（缺少发酵期）、**信息量不足**（一章只讲了一两件事、把同一件事换措辞讲了两遍以上、或通篇靠拆动作与即时生理反应撑字数）、台阶之间没有因果（各自孤立、读完不知道局面变了什么）；🔴 口径以 PACE_DENSITY_CALIBER 为准（与一致性审校检查项 5 内插的是同一份字符串，两端逐字一致，不许各说一半）：${PACE_DENSITY_CALIBER}；没有则为空数组；
+2. pace_issues：节奏问题诊断，重点关注：进程过快（关键转折缺乏铺垫）、伏笔收得太早（缺少发酵期）、**信息量不足**（一章只讲了一两件事、把同一件事换措辞讲了两遍以上、或通篇靠拆动作与即时生理反应撑字数）、台阶之间没有因果（各自孤立、读完不知道局面变了什么）；🔴 节奏密度判据以下方为准：${PACE_DENSITY_CALIBER}；没有则为空数组；
 3. foreshadows：识别已埋下但尚未回收的伏笔/悬念，并给出建议回收时机（距当前还需几章发酵）；
 4. suggestions：不超过 5 条最重要的写作建议，针对具体问题，不要空话。
 客观基于给定内容分析，不要推测内容之外的情节。
@@ -574,11 +597,11 @@ export function rankInsightMessages({ platformName, listName, books }) {
 //   ⟹ 这两轮提示词修法的实际收益为零（产物从没吃过它们）。
 //   【已移植 —— 本条不再是待办】fix-g-titletags 已把①②按删前原文逐字移植进 longFormDraftMessages（已随暗箱流水线删除）的规则 4
 //   （①挂 withTitle 分支内、②挂三元之后的公共段首），字面换行基线未变（880→880：两条都插在同一行模板串内，
-//   并用「去掉插入后 == 原文」的脚本断言守门）。守门钉在 outputHygiene.test.js，含一条「全库只允许活路径这一处
+//   并用「去掉插入后 == 原文」的脚本断言守门）。守门原钉在 outputHygiene.test.js（已随暗箱流水线删除），含一条「全库只允许活路径这一处
 //   出现该措辞」的防回归钉，防将来再现「修法只落在死代码上」的同形态事故。
 //   移植依据**不是本节**，而是 round-17 四章真实终稿实测：ch2 首句「柳枝烙文白雾还没散尽…」、ch3 首句
 //   「迎霞锻体天际刚泛鱼肚白…」—— 首 4 字逐字等于该章标题且与正文无标点相连（2/4 章命中）；而
-//   outputHygiene.stripGluedTitle 的第⑥（4 字内断句）⑦（残句以人名开头）两道闸门对这一形态**故意只留痕不剥**
+//   原 outputHygiene.stripGluedTitle（已随暗箱流水线删除）的第⑥（4 字内断句）⑦（残句以人名开头）两道闸门对这一形态**故意只留痕不剥**
 //   （残句首字是实词、首个标点落在第 6~7 字）⟹ 输出端兜不住，只能生成端预防。
 //   （审计 L10 的「第15章【转】渡口封了」不能作为本条依据：那是标题字段带定位标签，已由 stripChapterHeadLabel
 //   确定性治理，与「正文首句粘连标题」是两回事。）

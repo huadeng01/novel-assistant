@@ -1,5 +1,6 @@
-// 榜单数据加载层（纯前端运行时）：从构建产物里的静态 public/ranks.json 读取「每日热门榜快照」。
-// 数据来源：scripts/fetch-ranks.mjs（本地手动或 GitHub Actions 每日定时）抓取 → 写入 public/ranks.json → 随站点一起部署。
+// 榜单数据加载层（纯前端运行时）：从构建产物里的静态 public/ranks.json 读取「热门榜快照」。
+// 数据来源：原抓取脚本 scripts/fetch-ranks.mjs 已移除；public/ranks.json 现为**内置静态快照**（非每日更新），
+//   快照日期取其 generatedAt 字段（当前 2026-09-14）。与 RanksPage 的「快照日期 + 数据可能已过期」口径一致。
 // 本应用运行时【不发起任何跨域抓取】，只读同源静态快照，因此不受 CORS 限制、不触碰反爬、不存储任何正文。
 //
 // 关键：vite.config.js 里 base:'./'，构建后站点可能挂在 GitHub Pages 子路径（/repo/）下，
@@ -23,7 +24,7 @@ export async function loadRanks(signal) {
     return { ok: true, data: normalizeRanks(data), error: null }
   } catch (e) {
     if (e && e.name === 'AbortError') return { ok: false, data: null, error: 'aborted' }
-    return { ok: false, data: null, error: '未找到榜单快照（public/ranks.json），请先运行抓取脚本生成。' }
+    return { ok: false, data: null, error: '未找到榜单快照（public/ranks.json 缺失或不可读）。' }
   }
 }
 
@@ -92,7 +93,7 @@ export function gendersOf(source) {
 export function listsByGender(source, gender) {
   const lists = (source && Array.isArray(source.lists)) ? source.lists : []
   if (!gender || gender === '全部') return lists
-  return lists.filter((l) => normalizeGender(l.gender) === gender || normalizeGender(l.gender) === '全部')
+  return lists.filter((l) => normalizeGender(l && l.gender) === gender || normalizeGender(l && l.gender) === '全部') // item13：加 `l &&` 守卫，与本文件 :60/:86 同口径（lists 混入 null 时裸 l.gender 抛 TypeError；仅手工替换 ranks.json 才触发）
 }
 
 export function ranksSummary(data) {

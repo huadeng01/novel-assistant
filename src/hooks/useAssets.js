@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { put } from '../lib/db.js'
-import { buildLinks, countByType, filterAssets, findByName, isAssetWorthSaving, mergeAssetDraft, normalizeAsset, normalizeState, perVolOf } from '../lib/assets.js'
+import { getById, put } from '../lib/db.js'
+import { buildLinks, countByType, filterAssets, findAssetByName, isAssetWorthSaving, mergeAssetDraft, normalizeAsset, normalizeState, perVolOf } from '../lib/assets.js'
 
 // 资产 CRUD + links + **提交式**落库（设计 §6.3 / §1.6 M29）。
 //
@@ -12,11 +12,12 @@ import { buildLinks, countByType, filterAssets, findByName, isAssetWorthSaving, 
 //   const A = useAssets({ book, onPersisted: () => lib.refresh() })
 //   A.addAsset(draft)            // → { ok, asset?, reason?, existing? }
 //   A.updateAsset(id, { ch_reveal: 41 })
-//   A.addLink(id, 'located_in', '青冥山', 45)
 //   A.commit()                   // 一次 put('books', ...)
+//   （边的增删改不在此暴露：由 LinkEditor 受控 onChange 改 draft.links，保存时 normalizeAsset 派生/去重）
 //
-// 不传 persist 时用内置落库：put('books', { ...book, assets })；传了则完全由调用方决定怎么写（长篇页要同步 setBooks）。
-export function useAssets({ book, persist, onPersisted, idPrefix = 'mn', autoCommitMs = 0, onMessage } = {}) {
+// B28：删掉 persist 参数——唯一调用方 ContinuePage 从不传它（persistRef 恒 undefined），内置落库 put('books', {...latest, assets}) 是唯一路径；
+//   原「传了则由调用方决定怎么写（长篇页同步 setBooks）」设想的消费方 LongFormPage 并不使用本 hook（它自带本地资产写路径），故 persist 及其死分支一并删除。
+export function useAssets({ book, onPersisted, idPrefix = 'mn', autoCommitMs = 0, onMessage } = {}) {
   const bookRef = useRef(book)
   useEffect(() => {
     bookRef.current = book
@@ -25,7 +26,7 @@ export function useAssets({ book, persist, onPersisted, idPrefix = 'mn', autoCom
   // 读入口统一过一遍 normalizeAsset：旧书 state:'alive' 会被迁成 v2 结构，UI 不会白屏（设计 §4.1）
   const [list, setList] = useState(() => ((book && book.assets) || []).map((a) => normalizeAsset(a, { idPrefix })))
   const [dirty, setDirty] = useState(false)
-  const [msg, setMsgState] = useState('')
+  const [, setMsgState] = useState('') // B28：msg 值不再对外暴露（唯一调用方不读 ua.msg），只保留 setter 供内部 setMsg 用
   const listRef = useRef(list)
   const dirtyRef = useRef(false)
   useEffect(() => {
@@ -63,11 +64,23 @@ export function useAssets({ book, persist, onPersisted, idPrefix = 'mn', autoCom
       prevBookRef.current = book
       return // 有未提交变更：保留本地编辑，等 commit 后由外部回流
     }
-    // M5：切书且有未提交变更 → 先把旧书编辑 flush 落库（直接用旧书对象 put，不走 persist——persist 绑定的是新书 bookRef），
-    //   避免"切书静默覆盖丢未保存编辑"。flush 失败只提示、不阻断切书。
+    // M5：切书且有未提交变更 → 先把旧书编辑 flush 落库（用旧书对象 put），避免"切书静默覆盖丢未保存编辑"
     if (switched && dirtyRef.current && prevBook && prevBook.id) {
-      put('books', { ...prevBook, assets: listRef.current }).catch(() => setMsg('切书前保存上一本书的资产变更失败，可能丢失'))
+      // #6：先取消挂起的 debounce 定时 commit，避免它稍后落在已切走 / 已删的书上
+      if (timerRef.current) {
+        clearTimeout(timerRef.current)
+        timerRef.current = null
+      }
+      const staleList = listRef.current
       dirtyRef.current = false
+      // #4：flush 前复查旧书是否还在（可能已被删）——不在则跳过 put，否则会用旧内存数据复活已删书；
+      // #5：flush 成功后 onPersisted(=lib.refresh) 刷新内存 books，防切回旧书看到 stale 资产、再编辑覆盖掉刚 flush 的结果
+      getById('books', prevBook.id)
+        .then((latest) => (latest ? put('books', { ...latest, assets: staleList }).then(() => true) : false)) // M5：用 DB 最新记录做 base、只替换 assets 字段，避免用内存旧快照整条覆盖掉别处(如长篇页)刚更新的章节/正文
+        .then((saved) => {
+          if (saved && onPersistedRef.current) onPersistedRef.current()
+        })
+        .catch(() => setMsg('切书前保存上一本书的资产变更失败，可能丢失'))
     }
     prevBookRef.current = book
     srcRef.current = src
@@ -75,40 +88,75 @@ export function useAssets({ book, persist, onPersisted, idPrefix = 'mn', autoCom
     if (switched) setDirty(false)
   }, [book, idPrefix, setMsg])
 
-  const persistRef = useRef(persist)
-  useEffect(() => {
-    persistRef.current = persist
-  }, [persist])
   const onPersistedRef = useRef(onPersisted)
   useEffect(() => {
     onPersistedRef.current = onPersisted
   }, [onPersisted])
 
   const doPersist = useCallback(async (next) => {
-    if (persistRef.current) return persistRef.current(next)
     const b = bookRef.current
     if (!b) throw new Error('未选定书籍，无法保存资产')
-    const nb = { ...b, assets: next }
+    // H5 + L-新2：用 DB 最新记录做 base、只替换 assets 字段（对齐同文件切书 flush 分支的口径）——原来用内存快照整本覆盖，
+    //   与同页其他写交错时会盖掉别处刚更新的非 assets 字段。latest=null（书已删）则【跳过 put 返回 false】，
+    //   不再回落内存快照 b（那会 put 出一条已删的书 = 复活孤儿）；与 flush 分支「书不在就跳过」同口径。
+    // item9：区分「读库异常」与「书已删除」——原 `.catch(()=>null)` 把两者归一成 null，读库失败（IDB 被占用/事务中止）
+    //   会被下游误报成"这本书已被删除"。读库异常抛出（带 readFail 标记）让 commit 据实报"读取失败请重试"并保留 dirty 以便重试；
+    //   只有 getById 正常 resolve 到空（书确实不在了）才 return false。
+    let latest
+    try {
+      latest = await getById('books', b.id)
+    } catch (e) {
+      const err = new Error('读取书籍数据失败，请重试（' + (e && e.message ? e.message : String(e)) + '）')
+      err.readFail = true
+      throw err
+    }
+    if (!latest) return false
+    const nb = { ...latest, assets: next }
     await put('books', nb)
     if (onPersistedRef.current) await onPersistedRef.current(nb)
+    return true
   }, [])
 
-  const commit = useCallback(async () => {
-    const next = listRef.current
-    if (!bookRef.current && !persistRef.current) {
-      setMsg('未选定书籍，变更只留在本页（未落库）')
-      return false
+  // L-新3：commit 串行队列——两次重叠 commit 若「后发先至」，会用旧的 listRef 快照覆盖 DB 里更新的资产。
+  //   排队执行、且每次在【执行时】才读 listRef.current（不用调用时的快照），保证最后落库的是最新内存态（对齐 H3 禁用词队列模式）。
+  const commitQueueRef = useRef(Promise.resolve())
+  const commit = useCallback(() => {
+    const task = async () => {
+      const next = listRef.current // 执行时读最新，不用调用时快照
+      const b = bookRef.current
+      if (!b) {
+        setMsg('未选定书籍，变更只留在本页（未落库）')
+        return false
+      }
+      try {
+        // #6 + L-新2：书是否还在由 doPersist 内那次 getById 一并判定（latest=null→返回 false），不再单独多读一次；避免 TOCTOU
+        const ok = await doPersist(next)
+        if (timerRef.current) {
+          clearTimeout(timerRef.current) // #6：commit 结束，取消挂起的 debounce 定时器（否则会再落一次）
+          timerRef.current = null
+        }
+        if (ok === false) {
+          // 书确实已被删除（getById 正常 resolve 到空）：变更无处落库。item9：dirty 不清（只在确认成功后清），据实提示。
+          setMsg('这本书已被删除，本次资产变更未保存')
+          return false
+        }
+        setDirty(false) // item9：移到确认成功之后——读库/写库失败时保留 dirty，用户再触发 commit 可重试，不再「失败也清 dirty 永不重试」
+        setMsg('资产已保存')
+        return true
+      } catch (e) {
+        if (timerRef.current) {
+          clearTimeout(timerRef.current)
+          timerRef.current = null
+        }
+        // 写库失败必须明确提示，不能静默——否则「看起来成功、刷新回旧状态」（M28）
+        // item9：读库异常（doPersist 已包成 readFail）报"读取失败请重试"，写库异常报"保存失败…（可能存储空间不足）"；两者都不清 dirty（保留以便重试）
+        setMsg(e && e.readFail ? e.message : '保存失败：' + (e && e.message ? e.message : String(e)) + '（可能存储空间不足）')
+        return false
+      }
     }
-    try {
-      await doPersist(next)
-      setDirty(false)
-      setMsg('资产已保存')
-      return true
-    } catch (e) {
-      // 写库失败必须明确提示，不能静默——否则「看起来成功、刷新回旧状态」（M28）
-      setMsg('保存失败：' + (e && e.message ? e.message : String(e)) + '（可能存储空间不足）')
-      return false
-    }
+    const p = commitQueueRef.current.then(task, task) // 前一次无论成败都接着跑，不堵死队列
+    commitQueueRef.current = p.catch(() => {})
+    return p // 返回真实 promise，await commit() 的调用方照常拿到 true/false
   }, [doPersist, setMsg])
 
   const commitRef = useRef(commit)
@@ -144,8 +192,14 @@ export function useAssets({ book, persist, onPersisted, idPrefix = 'mn', autoCom
   // autoCommitMs > 0 时，变更自动排队落库（仍合并成一次写，不做按键级写）
   const touch = useCallback(
     (next, autoMsg) => {
-      setList(next)
-      listRef.current = next
+      // #4：在唯一写出口 touch 集中盖 updatedAt——normalizeAsset 是只读语义(保留原 updatedAt)、各写路径又不逐个刷新，
+      //   会导致 updatedAt 恒等于 createdAt。这里对"被改动的条目"(与旧表同 id 但引用不同=被改；旧表无此 id=新增)统一盖章，
+      //   未改条目(引用相同)保留原值。不做按最近修改排序(决策#4)，仅供资产卡「最近编辑」显示。
+      const prevById = new Map((listRef.current || []).map((a) => [a && a.id, a]))
+      const now = Date.now()
+      const stamped = (next || []).map((a) => (a && prevById.get(a.id) !== a ? { ...a, updatedAt: now } : a))
+      setList(stamped)
+      listRef.current = stamped
       setDirty(true)
       dirtyRef.current = true
       if (autoMsg != null) setMsg(autoMsg)
@@ -157,8 +211,6 @@ export function useAssets({ book, persist, onPersisted, idPrefix = 'mn', autoCom
   const perVol = useMemo(() => perVolOf(book), [book])
   const counts = useMemo(() => countByType(list, perVol), [list, perVol])
 
-  // —— CRUD ——
-
   // 新增：全空不入库、重名不静默丢弃（设计 §3 需求7）。返回结果让调用方决定要不要弹「合并/仍新增」。
   const addAsset = useCallback(
     (draft, opts = {}) => {
@@ -166,7 +218,9 @@ export function useAssets({ book, persist, onPersisted, idPrefix = 'mn', autoCom
         return { ok: false, reason: 'empty', msg: '没填任何内容，已放弃新增' }
       }
       const asset = normalizeAsset(draft, { idPrefix: opts.idPrefix || idPrefix })
-      const hit = findByName(listRef.current, asset.name)
+      // C38：重名检查改用 findAssetByName（主名 + 别名，与结算 applyStateChange/流转的查名同口径）——原 findByName 只比主名，
+      //   新名撞上别人的**别名**时查不到 → 照样入库，之后结算按 findAssetByName 命中靠前那条（别名所属）= 写错条。改后别名冲突也拦成 duplicate。
+      const hit = findAssetByName(listRef.current, asset.name)
       if (hit && !opts.force) return { ok: false, reason: 'duplicate', existing: hit, asset }
       // 共现建边只跑「新条目」：buildLinks 返回新数组、不改入参，这里只取最后一条的结果，
       // 其余条目原样保留 —— 避免整表重建覆盖用户手改过的边（设计 §4.2）
@@ -212,168 +266,29 @@ export function useAssets({ book, persist, onPersisted, idPrefix = 'mn', autoCom
     [idPrefix, touch],
   )
 
-  // —— links ——
+  // P2/第11轮：addLink / rebuildLinks / delLink / updateLink 四个「边增删改重建」出口已全部删除——全仓零调用方
+  //   （边的增删改由 LinkEditor 受控 onChange + 保存时 normalizeAsset 派生/去重承载；整表重建 LongFormPage 自带本地实现）。
+  //   且 delLink/updateLink 按 links 下标定位、重排后会删错边（LongFormPage A6「按 toName+type 稳定标识而非下标」的教训）。
+  //   注：buildLinks 仍被 addAsset 的共现建边用（见上），import 保留。
 
-  const addLink = useCallback(
-    (assetId, type, toName, sinceCh = 0, opts = {}) => {
-      const to = String(toName == null ? '' : toName).trim()
-      if (!type || !to) return { ok: false, reason: 'invalid' }
-      let added = false
-      const next = listRef.current.map((a) => {
-        if (a.id !== assetId) return a
-        const links = [...(a.links || [])]
-        // 去重：与 LongFormPage.addLink / mergeRelations 同判据（to+type 相同即跳过），连点两次不产生重复边(M48)
-        if (links.some((l) => l.to === to && l.type === type)) return a
-        added = true
-        const since = Number(sinceCh) || 0
-        links.push(since > 0 ? { type, to, since_ch: since } : { type, to })
-        return { ...a, links }
-      })
-      if (!added) return { ok: false, reason: 'duplicate' }
-      touch(next, opts.msg)
-      return { ok: true }
-    },
-    [touch],
-  )
+  // P1-8：原 patchState / recordFlow 两个「状态增量 + 资产流转」实现已删除——全仓零调用方（续写页 ContinuePage 与
+  //   长篇页 LongFormPage 各自内联结算，共享纯函数 applyStateChange/typeKeyOf 住在 assets.js 单一出处）。
+  //   留着只会与页面内联实现漂移：recordFlow 既有 phys 整体替换丢字段、又有 a.name===assetName 严格匹配（都不容错别名），
+  //   正是续写页本轮刚修掉的两类 bug。删掉重复实现消除漂移源，比把页面内联反向改调它风险低（那会丢掉累加器批写/去重/顺便建档/holder 同步）。
 
-  const delLink = useCallback(
-    (assetId, linkIdx, opts = {}) => {
-      touch(
-        listRef.current.map((a) => (a.id === assetId ? { ...a, links: (a.links || []).filter((_, i) => i !== linkIdx) } : a)),
-        opts.msg,
-      )
-    },
-    [touch],
-  )
-
-  const updateLink = useCallback(
-    (assetId, linkIdx, patch, opts = {}) => {
-      touch(
-        listRef.current.map((a) => (a.id === assetId ? { ...a, links: (a.links || []).map((l, i) => (i === linkIdx ? { ...l, ...patch } : l)) } : a)),
-        opts.msg,
-      )
-    },
-    [touch],
-  )
-
-  // 整表按名字共现重建（会清空现有边，与 LongFormPage.rebuildLinks 同语义 —— 只应在用户明确点「重建」时调）
-  const rebuildLinks = useCallback(() => {
-    touch(
-      buildLinks(listRef.current.map((a) => ({ ...a, links: [] }))),
-      '已按名字共现重建绑定边（原有手改的边已被清掉）',
-    )
-  }, [touch])
-
-  // —— state（增量更新，不重建：inkos 原则②）——
-
-  // patchState(id, { phys:{...}, place:{...} })：只覆盖给出来的维度，其余维度与历史 hold/rel 原样保留
-  const patchState = useCallback(
-    (assetId, dims, meta = {}) => {
-      const next = listRef.current.map((a) => {
-        if (a.id !== assetId) return a
-        const st = normalizeState(a.state)
-        const incoming = dims && typeof dims === 'object' ? dims : {}
-        ;['phys', 'power', 'mind', 'social', 'place', 'plot'].forEach((d) => {
-          if (d in incoming) st[d] = incoming[d] || null
-        })
-        if (Array.isArray(incoming.hold)) {
-          const hold = [...(Array.isArray(st.hold) ? st.hold : [])]
-          incoming.hold.forEach((h) => {
-            if (h && !hold.some((x) => x.name === h.name && x.change === h.change && x.ch === h.ch)) hold.push(h)
-          })
-          st.hold = hold
-        }
-        if (Array.isArray(incoming.rel)) {
-          const rel = [...(Array.isArray(st.rel) ? st.rel : [])]
-          incoming.rel.forEach((r) => {
-            if (r && !rel.some((x) => x.to === r.to && x.tag === r.tag && x.ch === r.ch)) rel.push(r)
-          })
-          st.rel = rel
-        }
-        st.meta = {
-          updatedAt: Date.now(),
-          updatedBy: meta.updatedBy || 'user',
-          sourceCh: Number(meta.sourceCh) || (st.meta && st.meta.sourceCh) || 0,
-        }
-        // state.place 变化后同步「位于」边（改 state 自动 upsert；删边不动 state —— 设计 §3 需求6 方案2）
-        return normalizeAsset({ ...a, state: st }, { idPrefix })
-      })
-      touch(next, meta.msg)
-      return next.find((a) => a.id === assetId) || null
-    },
-    [idPrefix, touch],
-  )
-
-  // 资产流转（设计 §4.5）：人物侧记一条 hold，资产侧同步（损毁只标注不删除）
-  const recordFlow = useCallback(
-    (personId, { name, change = 'gain', ch = 0, note = '' }, opts = {}) => {
-      const assetName = String(name == null ? '' : name).trim()
-      if (!personId || !assetName) return { ok: false, reason: 'invalid' }
-      const next = listRef.current.map((a) => {
-        if (a.id === personId) {
-          const st = normalizeState(a.state)
-          const hold = [...(Array.isArray(st.hold) ? st.hold : [])]
-          const rec = { name: assetName, change, ch: Number(ch) || 0 }
-          if (note) rec.note = String(note)
-          if (!hold.some((x) => x.name === rec.name && x.change === rec.change && x.ch === rec.ch)) hold.push(rec)
-          st.hold = hold
-          st.meta = { updatedAt: Date.now(), updatedBy: opts.updatedBy || 'user', sourceCh: Number(ch) || (st.meta && st.meta.sourceCh) || 0 }
-          return normalizeAsset({ ...a, state: st }, { idPrefix })
-        }
-        // 资产侧：易主改 holder/held_by；损毁/消耗只标注（拍板5：不物理删除，保留「曾经有过」的审计线）
-        if (a.name === assetName) {
-          if (change === 'transferred' || change === 'gain') {
-            const holder = opts.holder || ((listRef.current.find((x) => x.id === personId) || {}).name || '')
-            return normalizeAsset({ ...a, holder }, { idPrefix })
-          }
-          if (change === 'broken' || change === 'consumed' || change === 'lose') {
-            const st = normalizeState(a.state)
-            // 一律用生理维度的 broken 标注 + 中文说明（depleted 属修为维度词表，套到道具上会显示成「灵力耗尽」）
-            const noteText = note ? String(note) : change === 'consumed' ? '已耗尽' : change === 'lose' ? '已丢失' : '已损毁'
-            st.phys = { tag: 'broken', note: noteText, since: Number(ch) || 0 }
-            st.meta = { updatedAt: Date.now(), updatedBy: opts.updatedBy || 'user', sourceCh: Number(ch) || 0 }
-            return normalizeAsset({ ...a, state: st }, { idPrefix })
-          }
-        }
-        return a
-      })
-      touch(next, opts.msg)
-      return { ok: true }
-    },
-    [idPrefix, touch],
-  )
-
-  // —— 视图辅助 ——
   const filtered = useCallback((filter) => filterAssets(list, filter, perVol), [list, perVol])
-  const byName = useCallback((name) => findByName(listRef.current, name), [list])
-  const reset = useCallback(() => {
-    setList(((bookRef.current && bookRef.current.assets) || []).map((a) => normalizeAsset(a, { idPrefix })))
-    setDirty(false)
-    setMsg('已放弃未保存的变更')
-  }, [idPrefix, setMsg])
+  // B28：删掉 byName(=findByName 的对外暴露) 与 reset(放弃变更) 两个死出口——唯一调用方 ContinuePage 只用
+  //   assets/counts/filtered/addAsset/updateAsset/deleteAsset/mergeAsset；byName/reset 全仓零消费（reset 的「放弃变更」UI 从未接线）。
+  //   return 里的 perVol/dirty/msg/setMsg/commit/scheduleCommit 仍在本 hook 内部使用，只是不再对外暴露（一并从公开 API 收敛）。
 
   return {
     assets: list,
-    perVol,
     counts,
-    dirty,
-    msg,
-    setMsg,
     addAsset,
     updateAsset,
     deleteAsset,
     mergeAsset,
-    addLink,
-    delLink,
-    updateLink,
-    rebuildLinks,
-    patchState,
-    recordFlow,
     filtered,
-    findByName: byName,
-    commit,
-    scheduleCommit,
-    reset,
   }
 }
 

@@ -10,24 +10,26 @@ const sizeCls = {
 // 额外带一个「⚠ 待补全」虚拟分类 = 缺透出章（revealChapterOf===0，不参与防剧透检测）的资产，
 // 让用户能一眼定位「是哪几条缺」（设计 §3 需求4 第5步：现在只在弹窗底部给个总数，卡上看不出是哪条）。
 //
-// 计数来源二选一：① 传 counts（外部已算好）② 传 assets + perVol（组件自算，独立自测无需外部依赖）。
+// B28：删掉 6 个全仓零调用方传入的死 props（assets/showMissing/showAll/types/className/labelAll）——两处调用方
+//   (AssetModal / ContinuePage) 都只传 value/onChange/counts/perVol/size，这 6 个恒取默认值，故按默认值硬编、行为逐一等价。
+//   perVol 保留（修法未列删）：counts 恒由调用方传入，`counts || countByType([], perVol)` 的兜底分支实际不触发，perVol 仅作 API 兼容留位。
 // 0 条的核心类仍显示但置灰 disabled，避免「点了没反应」；skill/beast 属迭代类型，仅在有数据时才出现。
-export default function AssetFilterBar({ value = 'all', onChange, counts, assets, perVol = 40, size = 'sm', showMissing = true, showAll = true, types, className = '', labelAll = '全部' }) {
-  const c = counts || countByType(assets || [], perVol)
-  const list = types || CORE_TYPES
+export default function AssetFilterBar({ value = 'all', onChange, counts, perVol = 40, size = 'sm' }) {
+  const c = counts || countByType([], perVol)
+  const list = CORE_TYPES
   // M4：extra 从全量 ASSET_TYPES 里挑「非核心类但已有数据」的(skill/beast)；原写法从 list(默认=CORE_TYPES)里挑非核心类恒为空 → skill/beast 分类按钮永不出现(countByType 却已计数)
-  const extra = ASSET_TYPES.filter((t) => !CORE_TYPES.includes(t) && !list.includes(t) && (c[t] || 0) > 0)
+  const extra = ASSET_TYPES.filter((t) => !CORE_TYPES.includes(t) && (c[t] || 0) > 0)
   const items = [
-    ...(showAll ? [{ key: 'all', label: labelAll, n: c.all || 0, always: true }] : []),
-    ...list.map((t) => ({ key: t, label: ASSET_TYPE_LABEL[t] || t, n: c[t] || 0, always: CORE_TYPES.includes(t) })),
-    ...extra.map((t) => ({ key: t, label: ASSET_TYPE_LABEL[t] || t, n: c[t] || 0, always: false })),
-    ...(showMissing ? [{ key: 'missing', label: '⚠ 待补全', n: c.missing || 0, always: true, warn: true }] : []),
+    { key: 'all', label: '全部', n: c.all || 0 },
+    ...list.map((t) => ({ key: t, label: ASSET_TYPE_LABEL[t] || t, n: c[t] || 0 })),
+    ...extra.map((t) => ({ key: t, label: ASSET_TYPE_LABEL[t] || t, n: c[t] || 0 })),
+    { key: 'missing', label: '⚠ 待补全', n: c.missing || 0, warn: true },
   ]
   const pick = (k) => onChange && onChange(k)
   const pad = sizeCls[size] || sizeCls.sm
 
   return (
-    <div className={`flex flex-wrap items-center gap-1.5 ${className}`} role="group" aria-label="资产分类筛选">
+    <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="资产分类筛选">
       {items.map((it) => {
         const on = value === it.key
         const empty = !it.n && !on

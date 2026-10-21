@@ -19,7 +19,16 @@ export default function ChapterField({ kind = 'reveal', asset = null, value, onC
   useEffect(() => setText(outer), [outer])
 
   const commit = () => {
-    const n = Number(String(text).trim()) || 0
+    const raw = String(text).trim()
+    // M-G：只接受非负整数章号——原来 `Number(raw)||0` 会把 -5 / 1.5 原样入库（污染按卷派生 + 防剧透门），
+    //   把 "12abc" 静默清零（用户以为填了却被抹成空）。非法值（负数 / 小数 / 含字母）一律不提交、回退到当前值。
+    let n
+    if (raw === '') n = 0 // 空 = 回落按卷估算（保存语义，见文件头 ⑫）
+    else if (/^\d+$/.test(raw)) n = Number(raw)
+    else {
+      setText(outer) // 非法输入：回退，不回调、不入库
+      return
+    }
     // 只在真变化时回调，避免无意义的整本 put
     if (n === (Number(outer) || 0)) {
       setText(outer)
@@ -47,7 +56,9 @@ export default function ChapterField({ kind = 'reveal', asset = null, value, onC
       inputMode="numeric"
       disabled={disabled}
       value={text}
-      placeholder={derived > 0 && !explicit ? String(derived) : ''}
+      // P2：placeholder 不再塞按卷估算值——本组件的存在理由（见文件头 ②③）就是「估算值放小字、不放 placeholder，
+      //   否则空输入框里显示的数字会被读成已填的值」。估算值已由上面的 hint 小字给出，这里留空。
+      placeholder=""
       onChange={(e) => setText(e.target.value)}
       onBlur={commit}
       onKeyDown={(e) => {

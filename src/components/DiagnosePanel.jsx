@@ -2,12 +2,30 @@
 // 续写页、改写页复用（长篇 / 新手页当前未挂载诊断入口）；调用方负责把要诊断的内容组装进 text
 import { useEffect, useRef, useState } from 'react'
 import Ic from './Ic.jsx'
-import { chatJSON } from '../lib/llm.js'
+import { chatJSON, STRUCTURED_TEMP } from '../lib/llm.js'
 import { diagnoseMessages } from '../lib/prompts.js'
 
 const LIMIT = 16000 // 诊断输入上限，避免超长文本撑爆上下文
 
-export default function DiagnosePanel({ apiKey, text, context, disabled, cacheKey }) {
+// 必修A（第十轮）：诊断结果毒丸防护——与 RevisePage sanitizeResult(item2) 同型，那个漏洞在这个**共享组件**（续写页 + 改写页都用）复发。
+//   chatJSON→extractJSON 不做类型归一，模型把 pace_issues/suggestions 元素、或 storylines/foreshadows 的字段返成对象/数组时，
+//   直接渲染（:199 s.name / :200 s.progress / :214 {p} / :226 f.content / :239 {s}）会抛「Objects are not valid as a React child」→ 整页落 PageErrorBoundary；
+//   且结果会写进 localStorage 缓存(:97)、刷新/切回持续崩 → 用户只能「清空小说与档案」逃生。故新鲜结果(:83)、缓存回读(:59/:114)、写缓存前(:97 用同一 res) 全过本归一。
+//   只归一被渲染的 4 个数组字段（其余字段 ...r 原样透传）；正常字符串结果逐项不变（diagStr 对字符串幂等）。
+const diagStr = (v) => (v == null ? '' : String(v))
+const sanitizeDiag = (r) => {
+  if (!r || typeof r !== 'object') return null
+  const arr = (v) => (Array.isArray(v) ? v : [])
+  return {
+    ...r,
+    storylines: arr(r.storylines).map((s) => (s && typeof s === 'object' ? { ...s, name: diagStr(s.name), progress: diagStr(s.progress) } : null)).filter(Boolean),
+    pace_issues: arr(r.pace_issues).map(diagStr),
+    foreshadows: arr(r.foreshadows).map((f) => (f && typeof f === 'object' ? { ...f, content: diagStr(f.content), suggestion: diagStr(f.suggestion) } : null)).filter(Boolean),
+    suggestions: arr(r.suggestions).map(diagStr),
+  }
+}
+
+export default function DiagnosePanel({ apiKey, text, context, disabled, cacheKey, total }) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [result, setResult] = useState(null)
@@ -16,10 +34,42 @@ export default function DiagnosePanel({ apiKey, text, context, disabled, cacheKe
   const [promptConfirm, setPromptConfirm] = useState(null) // { title, messages, proceed }
   // C8：记录最近一次 run 产出新鲜结果时的 cacheKey；该 key 的内存 result 已是最新，effect 不再回读缓存覆盖它（防异步竞态把新鲜结果打回旧快照）
   const producedKeyRef = useRef(null)
+  // DP14(c)：诊断请求的中断句柄——切页 / 卸载时 abort，避免 chatJSON 在后台继续跑白烧额度
+  const abortRef = useRef(null)
+  // DP14(b)：组件是否仍挂载——卸载后 in-flight 请求回来不再 setState（否则 React 报「更新已卸载组件」）
+  const mountedRef = useRef(true)
+  // DP14(b)：始终镜像最新 cacheKey——诊断进行中用户改了原文/章节(cacheKey 变)，in-flight 的旧结果回来时与它比对，不一致就丢弃不上屏
+  const keyRef = useRef(cacheKey)
+  keyRef.current = cacheKey
+
+  useEffect(() => {
+    mountedRef.current = true
+    // 第11轮[13]：一次性清掉历史遗留的旧格式诊断键。#11 把 cacheKey 细化成 na_diag_cont_ / na_diag_rev_ 之前，
+    //   旧键形如 na_diag_<字数>_<原文片段>（键名内含用户原文、属隐私面），既不会再被读到、也不被同类前缀清理命中，
+    //   过去只靠 wipeAll 兜底（用户可能永远不点）。挂载时扫一遍，删掉 na_diag_ 开头但不含 cont/rev 中缀的孤儿键。
+    try {
+      const legacy = []
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const k = localStorage.key(i)
+        if (k && k.startsWith('na_diag_') && !k.startsWith('na_diag_cont_') && !k.startsWith('na_diag_rev_')) legacy.push(k)
+      }
+      for (const k of legacy) localStorage.removeItem(k)
+    } catch {
+      /* 隐私模式 / localStorage 不可用：忽略 */
+    }
+    return () => {
+      mountedRef.current = false
+      abortRef.current?.abort() // DP14(c)：卸载即中断在跑的诊断
+    }
+  }, [])
 
   // 结果缓存：同一内容状态（如章节数未变）下直接读本地缓存，避免重复消耗 API；点“重新诊断”强制刷新并写回缓存
   useEffect(() => {
     if (cacheKey && cacheKey === producedKeyRef.current) return // C8：本轮刚产出的结果，跳过缓存回读
+    // 次修12（第十一轮·存疑D）：走到这里 = cacheKey 已不是上次产出新鲜结果的那个 key（切走了）→ 清掉 producedKeyRef。
+    //   否则「K1 出结果(producedKeyRef=K1) → 改文切 K2(回读 K2) → 改回 K1」时，effect 因 K1===producedKeyRef 提前 return、不回读 localStorage[K1]，
+    //   内存里还是 K2 的结果(或 null) → K1 明明有快照却显空白（可自愈：再点一次诊断即恢复，但误导）。清掉后切回 K1 正常回读其快照。
+    producedKeyRef.current = null
     let c = null
     if (cacheKey) {
       try {
@@ -28,42 +78,65 @@ export default function DiagnosePanel({ apiKey, text, context, disabled, cacheKe
         c = null
       }
     }
-    setResult(c?.result || null)
+    setResult(sanitizeDiag(c?.result)) // 必修A：缓存可能是本修复前写入的毒丸，回读也归一（sanitizeDiag(null/undefined)→null，与原 `|| null` 等价）
     setFromCache(!!c?.result)
   }, [cacheKey])
 
   // 真正发送（用户在确认窗点"确认并发送"后调用；messages 可能已被用户编辑）
   const run = async (messages) => {
-    if (!apiKey || !text) return
+    // DP14(a)：无 apiKey / 无内容时原来静默 return，用户点了没反应也看不出原因——这里明确提示
+    if (!apiKey) {
+      setErr('还没有设置写作引擎的 API Key，请先到「我的」页配置后再诊断。')
+      return
+    }
+    if (!text) {
+      setErr('还没有可诊断的内容，先粘贴 / 导入原文再诊断。')
+      return
+    }
+    const myKey = cacheKey // item19/DP14(b)：这次诊断归属的内容指纹。缺省值必须与 keyRef 初值（=cacheKey，未传时 undefined）一致——
+    //   原写 `cacheKey || null` 会让未传 cacheKey 时 myKey=null 而 keyRef.current=undefined，:84 `undefined !== null` 恒真 → 新鲜结果恒被判过期丢弃（现两调用方都传键=潜伏）。
     setErr('')
     setBusy(true)
     setResult(null)
     setPromptConfirm(null)
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
     try {
-      const res = await chatJSON({ apiKey, messages, temperature: 0.3 })
+      const res = sanitizeDiag(await chatJSON({ apiKey, messages, temperature: STRUCTURED_TEMP, signal: ctrl.signal })) // 必修A：源头归一——下面 setResult(res) 与写缓存 JSON.stringify({result:res}) 共用这份已归一的 res，毒丸既不进 state 也不进 localStorage。B30：低温度走 llm.js STRUCTURED_TEMP 单一出处（与 useLibrary 文风分析同值）
+      // DP14(b)：诊断期间原文/章节变了(cacheKey 变)或组件已卸载 → 这份结果对应旧内容，丢弃不上屏
+      if (!mountedRef.current || keyRef.current !== myKey) return
+      // 必修3（第十一轮）：sanitizeDiag 后为空/无效（chatJSON 返回可解析但非对象：JSON null / 字符串 / 顶层数组）→ **按失败处理**：抛出走下面 catch 的 setErr + M16 缓存回读，
+      //   从而跳过下面的「删同类旧键(:110-114) + 写 {result:null}(:115)」——否则上次已付费的有效快照被永久抹掉、界面空白、还不报错（原代码 setResult(null) 后照常删键写 null 缓存）。
+      if (!res) throw new Error('AI 返回的内容格式不正确（非诊断结构），请点「重新诊断」重试。')
       setResult(res)
       setFromCache(false)
-      producedKeyRef.current = cacheKey || null // C8：标记这份新鲜结果归属的 cacheKey，effect 不回读覆盖
+      producedKeyRef.current = myKey // C8：标记这份新鲜结果归属的 cacheKey，effect 不回读覆盖
       if (cacheKey) {
         try {
-          // M17：诊断缓存无界增长防护——写当前键前，清掉其它 na_diag_ 前缀的旧快照（每次 text 变都写新键、从不清 → localStorage 堆积）
+          // #11(M17 回归)：前缀细化到本页类型(na_diag_cont_ / na_diag_rev_)只清同类旧快照——原按 na_diag_ 无差别清会让续写页写缓存时删掉改写页快照(跨页互删)、连带 M16 失败回读落空
+          const prefix = cacheKey.split('_').slice(0, 3).join('_') + '_'
           for (let i = localStorage.length - 1; i >= 0; i -= 1) {
             const k = localStorage.key(i)
-            if (k && k.startsWith('na_diag_') && k !== cacheKey) localStorage.removeItem(k)
+            if (k && k.startsWith(prefix) && k !== cacheKey) localStorage.removeItem(k)
           }
-          localStorage.setItem(cacheKey, JSON.stringify({ at: Date.now(), result: res }))
+          localStorage.setItem(cacheKey, JSON.stringify({ result: res })) // P2：去掉从不被读取的 at 死字段（回读只用 result）
         } catch {
           /* 缓存写/清失败不影响诊断结果 */
         }
       }
     } catch (e) {
+      if (!mountedRef.current || keyRef.current !== myKey) return // DP14(b)：已过期/已卸载，连错误也不上屏
+      if (e?.name === 'AbortError') {
+        setErr('诊断已中断。')
+        return
+      }
       setErr(e?.message || String(e)) // C4：非 Error 抛出时 e.message 为 undefined，界面会完全不提示
       // M16：失败时按 cacheKey 回读缓存恢复上次结果，避免"一次失败抹掉已付费的缓存快照、按钮退回『开始诊断』"
       if (cacheKey) {
         try {
           const c = JSON.parse(localStorage.getItem(cacheKey))
           if (c && c.result) {
-            setResult(c.result)
+            setResult(sanitizeDiag(c.result)) // 必修A：失败回读的缓存同样归一，防毒丸
             setFromCache(true)
             producedKeyRef.current = cacheKey
           }
@@ -72,13 +145,25 @@ export default function DiagnosePanel({ apiKey, text, context, disabled, cacheKe
         }
       }
     } finally {
-      setBusy(false)
+      abortRef.current = null
+      // H2：setBusy(false) 不能受「过期守卫」牵连——诊断约 1 分钟、期间用户继续编辑正文会让父层算出的 cacheKey 变化，
+      //   keyRef.current!==myKey 成立；若据此跳过复位，busy 永远停在 true → 按钮永久「诊断中」且禁用、缓存回读 effect 也不复位。
+      //   过期守卫只该挡「结果上屏」（上面 then/catch 已挡），busy 只要组件还挂载就必须解除。
+      if (mountedRef.current) setBusy(false)
     }
   }
 
   // 点"开始诊断"：先组装将发送的提示词并弹确认窗，用户查看/编辑后再走 run（不直接发送）
   const openConfirm = () => {
-    if (!apiKey || !text) return
+    // DP14(a)：与 run 同口径——无 Key / 无内容时明确提示，不再静默 return
+    if (!apiKey) {
+      setErr('还没有设置写作引擎的 API Key，请先到「我的」页配置后再诊断。')
+      return
+    }
+    if (!text) {
+      setErr('还没有可诊断的内容，先粘贴 / 导入原文再诊断。')
+      return
+    }
     setErr('')
     setPromptConfirm({
       title: 'AI 全局诊断',
@@ -91,6 +176,12 @@ export default function DiagnosePanel({ apiKey, text, context, disabled, cacheKe
   const paceIssues = Array.isArray(result?.pace_issues) ? result.pace_issues : []
   const hooks = Array.isArray(result?.foreshadows) ? result.foreshadows : []
   const suggestions = Array.isArray(result?.suggestions) ? result.suggestions : []
+  // DP14(d)+C34：诊断输入超 LIMIT 会被截断，须诚实提示。total=调用方传入的**原文总字数**——
+  //   续写页(ContinuePage)先把原文截成末尾 16000 字再传进来（续写看近文），此时 text.length≤LIMIT，
+  //   若只看 text.length 会恒判未超限、提示永不出现（真·静默截断）；故用 total 判 overLimit。
+  //   改写页(RevisePage)传全文、由本组件 slice(0,LIMIT) 截头，不传 total → 回落 text.length。
+  const totalLen = total != null ? Number(total) || 0 : String(text || '').length
+  const overLimit = totalLen > LIMIT
 
   return (
     <>
@@ -112,6 +203,11 @@ export default function DiagnosePanel({ apiKey, text, context, disabled, cacheKe
       </div>
       {fromCache && result && (
         <p className="mt-2 text-xs text-stone-400"><Ic n="box" /> 当前为缓存快照（上次诊断时间的结果），内容未变化时无需重复消耗；点“重新诊断”可刷新。</p>
+      )}
+      {/* DP14(d)+C34：原文超上限时明示只诊断哪一段、共多少字，不再静默截断让用户以为诊断了全文。
+          传了 total（续写页预截尾）→「末尾」；未传（改写页由本组件截头）→「前」。 */}
+      {overLimit && (
+        <p className="mt-2 rounded-xl bg-amber-50 px-4 py-2 text-xs text-amber-700">原文较长（共 {totalLen} 字），本次仅诊断{total != null ? '末尾' : '前'} {LIMIT} 字（超出部分不参与分析）。</p>
       )}
 
       {err && <p className="mt-3 rounded-xl bg-red-50 px-4 py-2.5 text-xs text-red-700">{err}</p>}
@@ -175,10 +271,17 @@ export default function DiagnosePanel({ apiKey, text, context, disabled, cacheKe
       )}
     </section>
     {promptConfirm && (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" onClick={() => setPromptConfirm(null)}>
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
+        // P1-16：已编辑过提示词则遮罩不响应，避免误点一下丢掉改过的提示词（与 RevisePage / RanksPage / PromptEditorModal C1 统一）
+        onClick={() => { if (!promptConfirm.edited) setPromptConfirm(null) }}
+        role="dialog"
+        aria-modal="true"
+        aria-label={promptConfirm.title}
+      >
         <div className="flex max-h-[88vh] w-[min(760px,94vw)] flex-col overflow-hidden rounded-2xl bg-paper shadow-2xl" onClick={(e) => e.stopPropagation()}>
           <div className="flex items-center justify-between border-b border-stone-200 px-5 py-3">
-            <span className="font-semibold text-ink">{promptConfirm.title} · 发送前可查看 / 编辑提示词</span>
+            <span className="font-semibold text-ink">{promptConfirm.title} · 发送前可查看 / 编辑提示词{promptConfirm.edited ? '（已编辑）' : ''}</span>
             <button onClick={() => setPromptConfirm(null)} className="text-stone-400 hover:text-stone-700" aria-label="关闭">✕</button>
           </div>
           <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
@@ -192,7 +295,7 @@ export default function DiagnosePanel({ apiKey, text, context, disabled, cacheKe
                     setPromptConfirm((p) => {
                       const ms = p.messages.slice()
                       ms[i] = { ...ms[i], content: e.target.value }
-                      return { ...p, messages: ms }
+                      return { ...p, messages: ms, edited: true }
                     })
                   }
                   className="w-full resize-y rounded-lg border border-stone-300 bg-stone-50 p-3 font-mono text-[13px] leading-relaxed focus:border-stone-500 focus:outline-none"

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Ic from '../components/Ic.jsx'
 import KeyBanner from '../components/KeyBanner.jsx'
 import Library from '../components/Library.jsx'
@@ -10,15 +10,15 @@ import PromptEditorModal from '../components/PromptEditorModal.jsx'
 import AssetFilterBar from '../components/AssetFilterBar.jsx'
 import NewAssetModal from '../components/NewAssetModal.jsx'
 // buildLinks 不再直接用：useAssets.addAsset 内部只对「新条目」跑共现建边(不整表重建，避免覆盖用户手改的边，设计 §4.2)
-import { parseAnalyze, computeAssetWarnings } from '../lib/parseAssets.js'
-import { normalizeAsset, normalizeState, perVolOf, ASSET_TYPES, ASSET_TYPE_LABEL, STATE_V1_MAP, STATE_LABEL, stateLabel, dashOut, dashOnly, applyStateChange, typeKeyOf } from '../lib/assets.js'
+import { parseAnalyze, computeAssetWarnings, STATE_WORDS_CN } from '../lib/parseAssets.js'
+import { normalizeAsset, normalizeState, perVolOf, ASSET_TYPES, ASSET_TYPE_LABEL, STATE_V1_MAP, stateLabel, applyStateChange, typeKeyOf, findAssetByName, applyFlowToRoster, saveEditAsset, duplicateNameGroups } from '../lib/assets.js'
 import { useLibrary } from '../hooks/useLibrary.js'
 // 阶段1(设计 §7 1.3②)：资产 CRUD / links / 落库统一走 useAssets(提交式落库，缓解 M29 频繁写盘)
 import { useAssets } from '../hooks/useAssets.js'
 import { chatJSON, chatStream, ANTI_REPETITION } from '../lib/llm.js'
 // analyzeAssetsMessages：两页共用的「分析原文 → 资产」提示词(五段产出，含【状态变更】【资产流转】【伏笔推进】)，取代原页内 continueAssetPrompt
 import { analyzeMessages, continueMessages, CONTINUE_ANGLES, followupMessages, FOLLOWUP_ANGLES, summarizeMessages, incorporateReviseMessages, analyzeAssetsMessages } from '../lib/prompts.js'
-import { copyText, countWords, mapLimit, uid } from '../lib/utils.js'
+import { copyText, countWords, mapLimit } from '../lib/utils.js'
 // put 不再直接用：资产落库由 useAssets 内部完成（阶段1 接线后本页没有别的直写 books 的路径）
 import { loadContinueDraft, saveContinueDraft, clearContinueDraft } from '../lib/backup.js'
 import { readDocumentFile, baseName, extOf, exportDocument, EXPORT_FORMATS, READ_ACCEPT } from '../lib/docio.js'
@@ -37,14 +37,25 @@ const chunkSource = (src) => {
   const s = String(src || '')
   if (!s) return []
   const out = []
-  for (let i = 0; i < s.length; i += ASSET_CHUNK) out.push(s.slice(i, i + ASSET_CHUNK))
+  for (let i = 0; i < s.length; ) {
+    let end = Math.min(i + ASSET_CHUNK, s.length)
+    // L：别在 UTF-16 代理对中间切断（emoji / 扩展汉字占两个码元）——若段尾正好落在高位代理上，把这一对留给下一段，
+    //   否则切出的半截代理对会变乱码，喂给 AI 的原文该处失真。ASSET_CHUNK=15000 远大于 1，end>i 恒成立、不会死循环。
+    if (end < s.length) {
+      const code = s.charCodeAt(end - 1)
+      if (code >= 0xd800 && code <= 0xdbff) end -= 1
+    }
+    out.push(s.slice(i, end))
+    i = end
+  }
   return out
 }
 
 // 用户在提示词弹窗里改过 user 段后，第 2..N 段要沿用「改过的提示词」只换原文：
-// 按 analyzeAssetsMessages 的锚点「【本章原文】」定位，替换其后到「请对照名册…」之间的原文，尾注保留。
+// 按 analyzeAssetsMessages 的锚点「【本段原文】」定位，替换其后到「请对照名册…」之间的原文，尾注保留。
 // 锚点被用户删掉时降级为在末尾追加一段带锚点的原文（不把整段提示词丢掉）。
-const SOURCE_ANCHOR = '【本章原文】'
+// item35：续写页分析的是整本/粘贴原文的切片（非按章），调 analyzeAssetsMessages 传 unit='段' → 提示词源块头变「【本段原文】」，故本锚点同步改为「本段」（原「本章」会失配、换源失效）。
+const SOURCE_ANCHOR = '【本段原文】'
 const swapSource = (userText, chunk) => {
   const t = String(userText || '')
   const i = t.indexOf(SOURCE_ANCHOR)
@@ -56,7 +67,23 @@ const swapSource = (userText, chunk) => {
   return `${head}\n${chunk}${tail}`
 }
 
-// A11(去重)：TYPE_BY_LABEL / typeKeyOf / tagForWord / applyStateChange 已由 B 抽到 assets.js 作单一出处，本页改 import 复用（原 62-106 的本地定义删除，避免与长篇页两份实现漂移）。
+// CP1/第12轮b：名字匹配改用 assets.js 单一出处 findAssetByName（findByName 精确 + matchesName 别名/空格容错），
+//   原本地副本删除——避免与 B 共享层漂移（applyFlowToRoster 内部也用同一个）。
+
+// CP2：多段回复合并后 parseAnalyze 会产出跨段重复条目（同一资产在多段都被提到）——按 key 去重，避免预览重复行与 hold/rel 重复 push。
+const dedupBy = (arr, keyOf) => {
+  const seen = new Set()
+  const out = []
+  ;(arr || []).forEach((it) => {
+    const k = keyOf(it)
+    if (seen.has(k)) return
+    seen.add(k)
+    out.push(it)
+  })
+  return out
+}
+
+// A11(去重)：typeKeyOf / applyStateChange 已由 B 抽到 assets.js 作单一出处，本页改 import 复用（原本地定义删除，避免与长篇页两份实现漂移）；tagForWord / TYPE_BY_LABEL 是这两个的内部依赖，随之住在 assets.js，本页不再单独 import。
 
 // 分析结果的分块折叠容器：点标题栏展开/收起，chevron 旋转指示状态
 function CollapseBlock({ title, icon, badge, open, onToggle, children }) {
@@ -96,13 +123,6 @@ function normalizeChar(c) {
   }
   if (!name && !attrs.length) return null
   return { name, attrs }
-}
-
-// 取人物某个设定键的值（转长篇档案时还原 identity / personality 用）。
-function attrVal(c, key) {
-  if (!c || !Array.isArray(c.attrs)) return ''
-  const hit = c.attrs.find((a) => a && a.k === key)
-  return hit ? String(hit.v ?? '') : ''
 }
 
 // 拼注入文本：每人一行「姓名：键1：值1；键2：值2」，无名无设定的空人物过滤掉。
@@ -175,12 +195,13 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
   const [selFlow, setSelFlow] = useState([])
   const [stateOpen, setStateOpen] = useState(false)
   // 分析结果分块折叠：各块默认展开
-  const [collapsed, setCollapsed] = useState({ world: false, chars: false, outline: false, timeline: false, style: false })
+  const [collapsed, setCollapsed] = useState({ world: false, chars: false, outline: false, timeline: false })
   const toggleBlock = (k) => setCollapsed((c) => ({ ...c, [k]: !c[k] }))
   // 导出完整原文
   const [exportFormat, setExportFormat] = useState('txt')
   const [exporting, setExporting] = useState(false)
   const [infoMsg, setInfoMsg] = useState('')
+  const [draftSaveError, setDraftSaveError] = useState('') // item12（第十轮）：草稿落 IDB 失败的显式警告（对齐 WizardPage M38 / LongFormPage L-新7），不再静默——否则 IDB 满时用户仍信「刷新不丢」
   // 已纳入原文的版本（按钮反馈）：{ 'v0':true, 'f2':true }
   const [incorporated, setIncorporated] = useState({})
   const fileRef = useRef(null)
@@ -205,11 +226,22 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
   const draftRef = useRef(null) // pagehide 兜底 flush 用的最新快照
   const clearedRef = useRef(false) // 点过「清除内容」：吃掉紧随其后的那一次自动落盘，让本地记录真的被删掉
   const assetAbortRef = useRef(null) // H6：资产分段分析的中断句柄（分段循环可被用户中断，不整批空跑）
+  // H-新1②：5 路生成（runAnalyze / 前文摘要 / runGenerate / runGenerateFollowup / runReviseIncorporate）共用一个中断句柄，
+  //   卸载(切页签)时一次性 abort 全部在飞请求；mountedRef 守卫卸载后的 setState。（资产分段分析仍用独立的 assetAbortRef，可页内手动停止）
+  const genAbortRef = useRef(null)
+  const mountedRef = useRef(true)
+  const copyTimersRef = useRef([]) // L1：复制提示的 1.5s 复位定时器集合，卸载时统一清（对齐 RevisePage）
 
   // 分析结果是否已过期：纳入原文或手改原文之后，大纲与故事线仍停在旧版本上
   const staleAnalysis = analyzed && analyzedSnapshot !== text
   const busyNow = generating || followupGenerating || summarizing || analyzing || assetAnalyzing || incRevising
-  const hasContent = !!(text || world || outline || characters.length || timeline.length || instruction || versions.length || followupVersions.length)
+  // M-1①：hasContent 必须把「已烧 token 的分析半成品」也算进去——pending*(待落库的资产更新/新增/状态/流转) 与 editDraft(资产编辑草稿)
+  //   原来不在判据里：不粘原文直接「分析原文」(回落整本 selectedBook.content) 会产出 pending* 但 hasContent=false → 防抖 effect 不落盘 → 刷新全丢重烧，
+  //   与 snapshot 的 M1/P1-3 承诺(把 pending*/editDraft 纳入草稿)自相矛盾。有任一非空即算有内容 → 落盘。
+  const hasContent = !!(
+    text || world || outline || characters.length || timeline.length || instruction || versions.length || followupVersions.length ||
+    pendingUpdates.length || pendingNew.length || pendingState.length || pendingFlow.length || editDraft
+  )
 
   const snapshot = () => ({
     text, sourceMode, sourceFile, exportFormat, instruction, collapsed,
@@ -219,6 +251,8 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
     // M1：待落库的分析结果与选中项纳入草稿，刷新不丢（原先漏了 → 刷新后 pending*/sel* 全空、已分析出的资产变更要重跑重烧）
     pendingUpdates, pendingNew, pendingState, pendingFlow,
     selUp, selNew, selState, selFlow,
+    // P1-3：资产编辑弹窗的半成品草稿也纳入——改一半刷新原来会整份丢掉（弹窗关、字段回退）
+    editDraft,
   })
 
   // 挂载时水合：读回上次的工作草稿（best-effort，读不到就空手开始，绝不阻塞页面）
@@ -232,13 +266,23 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
         setSourceFile(d.sourceFile || null)
         if (d.exportFormat && EXPORT_FORMAT_IDS.includes(d.exportFormat)) setExportFormat(d.exportFormat)
         setInstruction(typeof d.instruction === 'string' ? d.instruction : '')
-        if (d.collapsed && typeof d.collapsed === 'object') setCollapsed(d.collapsed)
+        // L：旧草稿的 collapsed 可能带已删文风块的 style 死键——恢复时剔掉，否则它会让「全部收起/展开」的 anyOpen 判断失真
+        if (d.collapsed && typeof d.collapsed === 'object') {
+          const { style: _dropStyle, ...restCollapsed } = d.collapsed
+          setCollapsed(restCollapsed)
+        }
         setAnalyzed(!!d.analyzed)
         setAnalyzedSnapshot(typeof d.analyzedSnapshot === 'string' ? d.analyzedSnapshot : '')
-        setWorld(d.world || '')
+        // 第一档④修：水合回读也归一（与 runAnalyze 写侧 :486-493 同口径）——修复前落库的毒丸草稿(world/outline 是对象、timeline 元素字段是对象)刷新即回灌，
+        //   CollapseBlock 渲染 {world}/{outline}/{t.stage}/{t.summary} 抛「Objects are not valid as React child」、每次刷新复现、用户无法自救(草稿一直在)。
+        setWorld(typeof d.world === 'string' ? d.world : '')
         setCharacters(Array.isArray(d.characters) ? d.characters.map(normalizeChar).filter(Boolean) : [])
-        setOutline(d.outline || '')
-        setTimeline(Array.isArray(d.timeline) ? d.timeline : [])
+        setOutline(typeof d.outline === 'string' ? d.outline : '')
+        setTimeline(
+          Array.isArray(d.timeline)
+            ? d.timeline.map((t) => (t && typeof t === 'object' ? { ...t, stage: typeof t.stage === 'string' ? t.stage : '', summary: typeof t.summary === 'string' ? t.summary : '' } : null)).filter(Boolean)
+            : [],
+        )
         setVersions(Array.isArray(d.versions) ? d.versions : [])
         setFollowupVersions(Array.isArray(d.followupVersions) ? d.followupVersions : [])
         setIncorporated(d.incorporated && typeof d.incorporated === 'object' ? d.incorporated : {})
@@ -251,6 +295,8 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
         setSelNew(Array.isArray(d.selNew) ? d.selNew : [])
         setSelState(Array.isArray(d.selState) ? d.selState : [])
         setSelFlow(Array.isArray(d.selFlow) ? d.selFlow : [])
+        // P1-3：恢复资产编辑弹窗的半成品草稿（有则弹窗自动重开到用户眼前，与 incDraft 恢复同口径）
+        if (d.editDraft && typeof d.editDraft === 'object' && d.editDraft.id) setEditDraft(d.editDraft)
         // 弹窗草稿：上次没点「确定并纳入」就退出的修改稿原样恢复，并直接把弹窗展开到用户眼前
         if (d.incDraft && typeof d.incDraft.text === 'string') {
           setIncDraft({
@@ -272,8 +318,18 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
   useEffect(() => {
     if (!hydrated) return
     if (clearedRef.current) { clearedRef.current = false; return }
+    // M-1②（修正上轮 L6 的过度收紧）：总是把最新快照落盘——包括「合法空态」。
+    //   上轮 L6 改成「!hasContent 就 draftRef.current=null; return（不写盘）」，结果【手动删空 textarea】(不走"清除内容"按钮、不设 clearedRef)
+    //   时旧记录原样留存 → 刷新旧内容复活(M-1b)。空快照落盘是无害的（水合读到空 = 全新开始、不弹"已恢复"），却能覆盖旧记录防复活；
+    //   分析半成品(pending*/editDraft)也随 snapshot 一并落盘(M-1a：不粘原文直接分析整本 → 刷新不丢不重烧)。draftRef 恒为快照对象，pagehide/卸载 flush 也照常写。
     draftRef.current = snapshot()
-    const t = setTimeout(() => saveContinueDraft(draftRef.current), 600)
+    // item12（第十轮）：检查落盘返回值——saveContinueDraft 失败返 false（backup.js 内部 catch 吞异常），原来忽略 ⟹ IDB 满时用户仍信「刷新不丢」。
+    //   对齐 LongFormPage L-新7：防抖落盘失败给显式警告；pagehide/blur 的 flush(:325/:353) 仍 best-effort 不提示（那两种场景页面正在离场，弹提示也看不到）。
+    const t = setTimeout(() => {
+      saveContinueDraft(draftRef.current).then((ok) => {
+        if (mountedRef.current) setDraftSaveError(ok ? '' : '草稿未能保存到浏览器数据库（可能存储空间不足）；未落库的原文与分析结果刷新后可能丢失，请尽快到「我的」页导出备份。')
+      })
+    }, 600)
     return () => clearTimeout(t)
   })
 
@@ -281,7 +337,12 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
   useEffect(() => {
     const flush = () => { if (draftRef.current) saveContinueDraft(draftRef.current) }
     window.addEventListener('pagehide', flush)
-    return () => window.removeEventListener('pagehide', flush)
+    // H-新1①：应用内切页签时 App 用 key={tab} 卸载本页，pagehide / blur 都不触发 → 600ms 防抖窗内的最后编辑会整份丢。
+    //   卸载 cleanup 里补一次 flush（读 draftRef 最新快照写盘），对齐 RevisePage / LongFormPage。
+    return () => {
+      window.removeEventListener('pagehide', flush)
+      flush()
+    }
   }, [])
 
   // 确认弹窗支持 ESC 关闭（与本页「续写设定」弹窗、以及项目里各 drawer 的交互口径一致）
@@ -307,7 +368,21 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
     return () => window.removeEventListener('blur', flush)
   }, [])
 
-  // 清除内容：原文 + 分析结果 + 文风档案 + 续写指令 + 已生成版本全部归零，并删掉浏览器里保存的草稿
+  // CP3 + H-新1②：卸载即中断——切 tab / 离开续写页后，分段资产分析(assetAbortRef)与 5 路生成(genAbortRef)的在飞请求全部 abort，
+  //   不再后台白烧额度、也不再对已卸载组件 setState。genAbortRef 在挂载时建一个整个生命周期共用的 controller。
+  useEffect(() => {
+    mountedRef.current = true
+    genAbortRef.current = new AbortController()
+    return () => {
+      mountedRef.current = false
+      assetAbortRef.current?.abort()
+      genAbortRef.current?.abort()
+      copyTimersRef.current.forEach((t) => clearTimeout(t)) // L1：清复制提示定时器
+      copyTimersRef.current = []
+    }
+  }, [])
+
+  // 清除内容：原文 + 分析结果 + 续写指令 + 已生成版本全部归零，并删掉浏览器里保存的草稿
   const doClear = async () => {
     clearedRef.current = hasContent // 本来就没内容时不置位，免得白吃掉下一次正常落盘
     draftRef.current = null
@@ -345,6 +420,16 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
     setAssetMsg('')
     setEditDraft(null)
     setErr('')
+    // CP4：清除内容要连资产分析的瞬时态一起归零——否则清完还残留上次的分段任务、几个弹窗开着、过滤条停在旧值，
+    //   且分析若在跑会继续后台烧额度。这里一并关掉弹窗、清 assetTask、复位过滤、中断在跑的分段循环。
+    assetAbortRef.current?.abort()
+    setAssetTask(null)
+    setAssetAnalyzing(false)
+    setUpdatesOpen(false)
+    setNewOpen(false)
+    setStateOpen(false)
+    setAssetPromptOpen(false)
+    setAssetFilter('all')
     await clearContinueDraft()
     setInfoMsg('已清除本页内容与浏览器里保存的草稿。')
   }
@@ -361,6 +446,9 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
         setErr('文件内容太少，请选择有一定篇幅的小说文件。')
         return
       }
+      // 必修4（第十一轮·同型 round-10 必修1）：导入覆盖前脏检查——当前原文非空且与将导入内容不同时先 confirm，
+      //   否则粘贴/已导入的旧原文被静默覆盖（600ms 后草稿也被新文覆盖、无处找回；旧文只在跑过分析时残留 analyzedSnapshot 且无恢复入口）。
+      if (String(text || '').trim() && String(text) !== String(content) && !window.confirm('导入会替换当前原文（当前未另存的内容将丢失）。确定导入吗？')) return
       setText(content)
       setSourceMode('file')
       const fmt = extOf(file.name)
@@ -382,6 +470,11 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
       return
     }
     setErr('')
+    // 第一档③修：重新分析会用 AI 结果整表覆盖 world/outline/characters/timeline（含用户手改的），这些入了草稿、无恢复入口，
+    //   且 staleAnalysis 提示会主动劝用户"再点一次分析原文"。与必修4(导入覆盖)/存疑1(二次分析)同口径：已有内容时先 confirm（放在烧 token 的分析之前），取消则不分析、不烧额度。
+    if (world || outline || characters.length || timeline.length) {
+      if (!window.confirm('重新分析会用新的 AI 结果替换当前的世界观 / 大纲 / 人物卡 / 故事线（包括你手动改过的内容），且无法撤销。确定继续吗？')) return
+    }
     const truncated = text.length > ANALYZE_LIMIT
     const analyzeText = truncated ? text.slice(0, ANALYZE_LIMIT) : text
     setPromptConfirm({
@@ -396,20 +489,40 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
     setPromptConfirm(null)
     setAnalyzing(true)
     try {
-      const res = await chatJSON({ apiKey, messages: groups[0].messages, temperature: 0.3 })
-      setWorld(res.world_setting || '')
+      // 用户需求(第一档后续)：粘贴了原文但没选书 → 用原文自动建一本书并选中，让"分析原文 → 资产"有归属(资产 per-book、无书则按钮禁用)。
+      //   续写草稿是全局单条(CONTINUE_DRAFT_ID='continue')、不按书存 → 建书+选书不会冲掉本页原文。仅"无选中书"时建(避免重复建档)；建失败不阻断世界观分析。
+      if (!lib.selectedBook && text.trim()) {
+        try {
+          const nb = await lib.createBookFromText(text)
+          lib.select(nb.id)
+          setAssetMsg(`已用当前原文建档《${nb.name}》并选中——现在可以点「分析原文 → 资产」把资产存进这本书。`)
+        } catch (e) {
+          setErr((e && e.message) || '用原文建档失败；资产分析需先选中一本书。')
+        }
+      }
+      const res = await chatJSON({ apiKey, messages: groups[0].messages, temperature: 0.3, signal: genAbortRef.current?.signal })
+      if (!mountedRef.current) return // H-新1②：已卸载，丢弃结果不上屏
+      // 必修6同型横扫：AI 结果字段归一——world_setting/outline/timeline 元素可能是对象/数组（extractJSON 不做类型归一），
+      //   直接渲染(世界观/大纲/故事线 CollapseBlock)会抛「Objects are not valid as React child」，且随 continue 草稿落 IDB → 刷新持续崩。
+      //   字符串字段用 typeof 守卫（对象归空、不显 [object Object]）；characters 已由 normalizeChar 归一（name/attrs 全 String），无需再处理。
+      setWorld(typeof res.world_setting === 'string' ? res.world_setting : '')
       setCharacters(Array.isArray(res.characters) ? res.characters.map(normalizeChar).filter(Boolean) : [])
-      setOutline(res.outline || '')
-      setTimeline(Array.isArray(res.timeline) ? res.timeline : [])
+      setOutline(typeof res.outline === 'string' ? res.outline : '')
+      setTimeline(
+        Array.isArray(res.timeline)
+          ? res.timeline.map((t) => (t && typeof t === 'object' ? { ...t, stage: typeof t.stage === 'string' ? t.stage : '', summary: typeof t.summary === 'string' ? t.summary : '' } : null)).filter(Boolean)
+          : [],
+      )
       setAnalyzed(true)
       setAnalyzedSnapshot(text) // 记住这份分析依据的原文；此后原文再变（纳入续写 / 手动编辑）就能判出分析已滞后
       if (meta.truncated) {
         setErr(`原文较长，已分析前 ${ANALYZE_LIMIT} 字。如需完整分析请拆分原文后重试。`)
       }
     } catch (e) {
-      setErr(e.message)
+      if (!mountedRef.current || e?.name === 'AbortError') return // H-新1②：卸载中断静默
+      setErr(e?.message || String(e))
     } finally {
-      setAnalyzing(false)
+      if (mountedRef.current) setAnalyzing(false)
     }
   }
 
@@ -433,16 +546,17 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
       setSummarizing(true)
       const headText = text.slice(Math.max(0, text.length - TAIL_LENGTH - 60000), text.length - TAIL_LENGTH)
       try {
-        const sumRes = await chatJSON({ apiKey, messages: summarizeMessages({ text: headText }), temperature: 0.3 })
+        const sumRes = await chatJSON({ apiKey, messages: summarizeMessages({ text: headText }), temperature: 0.3, signal: genAbortRef.current?.signal })
         summary = sumRes.summary || ''
       } catch {
-        // 摘要失败不阻塞续写，降级为仅尾部截断
+        // 摘要失败不阻塞续写，降级为仅尾部截断（卸载中断也走这里，下面 mounted 守卫会拦掉后续 setState）
         summary = ''
       } finally {
-        setSummarizing(false)
+        if (mountedRef.current) setSummarizing(false)
       }
       tail = text.slice(text.length - TAIL_LENGTH)
     }
+    if (!mountedRef.current) return // H-新1②：摘要期间切页卸载 → 不再弹确认窗 / setState
     const charText = charsToText(characters)
     setPromptConfirm({
       title: '自定义续写（4 个方向并发）',
@@ -450,7 +564,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
       note: summary ? '原文较长，已先对前文做了一次摘要压缩（不可编辑的预处理，未单独弹窗）；下面是 4 个方向的续写提示词，可查看 / 编辑。' : '',
       groups: CONTINUE_ANGLES.map((a, i) => ({
         label: `版本${i + 1}（${a.title}）`,
-        messages: continueMessages({ text: tail, summary, world, characters: charText, outline, timeline, instruction, index: i }),
+        messages: continueMessages({ text: tail, summary, world, characters: charText, outline, timeline, instruction, index: i, forbidden: lib.style?.forbidden }), // item13：禁用词数据驱动注入(B 已接 forbiddenBlockOf)，来源=当前绑定文风档案 lib.style?.forbidden；空/未绑书即 undefined→forbiddenBlockOf 返回空串、行为同修前
       })),
       proceed: runGenerate,
     })
@@ -473,7 +587,9 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
               ...ANTI_REPETITION,
               messages: g.messages,
               temperature: a.temp,
+              signal: genAbortRef.current?.signal, // H-新1②：卸载时统一 abort
               onDelta: (full) => {
+                if (!mountedRef.current) return
                 setVersions((prev) => {
                   const next = [...prev]
                   next[i] = { title: a.title, content: full }
@@ -481,26 +597,29 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
                 })
               },
             })
+            if (!mountedRef.current) return
             setVersions((prev) => {
               const next = [...prev]
               next[i] = { title: a.title, content }
               return next
             })
           } catch (e) {
+            if (!mountedRef.current || e?.name === 'AbortError') return // 卸载中断：不写错误版本、不上屏
             setVersions((prev) => {
               const next = [...prev]
-              next[i] = { title: a.title, error: e.message }
+              next[i] = { title: a.title, error: e?.message || String(e) }
               return next
             })
           } finally {
-            setProgress((p) => p + 1)
+            if (mountedRef.current) setProgress((p) => p + 1)
           }
         },
       )
     } catch (e) {
-      setErr(e.message)
+      if (!mountedRef.current || e?.name === 'AbortError') return
+      setErr(e?.message || String(e))
     } finally {
-      setGenerating(false)
+      if (mountedRef.current) setGenerating(false)
     }
   }
 
@@ -523,15 +642,16 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
       setSummarizing(true)
       const headText = text.slice(Math.max(0, text.length - TAIL_LENGTH - 60000), text.length - TAIL_LENGTH)
       try {
-        const sumRes = await chatJSON({ apiKey, messages: summarizeMessages({ text: headText }), temperature: 0.3 })
+        const sumRes = await chatJSON({ apiKey, messages: summarizeMessages({ text: headText }), temperature: 0.3, signal: genAbortRef.current?.signal })
         summary = sumRes.summary || ''
       } catch {
         summary = ''
       } finally {
-        setSummarizing(false)
+        if (mountedRef.current) setSummarizing(false)
       }
       tail = text.slice(text.length - TAIL_LENGTH)
     }
+    if (!mountedRef.current) return // H-新1②：摘要期间切页卸载 → 不再弹确认窗 / setState
     const charText = charsToText(characters)
     setPromptConfirm({
       title: '探索后续（4 种剧情走向并发）',
@@ -539,7 +659,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
       note: summary ? '原文较长，已先对前文做了一次摘要压缩（不可编辑的预处理，未单独弹窗）；下面是 4 种走向的提示词，可查看 / 编辑。' : '',
       groups: FOLLOWUP_ANGLES.map((a, i) => ({
         label: `走向${i + 1}（${a.title}）`,
-        messages: followupMessages({ text: tail, summary, world, characters: charText, outline, timeline, index: i }),
+        messages: followupMessages({ text: tail, summary, world, characters: charText, outline, timeline, index: i, forbidden: lib.style?.forbidden }), // item13：同上，禁用词来源 lib.style?.forbidden，空即 0 字
       })),
       proceed: runGenerateFollowup,
     })
@@ -562,7 +682,9 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
               ...ANTI_REPETITION,
               messages: g.messages,
               temperature: a.temp,
+              signal: genAbortRef.current?.signal, // H-新1②：卸载时统一 abort
               onDelta: (full) => {
+                if (!mountedRef.current) return
                 setFollowupVersions((prev) => {
                   const next = [...prev]
                   next[i] = { title: a.title, content: full }
@@ -570,26 +692,29 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
                 })
               },
             })
+            if (!mountedRef.current) return
             setFollowupVersions((prev) => {
               const next = [...prev]
               next[i] = { title: a.title, content }
               return next
             })
           } catch (e) {
+            if (!mountedRef.current || e?.name === 'AbortError') return
             setFollowupVersions((prev) => {
               const next = [...prev]
-              next[i] = { title: a.title, error: e.message }
+              next[i] = { title: a.title, error: e?.message || String(e) }
               return next
             })
           } finally {
-            setFollowupProgress((p) => p + 1)
+            if (mountedRef.current) setFollowupProgress((p) => p + 1)
           }
         },
       )
     } catch (e) {
-      setErr(e.message)
+      if (!mountedRef.current || e?.name === 'AbortError') return
+      setErr(e?.message || String(e))
     } finally {
-      setFollowupGenerating(false)
+      if (mountedRef.current) setFollowupGenerating(false)
     }
   }
 
@@ -614,10 +739,16 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
 
 
   const copy = async (t, btn) => {
-    await copyText(t)
+    // L1：copyText 返回 true/false（clipboard 不可用且 execCommand 也失败时 false）——原来不看返回值恒显「已复制 ✓」是假成功；
+    //   且裸 setTimeout 改 btn.textContent、卸载不清。对齐 RevisePage：按 ok 显示 + 定时器入 ref 集合、卸载统一清。
+    const ok = await copyText(t)
     if (btn) {
-      btn.textContent = '已复制 ✓'
-      setTimeout(() => (btn.textContent = '复制'), 1500)
+      btn.textContent = ok ? '已复制 ✓' : '复制失败✗'
+      const tid = setTimeout(() => {
+        btn.textContent = '复制'
+        copyTimersRef.current = copyTimersRef.current.filter((x) => x !== tid)
+      }, 1500)
+      copyTimersRef.current.push(tid)
     }
   }
 
@@ -655,7 +786,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
     const before = incDraft.text
     setPromptConfirm({
       title: '按你的想法改写这段',
-      groups: [{ label: '改写提示词', messages: incorporateReviseMessages({ context: text.replace(/\s+$/, '').slice(-1200), text: before, note }) }],
+      groups: [{ label: '改写提示词', messages: incorporateReviseMessages({ context: text.replace(/\s+$/, '').slice(-1200), text: before, note, forbidden: lib.style?.forbidden }) }], // item13：禁用词来源 lib.style?.forbidden，空即 0 字
       proceed: runReviseIncorporate,
       meta: { before },
     })
@@ -672,13 +803,17 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
         // 上文语境只取原文结尾一小段：够模型对齐人称/视角/称谓即可，全文进去只会稀释「只改指到的地方」这条约束
         messages: groups[0].messages,
         temperature: 0.4,
-        onDelta: (full) => setIncDraft((p) => (p ? { ...p, text: full } : p)),
+        signal: genAbortRef.current?.signal, // H-新1②：卸载时统一 abort
+        onDelta: (full) => {
+          if (mountedRef.current) setIncDraft((p) => (p ? { ...p, text: full } : p))
+        },
       })
     } catch (e) {
+      if (!mountedRef.current || e?.name === 'AbortError') return // 卸载中断：不回滚、不上屏
       setIncDraft((p) => (p ? { ...p, text: before } : p)) // 失败回滚，不留半截稿
       setIncErr(`模型修改失败：${e?.message || e}`)
     } finally {
-      setIncRevising(false)
+      if (mountedRef.current) setIncRevising(false)
     }
   }
 
@@ -739,13 +874,22 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
 
   // —— 资产库（续写页）：分段分析原文 → 查看勾选落库 → 点击编辑 / 手动新增，存进所选书记录（浏览器缓存）——
   const selectedBook = lib.selectedBook
+  // B33：整本 content 的字数是 O(n)（content 可达百万字），原在 JSX(:1337 数据源提示) 里每次渲染重算；用 useMemo 按 content 缓存，切书/改原文才重算。
+  const bookWordCount = useMemo(() => countWords(selectedBook?.content || ''), [selectedBook?.content])
   // 阶段1(设计 §7 1.3②)：CRUD / links / 落库统一走 useAssets，不再页内自持 assetsLocal + 每次改动整表写盘。
   //   autoCommitMs=400：连续变更(如透出章逐字输入)合并成一次写盘(缓解 M29)；未选书时 useAssets 只留在本页并提示，不抛错。
   //   落库走 useAssets 默认路径(put('books', {...book, assets})) + onPersisted 里 lib.refresh()，与切书/删书的刷新口径一致。
   const libRefresh = lib.refresh
-  const onAssetsPersisted = useCallback(async () => {
-    await libRefresh()
-  }, [libRefresh])
+  const libSyncBook = lib.syncBook
+  const onAssetsPersisted = useCallback(
+    async (nb) => {
+      // P1-6：commit 会透传刚写盘的那本书 nb → 只定点更新内存里这一本，不再整库 getAll+normalize（连续编辑每 400ms 一次全库读会卡）。
+      //   切书 flush 等不传 nb 的路径退回全量 refresh，口径不变。
+      if (nb && nb.id && libSyncBook) libSyncBook(nb)
+      else await libRefresh()
+    },
+    [libSyncBook, libRefresh],
+  )
   // useAssets 的提示接进本页 assetMsg，但吞掉 debounce 落库那句通用「资产已保存」——
   // 否则它会在 400ms 后盖掉刚给出的结算摘要(如「已结算落库：状态变更 3 条…」)。失败提示照常透出。
   const onAssetMsg = useCallback((m) => {
@@ -753,10 +897,19 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
   }, [])
   const ua = useAssets({ book: selectedBook, onPersisted: onAssetsPersisted, idPrefix: 'cx', autoCommitMs: 400, onMessage: onAssetMsg })
   const assets = ua.assets
-  const assetBook = { ...(selectedBook || {}), assets }
+  // L-1：这几处原来每次渲染都重算——大书(百万字)时 chunkSource 复制整本、资产多时 computeAssetWarnings/duplicateNameGroups/filterAssets 全表扫描，
+  //   打字/流式生成每帧都跑 → 卡顿；且 assetBook 每渲染新建对象会让 AssetModal 的 useMemo(…,[book]) 失效。全部加 useMemo 稳定引用。
+  const assetBook = useMemo(() => ({ ...(selectedBook || {}), assets }), [selectedBook, assets])
   const perVol = perVolOf(assetBook)
   // 侧栏清单跟随分类筛选（与资产库弹窗同一份 filterAssets 判据，含「⚠ 待补全」虚拟类）
-  const shownAssets = ua.filtered(assetFilter)
+  const shownAssets = useMemo(() => ua.filtered(assetFilter), [ua.filtered, assetFilter])
+  // L17 消费侧：同书重名组数（duplicateNameGroups 归一名分组，名全唯一→[]）。资产库头部给一行提示，
+  //   提醒用户去合并/改名（真正的拦截+二次确认在 NewAssetModal / EditAssetModal 提交时）。
+  const dupeGroupCount = useMemo(() => duplicateNameGroups(assets).length, [assets])
+  const assetWarnings = useMemo(() => computeAssetWarnings(assets), [assets])
+  // L-1：分段数只随原文/整本内容变化，不必每渲染对整本 O(n) 切段（chunkSource 会复制出整段数组，只为取 .length 太浪费）
+  const textSegCount = useMemo(() => chunkSource(text).length, [text])
+  const bookSegCount = useMemo(() => chunkSource((selectedBook && selectedBook.content) || '').length, [selectedBook])
 
   // 打开「分析原文 → 资产」提示词弹窗：这一刻冻结分段与提示词(共 N 段、每段 ASSET_CHUNK 字、不足一段取完)。
   // 提示词改用两页共用的 analyzeAssetsMessages(五段产出：已有资产更新/新资产/状态变更/资产流转/伏笔推进)。
@@ -770,11 +923,22 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
       setAssetMsg('先粘贴或导入原文再分析资产')
       return
     }
+    // 存疑1（第十轮·用户拍板）：重新分析会用新结果整表覆盖 pending*（保留「整本重分析→覆盖」语义，**不改成追加**）——
+    //   但覆盖前若上次分析还有未采纳/未落库的结果，先确认，避免静默丢已烧额度的结果。confirm 放在 chunkSource/发送**之前**（烧 token 前），
+    //   用户可取消、先去勾选落库上次结果再重分析。（ContinuePage 只有 4 个 pending 数组；hookMoves 仅报数不落库，无 pendingHook。）
+    const pendingCount = pendingUpdates.length + pendingNew.length + pendingState.length + pendingFlow.length
+    if (pendingCount > 0 && !window.confirm(`上次分析还有 ${pendingCount} 条结果未采纳 / 未落库，重新分析会把它们替换掉。确定继续吗？（可先取消，去勾选落库上次的结果）`)) {
+      return
+    }
     const chunks = chunkSource(src)
     const msgs = analyzeAssetsMessages({
       roster: assets.map((a) => ({ name: a.name, type: a.type, detail: a.detail })),
       source: chunks[0] || '',
-      chapterNo: 0,
+      // item35（统筹裁定·参数化）：续写页分析的是整本/粘贴原文的切片、非按章 → unit='段'（提示词叙述改「本段原文」），
+      //   chapterLine 取代原来对续写页谎称的「第 0 章」。用「共 M 段·本段为其中一段」而非「第 N 段」：提示词模板只建一次(段1)，
+      //   第 2..N 段由 swapSource 只换原文、不复建模板，写死 N 会对后续段失真；且段号不影响 AI 提取，故用对所有段都成立的措辞。
+      unit: '段',
+      chapterLine: `【分析范围】整本/粘贴原文，按 ${chunks.length} 段逐段分析（本段为其中一段，非单独一章）；无章号可依据时「生效章/章号」列填 0`,
     })
     setAssetTask({
       system: (msgs[0] && msgs[0].content) || '',
@@ -787,7 +951,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
 
   // 采纳弹窗里那段(第 1 段)的回复，再把第 2..N 段依次发出去(沿用用户改过的提示词，只换原文)，最后合并解析一次。
   // 人在环路：每段都用同一份用户可见/可改的提示词；系统只解析与记录，不判断不拦截(设计 §5)。
-  const runAssetAnalyze = async (firstReply, editedUser) => {
+  const runAssetAnalyze = async (firstReply, editedUser, firstInfo) => {
     const task = assetTask
     if (!task) return
     const chunks = task.chunks || []
@@ -798,15 +962,23 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
     let full = String(firstReply || '')
     let doneSegs = 1 // 第 1 段(弹窗里已生成)计入已完成
     let stopped = ''
+    const truncSegs = [] // CP4：被截断的段号（finishInfo.truncated/incomplete）——原来静默并入 full，用户看不出哪段没跑完
+    // item23：首段(第1段)在 PromptEditorModal 里生成、不经下面的 i=1..N 循环，其截断状态由 onAdopt 回传的 firstInfo.truncated 携带——
+    //   首段被截断/未完整结束时把段号 1 也纳入 truncSegs，否则漏报第1段（modal 的 truncated 已含 finish.truncated||incomplete||abort/timeout 半截）。
+    if (firstInfo && firstInfo.truncated) truncSegs.push(1)
     try {
       for (let i = 1; i < chunks.length; i += 1) {
         setAssetMsg(`分析中… 第 ${i + 1}/${chunks.length} 段（每段 ${ASSET_CHUNK} 字）`)
         try {
           // H5：结构化资产提取统一 temperature 0.3（与第 1 段弹窗一致；原第 2..N 段用 chatStream 默认 0.9，口径不一且对结构化提取偏高）
           // H6：传 signal，单段失败/中断不整批废——用已成功段出部分结果
+          // CP4：每段与第 1 段弹窗同口径传 maxTokens:16000 + finishInfo，否则后续段走 provider 默认上限、截断了也静默并入 full
+          const segFinish = {}
           const r = await chatStream({
             apiKey,
             temperature: 0.3,
+            maxTokens: 16000,
+            finishInfo: segFinish,
             signal: ctrl.signal,
             messages: [
               { role: 'system', content: task.system },
@@ -815,6 +987,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
           })
           full += `\n${r || ''}`
           doneSegs += 1
+          if (segFinish.truncated || segFinish.incomplete) truncSegs.push(i + 1)
         } catch (segErr) {
           stopped =
             segErr?.name === 'AbortError'
@@ -823,64 +996,98 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
           break
         }
       }
+      // L：卸载(切页)守卫——assetAbortRef 已在卸载 effect 里 abort，段内 chatStream 抛 AbortError → 内层 catch break 到这里；
+      //   若已卸载就不再 parseAnalyze / setPending* / setAssetMsg（React18 下对已卸载 setState 虽是静默 no-op，但为与 5 路生成口径完全统一，显式拦掉）。
+      if (!mountedRef.current) return
       const parsed = parseAnalyze(full)
-      setPendingUpdates(parsed.updates || [])
-      setPendingNew(parsed.newAssets || [])
-      setSelUp((parsed.updates || []).map((_, i) => i))
-      setSelNew((parsed.newAssets || []).map((_, i) => i))
-      setPendingState(parsed.stateChanges || [])
-      setPendingFlow(parsed.flows || [])
-      setSelState((parsed.stateChanges || []).map((_, i) => i))
-      setSelFlow((parsed.flows || []).map((_, i) => i))
+      // CP2：多段合并后同一资产会重复产出——按 key 去重再入预览，避免重复行与 hold/rel 重复 push（口径对齐 LongFormPage mergeSeg）
+      const updates = dedupBy(parsed.updates || [], (u) => `${u.name}|${u.info}|${u.state}`)
+      const newAssets = dedupBy(parsed.newAssets || [], (n) => `${n.name}`)
+      const stateChanges = dedupBy(parsed.stateChanges || [], (s) => `${s.name}|${s.dimKey}|${s.state}|${s.since}`)
+      const flows = dedupBy(parsed.flows || [], (f) => `${f.person}|${f.change}|${f.asset}|${f.ch}`)
+      setPendingUpdates(updates)
+      setPendingNew(newAssets)
+      setSelUp(updates.map((_, i) => i))
+      setSelNew(newAssets.map((_, i) => i))
+      setPendingState(stateChanges)
+      setPendingFlow(flows)
+      setSelState(stateChanges.map((_, i) => i))
+      setSelFlow(flows.map((_, i) => i))
       const segNote =
         chunks.length > 1
           ? `（原文 ${task.total} 字，分 ${chunks.length} 段每段 ${ASSET_CHUNK} 字${stopped ? `，实际完成 ${doneSegs} 段` : '全量分析'}）`
           : `（原文 ${task.total} 字，一段取完）`
       setAssetMsg(
-        `${stopped ? stopped + '：' : '分析完成'}${segNote}已有资产更新 ${parsed.updates.length} 条、新资产 ${parsed.newAssets.length} 条、状态变更 ${parsed.stateChanges.length} 条、资产流转 ${parsed.flows.length} 条` +
+        `${stopped ? stopped + '：' : '分析完成'}${segNote}已有资产更新 ${updates.length} 条、新资产 ${newAssets.length} 条、状态变更 ${stateChanges.length} 条、资产流转 ${flows.length} 条` +
           (parsed.hookMoves && parsed.hookMoves.length ? `；伏笔推进 ${parsed.hookMoves.length} 条（续写页不持有伏笔表，仅报数不落库）` : '') +
+          (truncSegs.length ? `。注意：第 ${truncSegs.join('、')} 段回复可能被截断，结果或不全` : '') +
           '。查看勾选后才落库。',
       )
     } catch (ex) {
-      setAssetMsg(`分析失败：${ex.message}`)
+      if (!mountedRef.current || ex?.name === 'AbortError') return // L：卸载中断静默，不上屏
+      setAssetMsg(`分析失败：${ex?.message || String(ex)}`)
     } finally {
-      setAssetAnalyzing(false)
+      if (mountedRef.current) setAssetAnalyzing(false) // L：卸载后不复位（无意义），仅挂载时解除 analyzing
       assetAbortRef.current = null
     }
   }
 
   const applyUpdates = () => {
+    // M-D2：未选书 / 书已删时不落库——否则内存脏改、commit 失败、pending 被清 + 弹窗关，用户以为已落库、刷新全丢（对齐 LongFormPage 起手守卫）
+    if (!selectedBook) {
+      setAssetMsg('尚未选定书籍，无法落库。请先在「我的书库」选中或导入一本小说，再落库这些更新。')
+      return
+    }
     const chosen = pendingUpdates.filter((_, i) => selUp.includes(i))
-    // H2：同名资产的多条更新先按名聚合（detail 顺序追加去重、state 依次演进），每个资产只写一次；
-    //   原实现对每条更新都基于同一份渲染闭包 a.detail/a.state 计算再 updateAsset，后一条覆盖前一条 → 勾 N 条同名只落最后 1 条。
-    const byName = new Map()
+    // item7（第十轮）：改按「解析出的资产 id」聚合（对齐 LongFormPage:992，比原按名聚合更稳）——
+    //   原按名聚合：两个不同名（本名 + 别名）经 findAssetByName 解析到**同一资产**会分成两组，各自基于同一份渲染闭包 a.detail/a.state 计算再 updateAsset，
+    //   后一组覆盖前一组（勾 N 条指向同一资产只落最后 1 组）。按 id 聚合后同一资产的多条更新合并、只写一次（detail 顺序追加去重、state 依次演进）。
+    const byId = new Map() // assetId -> { asset, ups:[] }
+    let skipped = 0 // 第12轮a[2]·M6：名字缺失 / 名册无此资产的更新条数——原来静默丢弃无计数
     chosen.forEach((u) => {
-      if (!u || !u.name) return
-      if (!byName.has(u.name)) byName.set(u.name, [])
-      byName.get(u.name).push(u)
+      if (!u || !u.name) {
+        skipped += 1
+        return
+      }
+      const a = findAssetByName(assets, u.name) // CP1：容错别名/空格名，不再严格 === 静默跳过
+      if (!a) {
+        skipped += 1 // 名册无此资产：该条跳过计数
+        return
+      }
+      if (!byId.has(a.id)) byId.set(a.id, { asset: a, ups: [] })
+      byId.get(a.id).ups.push(u)
     })
-    byName.forEach((ups, name) => {
-      const a = assets.find((x) => x.name === name)
-      if (!a) return
+    let doneUp = 0 // 真正写入的资产数（按 id 聚合后每个资产算一次）
+    byId.forEach(({ asset: a, ups }) => {
       let detail = String(a.detail || '')
       const st = normalizeState(a.state)
       ups.forEach((u) => {
         // L-2：追加前判重，避免反复合并把同一句堆多遍
         if (u.info && !detail.includes(u.info)) detail = detail ? `${detail}｜${u.info}` : String(u.info)
-        // 阶段2(设计 §5 ⑤)：粗状态词并入 plot 维度、原话留 legacy；同名多条按顺序演进(后者为最终态)
+        // 阶段2(设计 §5 ⑤)：粗状态词并入 plot 维度、原话留 legacy；同一资产多条按顺序演进(后者为最终态)
         const word = String(u.state || '').trim()
         const tag = STATE_V1_MAP[word] || STATE_V1_MAP[word.toLowerCase()]
         if (tag) st.plot = { ...(st.plot || {}), tag }
         if (word) st.legacy = st.legacy || word
       })
       st.meta = { updatedAt: Date.now(), updatedBy: 'analyze', sourceCh: (st.meta && st.meta.sourceCh) || 0 }
-      ua.updateAsset(a.id, { detail, state: st })
+      ua.updateAsset(a.id, { detail, state: st }) // item7：每个 id 只调一次（合并后），不再被同名/别名的第二组覆盖
+      doneUp += 1
     })
-    setPendingUpdates([])
+    // M8：只移除已勾选的，未勾选的更新条目保留在池里（对齐「分析原文」路径），不再整体清空
+    setPendingUpdates(pendingUpdates.filter((_, i) => !selUp.includes(i)))
     setSelUp([])
     setUpdatesOpen(false)
+    // 第12轮a[2]·M6：落库后给摘要反馈——原来只清池 + 关窗、无 setAssetMsg，界面留的是上一条旧提示；
+    //   名册无此资产也静默丢、无计数。对齐 applyNew / applyStateSettlement 的「实写 N / 跳过 M」口径。
+    setAssetMsg(`已落库更新 ${doneUp} 个资产` + (skipped ? `（${skipped} 条因名字未建档已跳过，可先到资产库建档或核对该资产名）` : ''))
   }
   const applyNew = () => {
+    // M-D2：未选书 / 书已删时不落库（同 applyUpdates）
+    if (!selectedBook) {
+      setAssetMsg('尚未选定书籍，无法落库。请先在「我的书库」选中或导入一本小说，再落库这些新资产。')
+      return
+    }
     const chosen = pendingNew.filter((_, i) => selNew.includes(i))
     let added = 0
     let skipped = 0
@@ -898,60 +1105,94 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
       else skipped += 1
     })
     setAssetMsg(`已落库新资产 ${added} 个${skipped ? `（重名 / 无名 ${skipped} 个已跳过，重名可在「+ 新增资产」里选合并）` : ''}`)
-    setPendingNew([])
+    // M8：只移除已勾选的，未勾选的新资产条目保留在池里，不再整体清空
+    setPendingNew(pendingNew.filter((_, i) => !selNew.includes(i)))
     setSelNew([])
     setNewOpen(false)
   }
 
   // 状态结算落库（设计 §5 ⑤）：只写用户勾选的条目；不勾选则库里一个字节都不变。系统零判断零拦截。
   const applyStateSettlement = () => {
+    // M-D2：未选书 / 书已删时不落库——原来无条件 setAssetMsg「已结算落库」+ 清 pending + 关弹窗，
+    //   但 useAssets 未选书时只留内存不落库、commit 也失败 ⟹ 用户以为已落库、pending 已清、刷新全丢（对齐 LongFormPage 起手守卫）
+    if (!selectedBook) {
+      setAssetMsg('尚未选定书籍，无法结算落库。请先在「我的书库」选中或导入一本小说，再落库这些状态变更与流转。')
+      return
+    }
     const selSc = pendingState.filter((_, i) => selState.includes(i))
-    // H3：同名资产的多条状态变更先按名聚合、依次 applyStateChange 累积，每个资产只写一次；
-    //   原实现每条都基于同一份渲染闭包 a.state → 后条覆盖前条，多维度/多条变更只留最后一条。
-    const scByName = new Map()
-    selSc.forEach((sc) => {
-      if (!sc || !sc.name) return
-      if (!scByName.has(sc.name)) scByName.set(sc.name, [])
-      scByName.get(sc.name).push(sc)
-    })
-    scByName.forEach((scs, name) => {
-      const a = assets.find((x) => x.name === name)
-      if (!a) return
-      let st = a.state
-      scs.forEach((sc) => {
-        st = applyStateChange(st, sc, sc.since || 0)
-      })
-      ua.updateAsset(a.id, { state: st })
-    })
-    // 资产流转：人物侧记一条 hold；获得且未建档 → 顺便建最小资产(需求7)；损毁/消耗/丢失 → 标注不删(拍板5)
     const selFl = pendingFlow.filter((_, i) => selFlow.includes(i))
-    let newItem = 0
-    selFl.forEach((fl) => {
-      if (!fl.asset) return
-      const person = assets.find((x) => x.name === fl.person)
-      if (person) {
-        const st = normalizeState(person.state)
-        const hold = Array.isArray(st.hold) ? [...st.hold] : []
-        if (!hold.some((h) => h.name === fl.asset && h.change === fl.change && h.ch === fl.ch)) hold.push({ name: fl.asset, change: fl.change || 'gain', ch: fl.ch || 0 })
-        st.hold = hold
-        st.meta = { updatedAt: Date.now(), updatedBy: 'analyze', sourceCh: fl.ch || 0 }
-        ua.updateAsset(person.id, { state: st })
+    // 第12轮b[1]：结算改调 B 共享层——流转落库走 applyFlowToRoster（与 LongFormPage 单一出处、产出一致：
+    //   人物建档/hold、gain 建档不写 ch_reveal、holder+held_by、lose→phys lost、broken/consumed→phys broken、字段级合并全在共享函数里），
+    //   名字匹配走 findAssetByName。做法：把状态变更 + 流转都累积到一份工作副本数组上，最后按 id diff 落库（每资产只写一次）。
+    const origIds = new Set(assets.map((a) => a.id))
+    let working = assets.map((a) => ({ ...a }))
+    const touched = new Set() // 被改过的【已建档】资产 id → updateAsset
+    const createdIds = new Set() // 本次结算新建的资产 id → addAsset
+    // ① 状态变更（增量并入 state，保留 id 与无关维度）
+    let doneSc = 0
+    let scSkip = 0
+    selSc.forEach((sc) => {
+      // M4：名字缺失 / dimKey 未识别 → 跳过不落库（预览行已标「维度未识别 · 本条不落库」）
+      if (!sc || !sc.name || !sc.dimKey) {
+        scSkip += 1
+        return
       }
-      const target = assets.find((x) => x.name === fl.asset)
-      if (!target && fl.change === 'gain') {
-        const r = ua.addAsset({ name: fl.asset, type: 'item', ch_reveal: fl.ch || 0 }, { idPrefix: 'cx' })
-        if (r && r.ok) newItem += 1
-      } else if (target && (fl.change === 'broken' || fl.change === 'consumed' || fl.change === 'lose')) {
-        const st = normalizeState(target.state)
-        const noteWord = fl.changeRaw || (fl.change === 'consumed' ? '已消耗' : fl.change === 'lose' ? '已丢失' : '已损毁')
-        st.phys = { tag: 'broken', note: noteWord, ...(fl.ch ? { since: fl.ch } : {}) }
-        st.meta = { updatedAt: Date.now(), updatedBy: 'analyze', sourceCh: fl.ch || 0 }
-        ua.updateAsset(target.id, { state: st })
+      const a = findAssetByName(working, sc.name)
+      if (!a) {
+        scSkip += 1 // 名册无此资产
+        return
       }
+      // L-新1：生效章兜底优先条目自带的 fromCh、再兜底 0——与 A 区 LongFormPage 状态变更段同口径（两页一致）。
+      //   注：续写页分析走 chapterNo:0（整本/粘贴原文、非按章），dedupBy 也不打 fromCh，故此处 sc.fromCh 现为 undefined、
+      //   表达式等价于原 `sc.since || 0`（无行为变化）；加上是为与长篇页统一、且日后若给续写页状态变更打 fromCh 即自动生效。
+      a.state = applyStateChange(a.state, sc, sc.since || sc.fromCh || 0)
+      touched.add(a.id)
+      doneSc += 1
     })
-    setAssetMsg(`已结算落库：状态变更 ${selSc.length} 条 / 资产流转 ${selFl.length} 条${newItem ? `（新入表 ${newItem} 个道具）` : ''}`)
-    setPendingState([])
-    setPendingFlow([])
+    // ② 资产流转：逐条累积调 applyFlowToRoster（reducer 口径见 assets.js 注释），新建/命中由共享函数解析
+    let doneFl = 0
+    let flSkip = 0
+    let newItem = 0
+    let newPerson = 0
+    selFl.forEach((fl) => {
+      if (!fl || !fl.asset) {
+        flSkip += 1
+        return
+      }
+      const r = applyFlowToRoster(working, fl, { idPrefix: 'cx' })
+      working = r.assets
+      ;(r.created || []).forEach((c) => {
+        createdIds.add(c.id)
+        if (c.type === 'person') newPerson += 1
+        else newItem += 1
+      })
+      if (r.personId && origIds.has(r.personId)) touched.add(r.personId)
+      if (r.targetId && origIds.has(r.targetId)) touched.add(r.targetId)
+      if (r.skipped) flSkip += 1
+      else doneFl += 1
+    })
+    // ③ 落库：新建走 addAsset（已带 id，normalizeAsset 保留）、改过的已建档走 updateAsset（传整条，内部 normalizeAsset 合并）
+    const byId = new Map(working.map((a) => [a.id, a]))
+    createdIds.forEach((id) => {
+      const asset = byId.get(id)
+      if (asset) ua.addAsset(asset, { idPrefix: 'cx' })
+    })
+    touched.forEach((id) => {
+      const asset = byId.get(id)
+      if (asset) ua.updateAsset(id, asset)
+    })
+    const createdNote = newItem || newPerson ? `（新入表 ${[newItem ? `${newItem} 个道具` : '', newPerson ? `${newPerson} 个人物` : ''].filter(Boolean).join('、')}）` : ''
+    const skips = [
+      scSkip > 0 ? `状态变更 ${scSkip} 条跳过(名册无此资产 / 维度未识别)` : '',
+      flSkip > 0 ? `流转 ${flSkip} 条跳过(资产对不上 / 动作未识别)` : '',
+    ].filter(Boolean)
+    setAssetMsg(
+      `已结算落库：状态变更 ${doneSc} / 资产流转 ${doneFl}${createdNote}` +
+        (skips.length ? `；${skips.join('、')}` : ''),
+    )
+    // M8：只从池里移除【已勾选】的，未勾选的保留（对齐「分析原文」路径的 filter 保留语义）——原来整体清空会把没勾的一起丢掉
+    setPendingState(pendingState.filter((_, i) => !selState.includes(i)))
+    setPendingFlow(pendingFlow.filter((_, i) => !selFlow.includes(i)))
     setSelState([])
     setSelFlow([])
     setStateOpen(false)
@@ -959,34 +1200,70 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
 
   // 结算预览的只读辅助：旧值(该维度当前状态的中文说法)，让用户看得见改了什么(设计 §5 ④)
   const oldStateWord = (sc) => {
-    const a = assets.find((x) => x.name === sc.name)
+    const a = findAssetByName(assets, sc.name) // CP1：容错别名/空格名，预览「旧值」不再误显示 (未建档)
     if (!a) return '(未建档)'
     const st = a.state && a.state.v === 2 ? a.state : normalizeState(a.state)
     const dim = sc.dimKey
-    if (dim === 'place') return st.place && st.place.ref ? `在${st.place.ref}` : '(未记录)'
+    // inferred（B区第三路推定的裸词/动词短语，如「前往昆仑」）：ref 不是确定地名，加「在」会变成「在前往昆仑」语病 + 假「已到达」——
+    //   与 B区 placePhrase 对 inferred 的处理同口径：不加断言位置的前缀、直接渲染原词。
+    if (dim === 'place') return st.place && st.place.ref ? (st.place.inferred ? st.place.ref : `在${st.place.ref}`) : '(未记录)'
     if (dim === 'hold') return `持有 ${(st.hold || []).filter((h) => h.change === 'gain' || !h.change).map((h) => h.name).filter(Boolean).join('、') || '(无)'}`
     const o = st[dim]
     if (!o) return '(未记录)'
     return o.note || (o.tag ? stateLabel(dim, o.tag) : '(未记录)')
   }
-  const assetExists = (name) => assets.some((a) => a.name === name)
+  const assetExists = (name) => !!findAssetByName(assets, name) // CP1：容错别名/空格名，与结算落库口径一致
 
   const updateAsset = (id, patch) => ua.updateAsset(id, patch)
   const deleteAsset = (id) => ua.deleteAsset(id)
-  const openEdit = (a) => setEditDraft({ ...a, knowersStr: (a.knowers || []).join('、'), aliasesStr: (a.aliases || []).join(', ') })
+  const openEdit = (a) =>
+    setEditDraft({
+      ...a,
+      knowersStr: (a.knowers || []).join('、'),
+      aliasesStr: (a.aliases || []).join(', '),
+      // P1-12：controller 是「表单临时字段」不落库（normalizeAsset 只把它转成 controlled_by 边、不存字段），
+      //   故打开时从已有的 controlled_by 边反推出初值，EditAssetModal 的「控制者」输入框才有内容、保存不丢边。
+      controller: a.controller != null ? a.controller : ((a.links || []).find((l) => l.type === 'controlled_by') || {}).to || '',
+    })
   const saveEdit = () => {
     if (!editDraft) return
-    // 阶段1(设计 §6.2)：保存走 normalizeAsset，白名单补齐 state/aliases/tier/卷号/holder
-    //   （原白名单只有 name/type/detail/章号/knowers/links，EditAssetModal 新增的 StatePanel 状态、分层 tier、别名 aliases 会存不进去）
-    const next = normalizeAsset({
-      ...editDraft,
-      aliases: editDraft.aliasesStr != null ? editDraft.aliasesStr : editDraft.aliases,
-      knowers: editDraft.knowersStr != null ? editDraft.knowersStr : editDraft.knowers,
-      ch_reveal: Number(editDraft.ch_reveal) || 0,
-      ch_rumor: Number(editDraft.ch_rumor) || 0,
-    })
+    // 第12轮b[4]：保存改调 B 共享层 saveEditAsset（= normalizeAsset({...orig, ...edited})），与 LongFormPage 单一出处一致。
+    //   holder/controller 在 editDraft 里即生效；派生边(held_by/located_in/controlled_by)由 normalizeAsset→rebuildDerivedEdges
+    //   按 derived 标记统一重算（strip 旧派生边、保手建边、按最新 holder/place/controller 重建）。
+    //   故删掉之前 C 侧手写的 DERIVED_LINK_TYPES 按类型剔除——那会误删用户手建的同类型边，且与 B 的标记机制重复。
+    const next = saveEditAsset(
+      editDraft,
+      {
+        aliases: editDraft.aliasesStr != null ? editDraft.aliasesStr : editDraft.aliases,
+        knowers: editDraft.knowersStr != null ? editDraft.knowersStr : editDraft.knowers,
+        ch_reveal: Number(editDraft.ch_reveal) || 0,
+        ch_rumor: Number(editDraft.ch_rumor) || 0,
+      },
+      { idPrefix: 'cx' },
+    )
     updateAsset(editDraft.id, next)
     setEditDraft(null)
+  }
+
+  // P1-11：改名撞上名册里另一条已有资产、用户选「合并」时——把当前编辑草稿增量并入命中的那条（mergeAsset 保留其 id，
+  //   指向它的关系边不断），再删掉被改名的这条，最终只剩一条，不再出现两条同名。
+  const mergeEdit = (draft, hit) => {
+    if (!draft || !hit || hit.id === draft.id) return
+    // 第12轮b[4]：与 saveEdit 同走 B 共享层 saveEditAsset（单一出处，派生边由 rebuildDerivedEdges 统一重算）
+    const next = saveEditAsset(
+      draft,
+      {
+        aliases: draft.aliasesStr != null ? draft.aliasesStr : draft.aliases,
+        knowers: draft.knowersStr != null ? draft.knowersStr : draft.knowers,
+        ch_reveal: Number(draft.ch_reveal) || 0,
+        ch_rumor: Number(draft.ch_rumor) || 0,
+      },
+      { idPrefix: 'cx' },
+    )
+    ua.mergeAsset(hit.id, next)
+    deleteAsset(draft.id)
+    setEditDraft(null)
+    setAssetMsg(`已把这条合并进《${hit.name}》（保留其 id 与关系边）`)
   }
 
   // 阶段1(设计 §6.2 / 需求3、7)：手动新增资产。onSubmit(asset, info)：asset 已由 NewAssetModal 过 normalizeAsset(带 id/links/state v2)
@@ -1008,9 +1285,14 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
   }
   // LinkEditor / StatePanel「顺便建档」：建一条最小资产(只有名字+类型)，符合"人在环路 + 不阻断"
   const quickCreateAsset = ({ name, type }) => {
-    if (!name) return
-    const r = ua.addAsset(normalizeAsset({ name, type: typeKeyOf(type) || 'person' }, { idPrefix: 'cx' }), { idPrefix: 'cx', force: true })
-    setAssetMsg(r && r.ok ? `已顺便建档《${name}》（只有名字，其余字段可后补）` : `「${name}」建档未成功${r && r.msg ? `：${r.msg}` : ''}`)
+    if (!name) return { ok: false, msg: '没有名字' }
+    // 与 A 区对齐：去掉 force:true、走 addAsset 的查重——同名不静默重复建档（原 force 会绕过查重，别名/归一差异下可能建出重名脏资产）。
+    //   「顺便建档」按钮本就只对 isDangling(未建档) 的目标显示，正常流程不会命中查重；命中说明已存在，直接提示、不重复建。
+    const r = ua.addAsset(normalizeAsset({ name, type: typeKeyOf(type) || 'person' }, { idPrefix: 'cx' }), { idPrefix: 'cx' })
+    if (r && r.ok) setAssetMsg(`已顺便建档《${name}》（只有名字，其余字段可后补）`)
+    else if (r && r.reason === 'duplicate') setAssetMsg(`名册里已有「${name}」，未重复建档（关系边会直接指向它）`)
+    else setAssetMsg(`「${name}」建档未成功${r && r.msg ? `：${r.msg}` : ''}`)
+    return r // M-C：把结果回传给 LinkEditor，建档失败时它不乐观标记「已建档」（回滚提示）
   }
 
   return (
@@ -1023,7 +1305,19 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
           {/* 资产库：我的书库下方，样式同款卡片，可收起；点清单条目即编辑 */}
           <section className="glass-card rounded-2xl bg-paper p-4 shadow-sm">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-bold"><Ic n="library" /> 资产库（{assets.length}）</h3>
+              <h3 className="flex items-center gap-2 text-sm font-bold">
+                <span>
+                  <Ic n="library" /> 资产库（{assets.length}）
+                </span>
+                {dupeGroupCount > 0 && (
+                  <span
+                    className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700"
+                    title="同书存在重名资产，关系边与悬空判定会歧义，建议合并或改名（新建 / 改名时也会二次确认）"
+                  >
+                    {dupeGroupCount} 组重名
+                  </span>
+                )}
+              </h3>
               <button onClick={() => setAssetListOpen((o) => !o)} className="rounded-full px-3 py-1 text-xs text-stone-500 hover:bg-stone-100">
                 {assetListOpen ? '收起' : '展开'}
               </button>
@@ -1034,11 +1328,20 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
                   <button
                     onClick={openAssetPrompt}
                     disabled={!selectedBook || assetAnalyzing}
-                    title="把本页原文从头到尾每 15000 字一段发给 AI，逐段提取资产与状态；发送前可先看/改提示词"
+                    title={`把本页原文从头到尾每 ${ASSET_CHUNK} 字一段发给 AI，逐段提取资产与状态；发送前可先看/改提示词`}
                     className="rounded-lg bg-red-700 px-3 py-1.5 text-xs text-onaccent hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {assetAnalyzing ? '分析中…' : '分析原文 → 资产'}
                   </button>
+                  {/* H6：分段分析可中断——assetAbortRef 的 signal 已传进每段 chatStream，点「停止」即 abort；已跑完的段保留为部分结果(runAssetAnalyze 的 break 分支) */}
+                  {assetAnalyzing && (
+                    <button
+                      onClick={() => assetAbortRef.current?.abort()}
+                      className="rounded-lg border border-stone-300 bg-stone-50 px-3 py-1.5 text-xs text-stone-600 hover:bg-stone-100"
+                    >
+                      停止
+                    </button>
+                  )}
                   <button onClick={() => setAssetOpen(true)} className="rounded-lg border border-stone-300 bg-stone-50 px-3 py-1.5 text-xs text-stone-700 hover:bg-stone-100">
                     查看资产库
                   </button>
@@ -1083,13 +1386,13 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
                     必须在 UI 说清，不能显示"尚未粘贴"却暗地里分析整本书 */}
                 <p className="mt-2 text-[11px] leading-relaxed text-stone-400">
                   {wordCount
-                    ? `数据源：本页原文 ${wordCount} 字，从头到尾每 ${ASSET_CHUNK} 字一段（共 ${Math.ceil(wordCount / ASSET_CHUNK)} 段，不足一段取完）全量分析`
+                    ? `数据源：本页原文 ${wordCount} 字，从头到尾每 ${ASSET_CHUNK} 字一段（共 ${textSegCount} 段，不足一段取完）全量分析`
                     : selectedBook && selectedBook.content
-                      ? `数据源：本页未粘贴原文，将分析整本《${selectedBook.title || selectedBook.name}》（约 ${countWords(selectedBook.content)} 字、${Math.ceil(String(selectedBook.content).length / ASSET_CHUNK)} 段）——段数多、耗时长、消耗额度大`
+                      ? `数据源：本页未粘贴原文，将分析整本《${selectedBook.title || selectedBook.name}》（约 ${bookWordCount} 字、${bookSegCount} 段）——段数多、耗时长、消耗额度大`
                       : '数据源：尚未粘贴 / 导入原文'}
                   {selectedBook ? '' : '；未选书时不落库'}
                 </p>
-                {!selectedBook && <p className="mt-2 text-xs text-stone-400">先在「我的书库」选中或导入一本小说，资产会存进这本书。</p>}
+                {!selectedBook && <p className="mt-2 text-xs text-stone-400">先在「我的书库」选中或导入一本小说，资产会存进这本书；<b>或直接在本页粘贴原文后点上方「分析原文」，会自动用原文建档并选中</b>，之后即可「分析原文 → 资产」。</p>}
                 {assetMsg && <p className="mt-2 text-xs text-stone-500">{assetMsg}</p>}
                 <ul className="mt-2 space-y-1">
                   {shownAssets.slice(0, 12).map((a) => (
@@ -1158,6 +1461,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
               <span className="text-xs text-stone-400">结果可编辑、可分块收起</span>
             </div>
             {err && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{err}</p>}
+            {draftSaveError && <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700">{draftSaveError}</p>}
             {infoMsg && <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{infoMsg}</p>}
           </section>
 
@@ -1170,7 +1474,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
                   <button
                     onClick={() => {
                       const anyOpen = Object.values(collapsed).some((v) => !v)
-                      setCollapsed({ world: anyOpen, chars: anyOpen, outline: anyOpen, timeline: anyOpen, style: anyOpen })
+                      setCollapsed({ world: anyOpen, chars: anyOpen, outline: anyOpen, timeline: anyOpen })
                     }}
                     className="rounded-full border border-stone-300 px-3 py-1.5 text-xs text-stone-600 hover:bg-stone-50"
                   >
@@ -1318,6 +1622,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
             <DiagnosePanel
               apiKey={apiKey}
               text={text.length > 16000 ? text.slice(-16000) : text}
+              total={text.length}
               context={[
                 world && `【世界观】${world.slice(0, 500)}`,
                 outline && `【大纲】${outline.slice(0, 800)}`,
@@ -1387,6 +1692,9 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
             <section className="grid gap-4 sm:grid-cols-2">
               {CONTINUE_ANGLES.map((a, i) => {
                 const v = versions[i]
+                // P2：并发生成时 versions 可能有空洞（next[i]= 先填了高下标），持久化后空洞被 JSON 变成 null；
+                //   非生成态下跳过空洞，避免渲染出只有标题的「空白卡」。保留下标不压缩，incorporated 的 v${i} 对齐不错位。
+                if (!v && !generating) return null
                 return (
                   <article key={i} className="glass-card flex flex-col rounded-2xl bg-paper shadow-sm">
                     <header className="flex items-center justify-between rounded-t-2xl border-b border-stone-100 px-4 py-3">
@@ -1435,6 +1743,8 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
               <div className="grid gap-4 sm:grid-cols-2">
                 {FOLLOWUP_ANGLES.map((a, i) => {
                   const v = followupVersions[i]
+                  // P2：同续写版本——跳过持久化后残留的空洞(null)，非生成态不渲染空白卡；下标不压缩以对齐纳入状态
+                  if (!v && !followupGenerating) return null
                   return (
                     <article key={i} className="glass-card flex flex-col rounded-2xl bg-paper shadow-sm">
                       <header className="flex items-center justify-between rounded-t-2xl border-b border-stone-100 px-4 py-3">
@@ -1484,6 +1794,9 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
         <div
           className="glass-scrim fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
           onClick={() => !generating && setShowDialog(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-label="续写设定"
         >
           <div
             className="glass-modal w-full max-w-lg rounded-2xl bg-paper p-6 shadow-xl"
@@ -1516,13 +1829,13 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
                   setShowDialog(false)
                   generate()
                 }}
-                disabled={generating || countWords(text) < 50}
+                disabled={generating || wordCount < 50}
                 className="min-h-[40px] rounded-full bg-stone-800 px-5 py-2 text-sm font-medium text-white hover:bg-stone-700 disabled:opacity-50"
               >
                 <Ic n="rocket" /> 开始续写
               </button>
             </div>
-            {countWords(text) < 50 && (
+            {wordCount < 50 && (
               <p className="mt-2 text-right text-xs text-red-500">请先粘贴或导入至少几十字的原文</p>
             )}
           </div>
@@ -1663,8 +1976,8 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
         initialPrompt={(assetTask && assetTask.user) || ''}
         temperature={0.3}
         onClose={() => setAssetPromptOpen(false)}
-        onAdopt={(reply, prompt) => {
-          runAssetAnalyze(reply, prompt)
+        onAdopt={(reply, prompt, info) => {
+          runAssetAnalyze(reply, prompt, info) // item23：透传首段 finish 标志，runAssetAnalyze 据此把第1段纳入 truncSegs
         }}
       />
 
@@ -1676,7 +1989,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
         onDeleteAsset={deleteAsset}
         onEditAsset={openEdit}
         onAddAsset={() => setNewAssetOpen(true)}
-        warnings={computeAssetWarnings(assets)}
+        warnings={assetWarnings}
         perVol={perVol}
         filter={assetFilter}
         onFilterChange={setAssetFilter}
@@ -1686,6 +1999,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
         setEditDraft={setEditDraft}
         onClose={() => setEditDraft(null)}
         onSave={saveEdit}
+        onMerge={mergeEdit}
         onDelete={() => {
           deleteAsset(editDraft.id)
           setEditDraft(null)
@@ -1698,7 +2012,6 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
       {/* 阶段1(需求3、7)：手动新增资产——全字段可空、全空不入库、重名给「合并 / 仍新增」 */}
       <NewAssetModal
         open={newAssetOpen}
-        mode="create"
         assets={assets}
         perVol={perVol}
         chapterNo={0}
@@ -1708,7 +2021,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
         onQuickCreate={quickCreateAsset}
       />
       {updatesOpen && (
-        <div className="fixed inset-0 z-[56] flex items-center justify-center bg-black/50 p-4" onClick={() => setUpdatesOpen(false)}>
+        <div className="fixed inset-0 z-[56] flex items-center justify-center bg-black/50 p-4" onClick={() => setUpdatesOpen(false)} role="dialog" aria-modal="true" aria-label="已有资产更新">
           <div className="flex max-h-[80vh] w-[min(560px,94vw)] flex-col overflow-hidden rounded-2xl bg-paper shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="border-b border-stone-200 px-5 py-3 font-semibold">已有资产更新（{pendingUpdates.length}）</div>
             <div className="flex-1 space-y-2 overflow-y-auto p-4">
@@ -1728,7 +2041,10 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
                     onChange={(e) => setPendingUpdates((p) => p.map((x, j) => (j === i ? { ...x, state: e.target.value } : x)))}
                     className="rounded border border-stone-300 bg-paper px-1 py-0.5"
                   >
-                    {['活跃', '死亡', '毁坏', '隐藏', '升迁'].map((s) => (
+                    {/* L8：AI 返回的状态词若不在这 5 个固定项里，受控 <select> 无匹配 option → 显示空白/首项但真实值仍是原词(显示≠落库)。
+                        补一个「原词」兜底 option，保证当前值始终可见、与落库一致（与 LinkEditor TypeSelect 的 M-F 兜底同口径）。 */}
+                    {u.state && !STATE_WORDS_CN.includes(u.state) && <option value={u.state}>{u.state}（原词）</option>}
+                    {STATE_WORDS_CN.map((s) => (
                       <option key={s} value={s}>
                         {s}
                       </option>
@@ -1746,7 +2062,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
         </div>
       )}
       {newOpen && (
-        <div className="fixed inset-0 z-[56] flex items-center justify-center bg-black/50 p-4" onClick={() => setNewOpen(false)}>
+        <div className="fixed inset-0 z-[56] flex items-center justify-center bg-black/50 p-4" onClick={() => setNewOpen(false)} role="dialog" aria-modal="true" aria-label="新资产">
           <div className="flex max-h-[80vh] w-[min(560px,94vw)] flex-col overflow-hidden rounded-2xl bg-paper shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="border-b border-stone-200 px-5 py-3 font-semibold">新资产（{pendingNew.length}）</div>
             <div className="flex-1 space-y-2 overflow-y-auto p-4">
@@ -1775,7 +2091,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
       {/* 阶段2(设计 §5 ④)：状态结算预览——【状态变更】显示 旧值 → 新值，【资产流转】未建档的资产名旁标「顺便建档」。
           默认全选，取消勾选即不落库；系统不做任何一致性判断、不阻断、不标红拦截。 */}
       {stateOpen && (
-        <div className="fixed inset-0 z-[56] flex items-center justify-center bg-black/50 p-4" onClick={() => setStateOpen(false)}>
+        <div className="fixed inset-0 z-[56] flex items-center justify-center bg-black/50 p-4" onClick={() => setStateOpen(false)} role="dialog" aria-modal="true" aria-label="状态结算预览">
           <div className="flex max-h-[80vh] w-[min(640px,94vw)] flex-col overflow-hidden rounded-2xl bg-paper shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-stone-200 px-5 py-3">
               <span className="font-semibold text-ink">状态结算预览（勾选后落库）</span>
@@ -1791,6 +2107,8 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
                     <input type="checkbox" checked={selState.includes(i)} onChange={(e) => setSelState(e.target.checked ? [...selState, i] : selState.filter((x) => x !== i))} />
                     <span className="font-medium text-ink">{sc.name}</span>
                     <span className="rounded bg-stone-200 px-1 py-0.5 text-stone-600">{sc.dim}</span>
+                    {/* M4：维度未识别(dimKey 缺失)的条目落库时会被跳过，这里提前标红告知，避免用户以为已生效 */}
+                    {!sc.dimKey && <span className="rounded bg-red-50 px-1 py-0.5 text-[10px] text-red-600">维度未识别 · 本条不落库</span>}
                     <span className="text-stone-400">{oldStateWord(sc)}</span>
                     <span className="text-stone-400">→</span>
                     <input
@@ -1808,13 +2126,57 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
               <div className="space-y-2">
                 <div className="text-xs font-bold text-stone-700">资产流转（{pendingFlow.length}）</div>
                 {pendingFlow.map((fl, i) => (
-                  <label key={`f${i}`} className="flex items-center gap-2 rounded-lg border border-stone-200 bg-stone-50 p-2 text-xs">
+                  <label key={`f${i}`} className="flex flex-wrap items-center gap-2 rounded-lg border border-stone-200 bg-stone-50 p-2 text-xs">
                     <input type="checkbox" checked={selFlow.includes(i)} onChange={(e) => setSelFlow(e.target.checked ? [...selFlow, i] : selFlow.filter((x) => x !== i))} />
                     <span className="font-medium text-ink">{fl.person}</span>
                     <span className="rounded bg-stone-200 px-1 py-0.5 text-stone-600">{fl.changeRaw || fl.change}</span>
+                    {/* 第12轮b·M7：识别不出动作(change 空)时给「动作」下拉让用户改——原来只有红字提示、无可改控件，落库只记原词进 note。
+                        决策#1：绝不猜 gain（会把「失去」记成语义反转）。与 LongFormPage 预览控件对齐。 */}
+                    {!fl.change && (
+                      <span className="flex items-center gap-1 text-red-400">
+                        动作未识别，请改
+                        <select
+                          value=""
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => setPendingFlow((p) => p.map((x, j) => (j === i ? { ...x, change: e.target.value } : x)))}
+                          className="rounded border border-stone-300 bg-paper px-1 py-0.5 text-stone-700"
+                          aria-label="流转动作"
+                        >
+                          <option value="">选择动作</option>
+                          {[['gain', '获得'], ['lose', '失去'], ['broken', '损坏'], ['consumed', '消耗'], ['transferred', '易主']].map(([v, lab]) => (
+                            <option key={v} value={v}>
+                              {lab}
+                            </option>
+                          ))}
+                        </select>
+                      </span>
+                    )}
                     <span className="text-stone-700">{fl.asset}</span>
-                    {/* 未建档的流转目标：勾选落库时会顺便建一条最小资产(只有名字+类型)，符合需求7 与"不阻断" */}
-                    {!assetExists(fl.asset) && <span className="rounded bg-amber-50 px-1 py-0.5 text-[10px] text-amber-700">未建档 · 勾选即顺便建档</span>}
+                    {/* 第12轮b·M7：gain 且未建档时给「类型」下拉——原来落库 type 恒 item，灵兽/地点/势力被建成道具。
+                        用户选的类型写进 fl.assetType，applyFlowToRoster 建档时 typeKeyOf(fl.assetType) 生效。与 LongFormPage 对齐。
+                        决策③消费侧：parseAnalyze 解析出的 fl.assetType 在此【预填】select 初始值——经 typeKeyOf 归一，
+                        兼容解析值是 key(person)/中文标签(人物)/同义词三种形态，都能落到 ASSET_TYPES 里对应 option 而不空白；
+                        fl.assetType 为空(undefined/'')时回退 item，与 applyFlowToRoster 的 typeKeyOf(fl.assetType||'item') 口径一致。
+                        用户 onChange 手选写入的是合法 key，覆盖解析值 → 手选优先级高于解析值(解析值只作初始预填)。 */}
+                    {fl.asset && fl.change === 'gain' && !assetExists(fl.asset) && (
+                      <span className="flex items-center gap-1 text-amber-700">
+                        未建档，落库建为
+                        <select
+                          value={fl.assetType ? typeKeyOf(fl.assetType) : 'item'}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => setPendingFlow((p) => p.map((x, j) => (j === i ? { ...x, assetType: e.target.value } : x)))}
+                          className="rounded border border-stone-300 bg-paper px-1 py-0.5 text-stone-700"
+                          aria-label="新资产类型"
+                        >
+                          {ASSET_TYPES.map((t) => (
+                            <option key={t} value={t}>
+                              {ASSET_TYPE_LABEL[t] || t}
+                            </option>
+                          ))}
+                        </select>
+                      </span>
+                    )}
+                    {fl.asset && (fl.change === 'broken' || fl.change === 'consumed' || fl.change === 'lose') && <span className="text-stone-400">（标注不删）</span>}
                     <span className="flex-1" />
                     <span className="text-stone-400">{fl.ch ? `第${fl.ch}章` : ''}</span>
                   </label>
@@ -1854,10 +2216,17 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
         </div>
       )}
       {promptConfirm && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 p-4" onClick={() => setPromptConfirm(null)}>
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 p-4"
+          // M1(P1-16 同口径)：已编辑过提示词则遮罩不响应——避免误点遮罩一下把改过的 4 组提示词全丢。✕ / 取消 仍可关(明确操作)。
+          onClick={() => { if (!promptConfirm.edited) setPromptConfirm(null) }}
+          role="dialog"
+          aria-modal="true"
+          aria-label={promptConfirm.title}
+        >
           <div className="flex max-h-[88vh] w-[min(820px,94vw)] flex-col overflow-hidden rounded-2xl bg-paper shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-stone-200 px-5 py-3">
-              <span className="font-semibold text-ink">{promptConfirm.title} · 发送前可查看 / 编辑提示词</span>
+              <span className="font-semibold text-ink">{promptConfirm.title} · 发送前可查看 / 编辑提示词{promptConfirm.edited ? '（已编辑）' : ''}</span>
               <button onClick={() => setPromptConfirm(null)} className="text-stone-400 hover:text-stone-700" aria-label="关闭">✕</button>
             </div>
             <div className="flex-1 space-y-5 overflow-y-auto px-5 py-4">
@@ -1877,7 +2246,7 @@ export default function ContinuePage({ apiKey, onNeedKey }) {
                             const msgs = groups[gi].messages.slice()
                             msgs[mi] = { ...msgs[mi], content: e.target.value }
                             groups[gi] = { ...groups[gi], messages: msgs }
-                            return { ...p, groups }
+                            return { ...p, groups, edited: true }
                           })
                         }
                         className="w-full resize-y rounded-lg border border-stone-300 bg-stone-50 p-3 font-mono text-[13px] leading-relaxed focus:border-stone-500 focus:outline-none"

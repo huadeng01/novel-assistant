@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { getAll, getById, put } from '../lib/db.js'
+import { countWords } from '../lib/utils.js' // #1：saveChapter 回写 book.wordCount 用(全书正文字数)
 import PromptEditorModal from '../components/PromptEditorModal.jsx'
 import AssetGraphModal from '../components/AssetGraphModal.jsx'
 import AssetModal from '../components/AssetModal.jsx'
@@ -7,15 +8,14 @@ import EditAssetModal from '../components/EditAssetModal.jsx'
 import { exportDocument, readDocumentFile, READ_ACCEPT, EXPORT_FORMATS } from '../lib/docio.js'
 import { LANG_RULE, sanitizeHabits, analyzeAssetsMessages } from '../lib/prompts.js'
 // LF-4：移除死 import（parseAssetTable/digestLines/LINK_LABEL 全文未用）；LF-1：移除 chatStream（分析原文改用弹窗已生成的 reply，不再页内直发第二次请求）
-import { parseExpandAssets, parseBookAssets, backfillChapterNos, computeAssetWarnings, parseRelations, parseAnalyze, buildLinks, revealChapterOf, rumorChapterOf } from '../lib/parseAssets.js'
+import { parseExpandAssets, parseBookAssets, backfillChapterNos, computeAssetWarnings, parseRelations, parseAnalyze, buildLinks, revealChapterOf, rumorChapterOf, isSectionHead, findForeshadowByTitle, chapLineNo, normName, STATE_WORDS_CN } from '../lib/parseAssets.js'
 // 资产库阶段2：paraBandFor(段长带宽，worldviews 单一出处) + assets.js 纯函数层(状态口语化注入/规范化/perVol 单一出处/新增资产判据)
-// B-H3：worldviews 用 namespace 导入——paraBandFor 已确定存在；avgParaLenFor(book) 由 B 本轮导出(从题材 GENRE_STYLE_TABLE 或绑定文风 metrics 推真值)，
-// 用运行时探测接入(namespace 不会因缺具名导出而崩 build)：B 导出后自动生效，未导出则回退 book.avgParaLen。
-import * as worldviews from '../lib/worldviews/index.js'
-import { stateToPromptLine, perVolOf, normalizeState, normalizeAsset, splitListValue, ASSET_TYPES, ASSET_TYPE_LABEL, STATE_V1_MAP, STATE_LABEL, stateLabel, dashOut, dashOnly, applyStateChange, typeKeyOf, tagForWord, TYPE_BY_LABEL } from '../lib/assets.js'
+// B-H3：worldviews 是段长数字唯一出处——paraBandFor(段长带宽) + avgParaLenFor(book)(从题材档 GENRE_STYLE_TABLE / 绑定文风 metrics.paraMedian 推真实目标段长，B 已导出)。
+import { paraBandFor, avgParaLenFor } from '../lib/worldviews/index.js'
+// 3a：删死 import——tagForWord/TYPE_BY_LABEL/STATE_LABEL/dashOnly 是 applyStateChange/typeKeyOf 的内部依赖，那两者已收敛进 assets.js，本页不直接引用这 4 个。
+//   (L③注：dashOut 曾在此列，后因 applyNew/appendExpand 的名字去重需直接调用，已重新加入 import 并在多处在用——见 :16 与下方 import。)
+import { stateToPromptLine, perVolOf, normalizeState, normalizeAsset, ASSET_TYPES, ASSET_TYPE_LABEL, STATE_V1_MAP, stateLabel, applyStateChange, typeKeyOf, saveEditAsset, applyFlowToRoster, findAssetByName, findByName, dashOut } from '../lib/assets.js'
 import NewAssetModal from '../components/NewAssetModal.jsx'
-
-const { paraBandFor } = worldviews
 
 // 长篇写作工作台：中栏写作区 + 可收缩抽屉(章节树) + 弹窗(资产库/图谱/分析原文/编辑资产)。
 // 收纳统一为"按钮触发抽屉/弹窗"，按钮样式统一 genBtn/ghostBtn 小按钮，不用全宽长条。
@@ -30,7 +30,8 @@ const lfDraftKey = (bookId) => `lf_current:${bookId}`
 // 5.5 章节版本历史：每章最多保留的旧正文快照数，超出丢弃最旧的一版
 const HISTORY_MAX = 5
 
-// 结算落库纯函数（TYPE_BY_LABEL/typeKeyOf/tagForWord/applyStateChange）已收敛到 assets.js 单一出处、本页 import 复用。
+// 结算落库纯函数（applyStateChange/typeKeyOf）已收敛到 assets.js 单一出处、本页 import 复用（其内部依赖 tagForWord/TYPE_BY_LABEL/STATE_LABEL/dashOnly 随之下沉，本页不直接引用）。
+//   L③注：dashOut 原也随之内沉，后因 applyNew/appendExpand 名字去重需直接调用已重新 import(见 :16)，非"零调用"。
 // A11：曾在 LongFormPage 与 ContinuePage 各存一份、口径靠注释维系一致，是回归高发点 ⟹ 去重到 assets.js。
 
 const expandPrompt = (book) => {
@@ -104,22 +105,36 @@ const outlineNodesOfVol = (outline, vol) => {
   let inNodes = false
   for (const raw of String(outline || '').split('\n')) {
     const l = raw.trim()
-    if (l.includes('【分卷结构表】')) { inStruct = true; inNodes = false; continue }
-    if (l.includes('【每卷事件节点】')) { inNodes = true; inStruct = false; continue }
+    // 段头判定改用 parseAssets 的 isSectionHead 单一出处：剥 #/【】/[]/** 装饰后匹配段名，兼容 AI 写「## 分卷结构表」(不带【】)——
+    // 原 includes('【分卷结构表】') 对不带【】的标题漏匹配、会静默丢掉本卷结构行/事件节点行。
+    if (isSectionHead(l, '分卷结构表')) { inStruct = true; inNodes = false; continue }
+    if (isSectionHead(l, '每卷事件节点')) { inNodes = true; inStruct = false; continue }
+    // 这行保留原判定(不改 isSectionHead)：它是「遇到任意其它段标题就关闭当前区块」的通用标题检测，非具名段匹配，与 isSectionHead(l,name) 语义不同；
+    // startsWith('【')||/^#{1,3}/ 已覆盖 #/【 两种常见关闭形态(如「## 关键转折」能正常关闭)；不用 isSectionHead(l,'') 空段名惯用法(不清晰、且更宽会对加粗数据行误关)。
     if (l.startsWith('【') || /^#{1,3} /.test(l)) { inStruct = false; inNodes = false; continue }
     if (!l) continue
-    if (inStruct && (l.startsWith(`${vol}｜`) || l.startsWith(`${vol}|`))) keep.push(l)
-    if (inNodes && new RegExp(`^${vol}\\s*[.．]`).test(l)) keep.push(l)
+    // #3：卷号列先过 volNoOfCell 归一再比对，兼容「第2卷｜…」「卷二｜…」「2｜…」等写法(原只认裸数字 `${vol}｜` 会漏取整卷)
+    if (inStruct && volNoOfCell(l.split(/[｜|]/)[0]) === vol) keep.push(l)
+    if (inNodes) {
+      const dot = l.search(/[.．]/) // 事件节点行形如「卷序.节点序｜…」，取首个 . 前的卷序归一比对
+      if (dot > 0 && volNoOfCell(l.slice(0, dot)) === vol) keep.push(l)
+    }
   }
   return keep.join('\n')
 }
+
+// 章行→章号 单一口径(尾批2·L5)：认「21｜…」(简表)与「第21章｜…」(完整表)两种写法，数字与分隔符间容忍空格("21 ｜"也算)。非章行返回 0。
+//   volumesTail3 / volumeChapters / adoptNextVol(newMax) / chapterPlan / planTitleOf 五处共用——此前各自正则漂移(volumeChapters 无 \s*、volumesTail3 不认第N章、newMax 有 \s*)：
+//   对"21 ｜章名"会 maxPlanChapter 漏算而 newMax 计入 → 续排重复排一章；「第N章」格式的书 volumesTail3 恒空 → 续排承接不到上卷结尾钩子。
+//   chapLineNo 已下沉到 parseAssets.js 单一出处（第五轮）——本页与 WizardPage 都 import 复用，不再各留本地副本（此前两份靠注释维系、已漂移过）。B 的下沉版比原本地副本更全：区间排除覆盖 至/到/-/–/—/~/～/〜/－/、// 且认中文数字章号。
+//   #5(已知边界·入注防复审重复标记)：下沉版认裸中文数字行——「三｜第三卷 风起」会返回 3，可能劫持 chapterPlan 的第3章(全角数字→0、中文数字>99→0)。但项目自产格式恒为「阿拉伯章号 + 【第N卷章节】段头」(段头非章行、chapLineNo=0)，生成路径不受影响；仅手写/AI 漂移的卷章表可能踩，届时人工复核章号列。parseAssets 在 B 区、不在本页改。
 
 // 卷章表末3章（续排时承接结尾钩子与人物处境）
 const volumesTail3 = (volumes) =>
   String(volumes || '')
     .split('\n')
     .map((l) => l.trim())
-    .filter((l) => /^\d+[｜|]/.test(l))
+    .filter((l) => chapLineNo(l) > 0) // L5：与 volumeChapters/newMax 同口径，「第N章」书的末3章不再恒空
     .slice(-3)
     .join('\n')
 
@@ -136,6 +151,13 @@ const cnVolNo = (s) => {
   return tens * 10 + ones
 }
 
+// #3：卷号列归一——从"第2卷"/"卷二"/"2"/"二"等写法里抽出数字核再过 cnVolNo。outlineNodesOfVol 比对卷号用，
+// 避免 AI 把分卷结构表行写成「第2卷｜…」、事件节点写成「第2卷.1｜…」时，原 startsWith(`${vol}｜`)/`^${vol}[.．]` 只认裸数字而漏取整卷。
+const volNoOfCell = (s) => {
+  const m = String(s || '').match(/[0-9]+|[一二三四五六七八九十]+/)
+  return m ? cnVolNo(m[0]) : 0
+}
+
 // LF-6：续排卷号从卷章表的"第N卷…章节"标题实际解析(取最大卷号+1)，不再用"已排最大章 ÷ 卷一章数"反推。
 // 各卷章数不等时除法会算错卷号并喂错卷大纲(如卷一30章、排到70章时 ceil(70/30)+1=4，实际应是卷三)。
 // 卷标题解析不到时回落到旧的除法估算，保持可用。
@@ -150,6 +172,28 @@ const nextVolumeNoOf = (volumes, maxPlanChapter, pv) => {
   }
   if (maxVol > 0) return maxVol + 1
   return maxPlanChapter > 0 ? Math.ceil(maxPlanChapter / (pv || 40)) + 1 : 2
+}
+
+// item14：按卷章表的"第N卷…章节"标题实际定位 targetCh 落在哪卷（与 LF-6 nextVolumeNoOf 同一套卷标题正则 + cnVolNo + chapLineNo 单一口径），
+//   不用 Math.ceil(targetCh/perVol) 除法反推——各卷章数不等时除法算错卷(如卷一30章、第70章 ceil(70/30)=3，实际可能在卷二)，
+//   导致伏笔 activeFs(是否已埋/未回收)与 dueFs(本卷应回收)双双错卷。逐行扫描：遇卷标题更新 curVol，遇章号===targetCh 的章行即返回其所属卷。
+//   卷章表无卷标题 / 定位不到该章时回落除法估算（=原行为），保持可用、不回归。
+const volOfChapter = (volumes, targetCh, perVol) => {
+  if (!(targetCh > 0)) return 0
+  const headerRe = /第\s*([0-9]+|[一二三四五六七八九十]+)\s*卷[^】\n]*章节/
+  let curVol = 0
+  for (const raw of String(volumes || '').split('\n')) {
+    const l = raw.trim()
+    if (!l) continue
+    const hm = l.match(headerRe)
+    if (hm) {
+      const n = cnVolNo(hm[1])
+      if (n > 0) curVol = n
+      continue // 卷标题行本身不是章行（chapLineNo 对「【第N卷章节】」返回 0，此处先于章号判定拦截）
+    }
+    if (curVol > 0 && chapLineNo(l) === targetCh) return curVol
+  }
+  return perVol > 0 ? Math.ceil(targetCh / perVol) : 0
 }
 
 // 续排下一卷章表：从 startChapter 起排第 nextVol 卷，基于大纲本卷节点 + 已建档资产 + 前卷末3章承接
@@ -227,14 +271,34 @@ export default function LongFormPage() {
   const sourceFileRef = useRef(null)
   // A2：镜像最新 book 的 ref，供即发即忘的资产 CRUD 基于"最新 book"而非陈旧闭包快照更新，杜绝快速连改的 lost update(M29)
   const bookRef = useRef(null)
+  // #4：换书草稿载入门——本书草稿(getById drafts)载入完成前，持久化 effect 不写盘，避免用换书初值/旧书残留覆盖该书草稿(参 WizardPage M37 loadedRef)
+  const chapterLoadedRef = useRef(false)
+  // #1：保存本章 in-flight 守卫——双击/连点时第一次未完成前不重入，否则两次都读同一旧 chapters、把同一旧版压进 history 两次(历史出现重复快照)
+  const chapterSavingRef = useRef(false)
+  // 尾批1：待写草稿暂存——持久化 effect 每次调度时记下"尚未落盘的草稿 payload(含所属 bookId)"，500ms 到期写盘后置空。
+  //   换书 effect 据此在切走前 flush 一次，堵住"输入后 500ms 内换书→pending 存盘被 cleanup 取消→最近输入静默丢失"的 debounce 竞态。
+  const pendingDraftRef = useRef(null)
 
   const book = books.find((b) => b.id === bookId) || null
   useEffect(() => {
     bookRef.current = book
   }, [book])
+  // #3：msg 是单行状态提示，加超时自动清除——否则「已载入第3章」等旧提示会一直留着、与后续「保存失败/防剧透门」抢同一行造成误读
+  useEffect(() => {
+    if (!msg) return
+    const t = setTimeout(() => setMsg(''), 6000)
+    return () => clearTimeout(t)
+  }, [msg])
 
   // 换书：先清上一本残留(H10)，再恢复本书未保存的编辑草稿(H11)，无草稿则载入第1章
   useEffect(() => {
+    // 尾批1：切走前先 flush 上一本尚未落盘的编辑草稿——持久化 effect 的 500ms debounce 若未到期就被换书打断，
+    //   其 cleanup 只 clearTimeout、不写盘，最近输入会静默丢失。pendingDraftRef 带的是旧书 bookId 与内容，写回旧书草稿槽 lf_current:旧id，不会串到新书。
+    //   (本 effect 声明在持久化 effect 之前，故其 setup 先跑；此时 pendingDraftRef 仍是旧书内容，持久化 effect 的 cleanup 不会清它)
+    if (pendingDraftRef.current) {
+      put('drafts', pendingDraftRef.current).catch(() => {})
+      pendingDraftRef.current = null
+    }
     setSourceText('')
     setPendingUpdates([])
     setPendingNew([])
@@ -248,6 +312,13 @@ export default function LongFormPage() {
     setSelFlow([])
     setSelHook([])
     setMsg('')
+    // #4：换书立即同步清空当前章四态 + 关载入门。否则 getById 慢(>500ms)或 reject 期间，旧书的 chapterText/chapterNo 等会残留，
+    // 被下方持久化 effect 写进新书草稿槽(lf_current:新书id)，甚至点「保存本章」把旧书正文落成新书的章(H 级数据损坏)。
+    setChapterNo(1)
+    setChapterText('')
+    setChapterTitle('')
+    setPrevSummary('')
+    chapterLoadedRef.current = false
     let alive = true
     getById('drafts', lfDraftKey(bookId))
       .then((d) => {
@@ -257,6 +328,18 @@ export default function LongFormPage() {
           setChapterText(d.chapterText || '')
           setChapterTitle(d.chapterTitle || '')
           setPrevSummary(d.prevSummary || '')
+          setSourceText(typeof d.sourceText === 'string' ? d.sourceText : '') // item9（第十轮）：分析原文纳入草稿恢复——原漏了 ⟹ 粘贴/导入的原文刷新即丢（违反「所有输入落浏览器存储」；ContinuePage 全量入草稿，本页对齐）。旧草稿无此字段兜底空串
+          // M-D1：恢复待落库分析结果与勾选(与持久化 payload 对称)，刷新/换回本书不必重跑分析重烧额度；旧草稿无这些字段时兜底空数组
+          setPendingUpdates(Array.isArray(d.pendingUpdates) ? d.pendingUpdates : [])
+          setPendingNew(Array.isArray(d.pendingNew) ? d.pendingNew : [])
+          setPendingState(Array.isArray(d.pendingState) ? d.pendingState : [])
+          setPendingFlow(Array.isArray(d.pendingFlow) ? d.pendingFlow : [])
+          setPendingHook(Array.isArray(d.pendingHook) ? d.pendingHook : [])
+          setSelUp(Array.isArray(d.selUp) ? d.selUp : [])
+          setSelNew(Array.isArray(d.selNew) ? d.selNew : [])
+          setSelState(Array.isArray(d.selState) ? d.selState : [])
+          setSelFlow(Array.isArray(d.selFlow) ? d.selFlow : [])
+          setSelHook(Array.isArray(d.selHook) ? d.selHook : [])
         } else {
           const first = ((book && book.chapters) || []).find((c) => c.no === 1)
           setChapterNo(1)
@@ -265,20 +348,71 @@ export default function LongFormPage() {
           setPrevSummary(first ? first.summary || '' : '')
         }
       })
-      .catch(() => {})
+      .catch(() => {
+        // #4：读取失败保持四态为空(开头已清)，不残留旧书内容、不吞成"看起来载入了"
+      })
+      .finally(() => {
+        if (alive) chapterLoadedRef.current = true // 载入结束(成败都)才放行持久化 effect 写盘
+      })
     return () => {
       alive = false
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookId])
   // 当前编辑草稿持久化(H11)：防切页签/刷新丢未保存正文；正文可能很大，存 IndexedDB drafts（单条 lf_current）
+  // M-D1：待落库的分析结果(pending*)与勾选(sel*)一并纳入草稿(对齐 ContinuePage M1)——否则刷新/换书即丢，
+  //   而 UI 文案「未落库的不丢」在刷新场景就是假承诺；纳入后刷新不必重跑分析重烧额度，且每本书各自一槽互不串。
   useEffect(() => {
     if (!bookId) return
+    if (!chapterLoadedRef.current) return // #4：本书草稿载入完成前不写盘，避免用换书初值/旧书残留覆盖该书草稿(参 WizardPage M37)
+    const payload = {
+      id: lfDraftKey(bookId),
+      bookId,
+      chapterNo,
+      chapterText,
+      prevSummary,
+      chapterTitle,
+      sourceText, // item9（第十轮）：分析原文入草稿（与恢复对称）——原文可能很大，但草稿走 IndexedDB（非 localStorage 5MB），与 ContinuePage 全量入草稿同口径
+      pendingUpdates,
+      pendingNew,
+      pendingState,
+      pendingFlow,
+      pendingHook,
+      selUp,
+      selNew,
+      selState,
+      selFlow,
+      selHook,
+      updatedAt: Date.now(),
+    }
+    pendingDraftRef.current = payload // 尾批1：记下"尚未落盘"的内容(含 bookId)，换书时若 500ms debounce 未到期由换书 effect 补 flush
     const t = setTimeout(() => {
-      put('drafts', { id: lfDraftKey(bookId), bookId, chapterNo, chapterText, prevSummary, chapterTitle, updatedAt: Date.now() }).catch(() => {})
+      // L-新7：草稿存盘失败不再静默吞掉——明示用户(对齐 WizardPage M38)，否则用户信「刷新不丢」却丢了未落库内容。
+      //   (pagehide/卸载时的 flush 仍 best-effort 不提示：那两种场景页面正在离场，弹提示也看不到。)
+      put('drafts', payload).catch(() =>
+        setMsg('草稿未能保存到浏览器数据库（可能存储空间不足）；未落库内容刷新后可能丢失，请尽快「保存本章」或到「我的」页导出备份。')
+      )
+      pendingDraftRef.current = null // 已尝试落盘，换书/卸载无需再 flush(失败重试无益、已明示用户)
     }, 500)
     return () => clearTimeout(t)
-  }, [bookId, chapterNo, chapterText, prevSummary, chapterTitle])
+  }, [bookId, chapterNo, chapterText, prevSummary, chapterTitle, sourceText, pendingUpdates, pendingNew, pendingState, pendingFlow, pendingHook, selUp, selNew, selState, selFlow, selHook])
+  // H1-草稿flush(原第二轮 H1；与 AssetGraphModal 的「H1-缓存回弹」「H1-删边确认」是不同事，L-3 消歧)：待写草稿的兜底 flush——防抖 500ms 窗口内的最后编辑，在「切页签(卸载)」与「刷新/F5/关标签(pagehide)」两种离场各补写一次。
+  //   切页签走 React cleanup(App 用 key={tab} 卸载本页)；但刷新/关标签**不走 React cleanup**，必须另挂 pagehide 才兜得住(与 ContinuePage/RevisePage 同口径)。
+  //   刻意不放持久化 effect 的 cleanup 里：deps 每次按键都变→cleanup 每次都跑→会变成每键写盘、废掉 500ms debounce。空 deps 保证监听只挂一次。
+  //   注：IndexedDB 在 pagehide 期间不保证落盘(best-effort，多数赶得上)，与另两页一致。
+  useEffect(() => {
+    const flush = () => {
+      if (pendingDraftRef.current) {
+        put('drafts', pendingDraftRef.current).catch(() => {})
+        pendingDraftRef.current = null
+      }
+    }
+    window.addEventListener('pagehide', flush)
+    return () => {
+      window.removeEventListener('pagehide', flush)
+      flush() // 卸载(切页签)时立即补写，兜住防抖窗口内的最后编辑
+    }
+  }, [])
   const chapters = useMemo(() => (book && book.chapters) || [], [book])
   const warnings = useMemo(() => computeAssetWarnings((book && book.assets) || []), [book])
   // 详纲：解析卷章表(book.volumes)的所有章行，供"查看详纲"弹窗纵览全书章表(章号/章名/梗概/节拍/钩子)。
@@ -287,11 +421,11 @@ export default function LongFormPage() {
     const out = []
     for (const raw of String((book && book.volumes) || '').split('\n')) {
       const l = raw.trim().replace(/^[｜|]\s*/, '')
-      if (!/^\d+[｜|]/.test(l)) continue
-      const c = l.split(/[｜|]/).map((s) => s.trim())
-      const no = Number(c[0])
+      // L5：章号解析走 chapLineNo 单一口径(认「21｜」与「第21章｜」、容忍数字后空格)，与 volumesTail3/newMax 一致，避免正则漂移
+      const no = chapLineNo(l)
       if (!no) continue
-      out.push({ no, title: c[1] || '', synopsis: c[2] || '', mood: (c.length >= 6 ? c[5] : c[4]) || '', hook: c.length >= 8 ? c[c.length - 1] : '' }) // M42：仅完整表(8列)末列才是钩子；简表(5列)末列是情绪节拍，不能当钩子重复显示
+      const c = l.split(/[｜|]/).map((s) => s.trim())
+      out.push({ no, title: c[1] || '', synopsis: c[2] || '', mood: (c.length >= 6 ? c[5] : c[4]) || '', hook: c.length === 8 ? c[7] : '' }) // M42+item15：仅完整表(恰好8列)末列 c[7] 才是钩子；原 `>=8 取 c[c.length-1]` 在9列(梗概混入｜被多切一列)时取到 c[8] 非钩子列，与 M42 注释矛盾。简表(5列)末列是情绪节拍，不当钩子。
     }
     return out
   }, [book])
@@ -321,12 +455,20 @@ export default function LongFormPage() {
     getAll('books')
       .then((bs) => {
         if (!alive) return
-        setBooks(bs || [])
+        // M4：读入口统一过 normalizeAsset(与 useAssets「读入口统一 normalize」同口径)——旧书 v1 state / 字符串章号 / 未去重 links
+        //   在这层归一，下游 buckets·revealChapterOf·AssetGraphModal·composePrompt 都吃到 v2 结构。只在内存归一，不写库(非破坏)。
+        setBooks((bs || []).map((b) => (b ? { ...b, assets: (b.assets || []).map((a) => normalizeAsset(a, { idPrefix: 'lf' })) } : b)))
         setLoadError('')
         if (bs && bs.length) {
           // 续写页"转长篇"会留下要打开的书号，优先选中它
-          const want = localStorage.getItem('na_open_book')
-          localStorage.removeItem('na_open_book')
+          // M9：localStorage 读取包 try/catch(safeGetItem 口径,参 App.jsx)——隐私模式 getItem 抛错会落进下面的 .catch 被误报"书库读取失败"(books 其实已读到)。
+          let want = null
+          try {
+            want = localStorage.getItem('na_open_book')
+            localStorage.removeItem('na_open_book')
+          } catch {
+            /* 存储不可用：忽略续写页留下的书号，回落默认选中第一本 */
+          }
           setBookId((cur) => cur || (want && bs.some((b) => b.id === want) ? want : bs[0].id))
         }
       })
@@ -345,11 +487,13 @@ export default function LongFormPage() {
 
   const chapterPlan = useMemo(() => {
     if (!book) return ''
+    // L5：改用 chapLineNo 单一口径找本章行——原来 startsWith(chapterNo+'｜') 对「21 ｜章名」(数字后带空格)取不到，
+    //   详纲(volumeChapters)认得而本章章纲取不到 → 提示词注入「没找到本章行」、章名回落成"第N章"。
     return (
       String(book.volumes || '')
         .split('\n')
         .map((l) => l.trim().replace(/^[｜|]\s*/, ''))
-        .find((l) => l.startsWith(chapterNo + '｜') || l.startsWith(chapterNo + '|') || l.startsWith('第' + chapterNo + '章')) || ''
+        .find((l) => chapLineNo(l) === chapterNo) || ''
     )
   }, [book, chapterNo])
 
@@ -372,19 +516,47 @@ export default function LongFormPage() {
 
   // 章纲章名（卷章表第 N 行第 2 列），用作章名缺省，避免章名回落成"第N章"与章号重复
   const planTitleOf = (no) => {
+    // L5：与 chapterPlan/volumeChapters 同走 chapLineNo 单一口径，「21 ｜章名」「第21章 章名」都能定位到本章行取章名
     const line = String((book && book.volumes) || '')
       .split('\n')
       .map((l) => l.trim().replace(/^[｜|]\s*/, ''))
-      .find((l) => l.startsWith(no + '｜') || l.startsWith(no + '|') || l.startsWith('第' + no + '章'))
+      .find((l) => chapLineNo(l) === no)
     return line ? (line.split(/[｜|]/)[1] || '').trim() : ''
   }
 
+  // item1（第十轮）：编辑区是否有未保存改动（正文/章名/摘要 vs 当前章已存值）——切章(loadChapter)、历史回滚(rollbackChapter)、采纳生成稿(compose onAdopt) 三处共用同一判据（"同口径"）。
+  //   原来只有 loadChapter 有脏检查，rollbackChapter/onAdopt 直写 setChapterText → 未保存的手写正文被静默覆盖（history 只在 saveChapter 压栈，未保存的从未进 history，无处找回）。
+  const isChapterDirty = () => {
+    // 次修1（第十轮·再审A）：本书草稿载入完成前（chapterLoadedRef=false，即换书后 getById('drafts') 还没回填）不判脏——
+    //   此窗口编辑区是换书初值/空、与已存章必然不等 → 原会弹无意义 confirm，且用户确认后 loadChapter 的 setChapterNo 又会被随后到达的 restore(:329) 拉回、切换失效。载入完成后再判才有意义。
+    if (!chapterLoadedRef.current) return false
+    const curSaved = chapters.find((x) => x.no === chapterNo)
+    const ne = (a, b) => String(a == null ? '' : a) !== String(b == null ? '' : b)
+    // 章名比对基准用"loadChapter 载入时会填的值"(与下方 setChapterTitle 的回退逻辑一致)，避免章名是默认占位'第N章'、载入被回退成 planTitleOf 时"载入即误报脏"
+    const loadedTitle = curSaved && curSaved.title && curSaved.title !== `第${chapterNo}章` ? curSaved.title : planTitleOf(chapterNo) || (curSaved ? curSaved.title : '')
+    // 次修10（第十一轮·存疑C）：已存章若标题是占位（第N章/空），其基准 loadedTitle 走 planTitleOf(book.volumes)——adoptNextVol 续排改 volumes 后 planTitleOf 漂移
+    //   ⟹ 未编辑也判脏、每次切章/回滚/采纳弹无意义 confirm。占位章标题是自动派生（非用户手写内容），故这类章**不计标题脏**，正文/摘要才是真判据。
+    //   真实标题的已存章基准 = curSaved.title（稳定不漂移）→ 标题脏 = 用户真编辑、照常判；新章保留标题脏判据（#3：手打章名切章不静默丢）。
+    const placeholderSavedTitle = !!curSaved && (!curSaved.title || curSaved.title === `第${chapterNo}章`)
+    const titleDirty = placeholderSavedTitle ? false : ne(chapterTitle, loadedTitle)
+    // 已有章：正文/摘要被改，或（真实标题章）章名被改即脏；新章(未存)：正文/摘要非空、或章名被改成非 planTitleOf 自动值即脏(#3)
+    return curSaved
+      ? ne(chapterText, curSaved.text) || titleDirty || ne(prevSummary, curSaved.summary)
+      : String(chapterText || '').trim() !== '' || String(prevSummary || '').trim() !== '' || ne(chapterTitle, loadedTitle)
+  }
+
   const loadChapter = (no) => {
+    // H2+L2：切章前脏检查（isChapterDirty 单一判据，与 rollbackChapter/compose onAdopt 共用）——有未保存改动时确认后才切，
+    // 避免直接覆盖丢未保存内容(草稿是每本书单槽 lf_current:${bookId}，500ms 后会被新章覆盖)。最小改，不做草稿分槽重构。
+    if (isChapterDirty() && !window.confirm(`第${chapterNo}章有未保存的改动（正文/章名/摘要），切到第${no}章会丢失。确定切换吗？`)) {
+      return
+    }
     setChapterNo(no)
     const c = chapters.find((x) => x.no === no)
     const fallback = planTitleOf(no)
     setChapterTitle(c && c.title && c.title !== `第${no}章` ? c.title : fallback || (c ? c.title : ''))
-    setChapterText(c ? c.text : '')
+    // L7：旧书章节可能无 text 字段→c.text 为 undefined，受控 textarea 收到 undefined 会报"controlled→uncontrolled"告警；兜底成 ''(与下一行 summary 同口径)
+    setChapterText(c ? c.text || '' : '')
     setPrevSummary(c ? c.summary || '' : '')
     setDrawerOpen(false)
     setMsg(c ? `已载入第${no}章` : `新章：第${no}章`)
@@ -396,9 +568,11 @@ export default function LongFormPage() {
     return (c && c.history) || []
   }, [chapters, chapterNo])
 
-  // 回滚=把历史版本载回编辑区(不直接落库)，用户确认后点"保存本章"生效——保留人在环路，
-  // 且保存时当前正文会被压入 history，回滚不会丢任何版本。
+  // 回滚=把历史版本载回编辑区(不直接落库)，用户确认后点"保存本章"生效——保留人在环路，且保存时当前正文会被压入 history。
+  // item1（第十轮）订正：原注释"回滚不会丢任何版本"只对**已保存**版本成立；未保存的手写正文从未进 history，直写会静默丢 → 加与 loadChapter 同口径的脏检查确认。
   const rollbackChapter = (ver) => {
+    // item1：回滚覆盖编辑区，有未保存手写改动时先确认（取消则留在历史弹窗，不载回、不丢当前编辑）
+    if (isChapterDirty() && !window.confirm(`第${chapterNo}章有未保存的改动（正文/章名/摘要），回滚到历史版本会丢失当前编辑区内容。确定回滚吗？`)) return
     setChapterText(ver.text || '')
     if (ver.title) setChapterTitle(ver.title)
     setPrevSummary(ver.summary || '')
@@ -423,7 +597,8 @@ export default function LongFormPage() {
         ]
       : []
     // 名字匹配容错(H9)：去空格/书名号后双向包含即命中，避免 AI 在 reveal_assets 里加增饰或换分隔符就一个都匹配不上
-    const normName = (s) => String(s || '').replace(/[\s《》「」]/g, '')
+    // B26：normName 改用 parseAssets.js 单一出处（顶部 import）——原本地副本只去 [\s《》「」]，与 parseAssets 版(另剥 **/行首【】/`、trim、窄占位归空)已漂移；
+    //   统一后本处 H9 匹配与 findAssetByName/matchesName/重名分组同口径。两侧(beatNames 与 a.name)都用它、双向包含判据不变。
     const beatNamesNorm = beatNames.map(normName).filter(Boolean)
     const planText = String(chapterPlan || '')
     const matchBeat = (a) => {
@@ -457,19 +632,29 @@ export default function LongFormPage() {
     const stageCast = [...new Set(injectedAllow.filter((a) => a.type === 'person' || a.type === 'group').map((a) => a.name))]
     const prevPresent = prevTail ? (book.assets || []).filter((a) => (a.type === 'person' || a.type === 'group') && prevTail.includes(a.name)).map((a) => a.name) : []
     // B2(需求6方案3)：人物现位置取自结构化 state.place（不再只靠章纲点名/上一章文本扫描），把"跨章连续：人物位置沿用"从口号变数据。
-    // 只查「本章在场 ∪ 上一章在场」的人物，避免对全表逐个 normalizeState。
+    // 只查「上一章在场」的人物，避免对全表逐个 normalizeState。
     const assetByName = new Map((book.assets || []).map((a) => [a.name, a]))
-    const personLocs = [...new Set([...stageCast, ...prevPresent])]
+    // M1去重：personLocs 只补「上一章在场、但本章 allowText 未覆盖」的人物——stageCast(=injectedAllow 里的人物)已被 allowText 的
+    //   stateToPromptLine(placePhrase)渲染过现况位置，personLocs 再渲染就是同一事实双写(allowText「陆沉…现况：人在昆仑」+ personLocs「陆沉在昆仑」)。
+    //   故按 injectedAllow 名单排除，只留 allowText 里没有的 prevPresent 人物(跨章连续性补充)。
+    const allowNames = new Set(injectedAllow.map((a) => a.name))
+    const personLocs = [...new Set(prevPresent)]
+      .filter((nm) => !allowNames.has(nm))
       .map((nm) => {
         const a = assetByName.get(nm)
         if (!a) return ''
         const st = a.state && a.state.v === 2 ? a.state : normalizeState(a.state)
-        return st.place && st.place.ref ? `${nm}在${st.place.ref}` : ''
+        const pl = st.place
+        if (!pl || !pl.ref) return ''
+        // 只注入「确定位置」(tag=at 或空、且非 inferred)；moving/missing/inferred 等不在此渲染「在X」(会错)——与第四轮 M1 同口径，宁缺勿错。
+        const tag = pl.tag || ''
+        if (pl.inferred || (tag !== 'at' && tag !== '')) return ''
+        return `${nm}在${pl.ref}`
       })
       .filter(Boolean)
-    // A(方案E第1层收尾)：段长带宽来自 worldviews 的 paraBandFor（全项目段长数字唯一出处，下沿2/3上沿4/3）；
-    // B-H3：目标段长优先取 B 的 avgParaLenFor(book)(题材/文风真值)，未导出时回退 book.avgParaLen(当前恒空→paraBandFor 自动用默认档30)。
-    const band = paraBandFor(typeof worldviews.avgParaLenFor === 'function' ? worldviews.avgParaLenFor(book) : book && book.avgParaLen)
+    // A(方案E第1层收尾)+B-H3：段长带宽来自 worldviews 单一出处——avgParaLenFor(book) 从题材档(genre)/绑定文风指纹(styleMetrics.paraMedian)推真实目标段长，
+    // 交给 paraBandFor 换算成带宽(下沿2/3、上沿4/3)；无真值时 avgParaLenFor 返回 undefined、paraBandFor 自动回落默认档30。
+    const band = paraBandFor(avgParaLenFor(book))
     // 章纲注入前剥掉内部记号：出场人物列的 P01 式编号、情绪列的 +3+ 强度记号
     const planClean = String(chapterPlan || '')
       .replace(/｜\s*P\d+(?:\s*,\s*P\d+)*\s*(?=｜)/g, '')
@@ -478,7 +663,7 @@ export default function LongFormPage() {
     // 这里筛出本章相关的伏笔：①活跃伏笔=已埋设(埋设章≤本章)且回收卷未到或正在本卷；②本卷应回收=payoff_volume 命中当前卷。
     // 埋设章优先用回填的 plant_ch，否则按 plant_volume 换算；回收只有卷级 payoff_volume，故"应回收"按当前卷判定。
     const fsList = (book && book.foreshadows) || []
-    const curVol = perVol > 0 ? Math.ceil(chapterNo / perVol) : 0
+    const curVol = volOfChapter(book && book.volumes, chapterNo, perVol) // item14：按卷章表实际卷定义定位，不用 Math.ceil(chapterNo/perVol) 除法反推（各卷章数不等时错卷）
     const plantChOf = (f) => (f.plant_ch > 0 ? f.plant_ch : f.plant_volume > 0 ? (f.plant_volume - 1) * perVol + 1 : 0)
     const fsLine = (f) => `- ${f.title || '(无名)'}：${String(f.desc || '').slice(0, 60)}`
     const activeFs = fsList.filter((f) => {
@@ -561,11 +746,18 @@ export default function LongFormPage() {
   const nextVolPromptText = useMemo(() => (nextVolOpen ? nextVolumePrompt(book, nextVolInfo.vol, nextVolInfo.start) : ''), [nextVolOpen, book, nextVolInfo])
 
   const persistBook = async (nb) => {
+    // 决策#6(A·3行小改)：直接写路径也把 nb 同步给乐观基准 bookRef.current——否则 persistBook(用闭包 book 构造 nb) 与 mutateBook(用 bookRef.current 构造)
+    // 并发时，后发起的 mutateBook 会读到 persistBook 之前的陈旧基准、把 persistBook 刚写的内容覆盖掉(lost update)。同步后两条写路径共用同一最新基准，堵住主窗口。
+    // 放在 put 之前(同步执行)：调用 persistBook 的那一刻基准就跟上，await 期间若有 mutateBook 插入也读到最新 nb。
+    const prev = bookRef.current // #4：写库失败时把乐观基准回滚到写前值
+    bookRef.current = nb
     try {
       await put('books', nb)
       setBooks((bs) => bs.map((b) => (b.id === nb.id ? nb : b)))
     } catch (e) {
-      // M28：写库失败(配额不足/事务中止)必须明确提示，不能静默——否则删资产/改资产/存图布局"看起来成功、实际没存"，刷新后回旧状态
+      // M28+#4：写库失败(配额不足/事务中止)必须明确提示不静默；并回滚 bookRef(setBooks 在 await 后才调、失败时未执行，界面仍是旧值)，
+      // 否则 bookRef 领先于库，后续 mutateBook 会基于未落库的 nb 继续写。
+      bookRef.current = prev
       setMsg('保存失败：' + (e && e.message ? e.message : String(e)) + '（可能存储空间不足）')
     }
   }
@@ -582,32 +774,47 @@ export default function LongFormPage() {
     try {
       await put('books', nb)
     } catch (e) {
-      setMsg('保存失败：' + (e && e.message ? e.message : String(e)) + '（可能存储空间不足）')
+      // #4：写库失败→回滚乐观更新(bookRef+界面)到本次更新前的 cur，避免界面留着没存进库的值、刷新后回旧(用户以为改成功了)
+      bookRef.current = cur
+      setBooks((bs) => bs.map((b) => (b.id === cur.id ? cur : b)))
+      setMsg('保存失败：' + (e && e.message ? e.message : String(e)) + '（可能存储空间不足，已回滚未存的改动）')
     }
   }
 
   const saveChapter = async () => {
     if (!book) return
+    // #1：in-flight 守卫——双击/连点「保存本章」时，第一次落库未完成前忽略后续点击，否则两次都读同一旧 chapters、把同一旧版压进 history 两次(重复快照)
+    if (chapterSavingRef.current) return
     if (!String(chapterText || '').trim()) {
       setMsg('正文为空，未保存（避免章节树出现空章占位）')
       return
     }
-    const list = [...chapters]
-    const i = list.findIndex((c) => c.no === chapterNo)
-    const old = i >= 0 ? list[i] : null
-    // 5.5 版本历史：覆盖已有章前，把旧正文/章名/摘要压入 history[](保留最近 HISTORY_MAX 版)，供查看与回滚。
-    // 仅当旧正文非空且与新正文不同才存快照，避免重复保存同一内容堆叠无意义版本；旧书 chapters 无 history 字段时从空数组起。
-    const prevHistory = (old && old.history) || []
-    const history =
-      old && String(old.text || '').trim() && old.text !== chapterText
-        ? [...prevHistory, { text: old.text, title: old.title || '', summary: old.summary || '', savedAt: old.updatedAt || Date.now() }].slice(-HISTORY_MAX)
-        : prevHistory
-    const rec = { no: chapterNo, title: chapterTitle || planTitleOf(chapterNo) || `第${chapterNo}章`, text: chapterText, summary: prevSummary, history, updatedAt: Date.now() }
-    if (i >= 0) list[i] = rec
-    else list.push(rec)
-    list.sort((a, b) => a.no - b.no)
-    await persistBook({ ...book, chapters: list })
-    setMsg(`第${chapterNo}章已保存${history.length ? `（含 ${history.length} 个历史版本）` : ''}`)
+    chapterSavingRef.current = true
+    try {
+      const list = [...chapters]
+      const i = list.findIndex((c) => c.no === chapterNo)
+      const old = i >= 0 ? list[i] : null
+      // 5.5 版本历史：覆盖已有章前，把旧正文/章名/摘要压入 history[](保留最近 HISTORY_MAX 版)，供查看与回滚。
+      // 仅当旧正文非空且与新正文不同才存快照，避免重复保存同一内容堆叠无意义版本；旧书 chapters 无 history 字段时从空数组起。
+      const prevHistory = (old && old.history) || []
+      const history =
+        old && String(old.text || '').trim() && old.text !== chapterText
+          ? [...prevHistory, { text: old.text, title: old.title || '', summary: old.summary || '', savedAt: old.updatedAt || Date.now() }].slice(-HISTORY_MAX)
+          : prevHistory
+      const rec = { no: chapterNo, title: chapterTitle || planTitleOf(chapterNo) || `第${chapterNo}章`, text: chapterText, summary: prevSummary, history, updatedAt: Date.now() }
+      if (i >= 0) list[i] = rec
+      else list.push(rec)
+      list.sort((a, b) => a.no - b.no)
+      // #1(第9轮)：回写 book.wordCount(全书正文字数)——Library 读同一 books store 的 wordCount，原来只在 WizardPage 建书时设(且为0)、长篇页保存正文从不更新 → 书库里长篇书恒显「0 字」
+      const wordCount = list.reduce((n, c) => n + countWords(c.text), 0)
+      await persistBook({ ...book, chapters: list, wordCount })
+      // 次修1（第十轮·再审A）：保存后把编辑区章名同步成落库的 rec.title——rec.title 有回退（chapterTitle 空时取 planTitleOf/第N章），
+      //   若不同步，用户「清空章名框→保存」后编辑区仍空、而 loadedTitle 是回退值 ⟹ isChapterDirty 恒真误报「有未保存改动」。text/summary 无回退变换、不必同步。
+      setChapterTitle(rec.title)
+      setMsg(`第${chapterNo}章已保存${history.length ? `（含 ${history.length} 个历史版本）` : ''}`)
+    } finally {
+      chapterSavingRef.current = false
+    }
   }
 
   // 续排下一卷采纳：新章表追加进 volumes、重解析全部节拍、把回填章号写回现有资产/伏笔，落库。
@@ -624,11 +831,11 @@ export default function LongFormPage() {
     const foreshadows = ((book.foreshadows) || []).map((f) => ({ ...f }))
     backfillChapterNos(assets, foreshadows, newVolumes)
     await persistBook({ ...book, volumes: newVolumes, beats: parsed.beats, assets, foreshadows })
+    // L5：newMax 走 chapLineNo 单一口径(与 volumeChapters/volumesTail3 一致)——认「21｜」与「第N章｜」、容忍数字后空格，
+    //   避免与 maxPlanChapter 漂移(如"21 ｜章名"一处认一处不认)导致续排重复排一章。
     const newMax = String(reply)
       .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => /^\d+[｜|]/.test(l))
-      .map((l) => Number(l.split(/[｜|]/)[0]))
+      .map(chapLineNo)
       .reduce((m, n) => Math.max(m, n || 0), 0)
     setMsg(`已续排第${nextVolInfo.vol}卷：章表排到第${newMax || '?'}章，节拍共${parsed.beats.length}条`)
   }
@@ -683,11 +890,22 @@ export default function LongFormPage() {
   const appendExpand = async (reply) => {
     if (!book) return
     const add = parseExpandAssets(reply)
-    const exist = new Set((book.assets || []).map((a) => a.name))
-    const fresh = add.filter((a) => !exist.has(a.name))
-    const allNames = new Set([...exist, ...fresh.map((a) => a.name)])
-    fresh.forEach((a) => {
-      a.links = (a.links || []).filter((l) => allNames.has(l.to))
+    // M2：过 normalizeAsset 统一口径(对齐 applyNew/L4)——parseExpandAssets 返回裸对象(带 is_public 死字段 + state:'活跃' v1 字符串)，
+    //   直接落库会把脏结构写进 IDB、被导出备份带走、且不生成派生边。normalizeAsset 迁 state→v2、补默认、按 holder/place 派生边；is_public 死字段显式剔除。
+    //   去重键过 dashOut(去《》/首尾空白；L②注：dashOut 不折叠内部空格，与 normName 略有出入，但足以兜住《》/首尾空格差异)：带《》/首尾空格的同名不再漏判成两条重复资产。
+    const exist = new Set((book.assets || []).map((a) => dashOut(a.name)).filter(Boolean))
+    const freshRaw = []
+    add.forEach((a) => {
+      const nk = dashOut(a.name)
+      if (!nk || exist.has(nk)) return
+      exist.add(nk) // M#1：批内去重——同一条 AI 回复里同名多次出现(如柳七×3)只留第一条(与 applyNew 循环内 seen.add 同口径)；原来 exist 在 filter 中从不追加→3 条全落库
+      freshRaw.push(a)
+    })
+    const allNames = new Set([...exist, ...freshRaw.map((a) => dashOut(a.name))])
+    const fresh = freshRaw.map((a) => {
+      const { is_public: _drop, ...rest } = a // 剔除只写不读的死字段
+      const links = (rest.links || []).filter((l) => allNames.has(dashOut(l.to))) // 共现边只留名册内(含本批)目标，避免悬空边
+      return normalizeAsset({ ...rest, links }, { idPrefix: 'lf' })
     })
     await persistBook({ ...book, assets: [...(book.assets || []), ...fresh] })
     setExpandOpen(false)
@@ -700,8 +918,9 @@ export default function LongFormPage() {
   // M31：①追加而非替换——分析第4章时第3章未落库的预览不再被静默丢弃，每条打上来源章号(fromCh)供弹窗分辨；
   //      ②默认不全选——避免一次误点「落库选中」把全部 AI 输出写进资产库，改由弹窗里的「全选」按钮显式勾选；
   //      ③追加时按名字去重(同名新资产/同内容更新只留一条)，防同一章重复分析后落库出重复资产。
-  const adoptAnalyze = (reply) => {
-    const { updates, newAssets } = parseAnalyze(reply || '')
+  // L4：合并逻辑抽成 mergeAnalyzeResult(接收已解析的 updates/newAssets，不在此 setMsg)——adoptAnalyze 与 adoptSettle 共用，
+  //     避免 adoptSettle 里对同一 reply 二次 parseAnalyze(结算已解析过一遍)。返回统计供调用方组织各自文案。
+  const mergeAnalyzeResult = (updates, newAssets) => {
     const ch = chapterNo
     const hadPending = pendingUpdates.length > 0 || pendingNew.length > 0
     const upSeen = new Set(pendingUpdates.map((u) => `${u.name}｜${u.info}｜${u.state}`))
@@ -730,10 +949,16 @@ export default function LongFormPage() {
     setPendingUpdates(mergedUp)
     setPendingNew(mergedNew)
     // M31：不清空已有勾选(追加在末尾，旧下标不变)，新条目默认未勾选
-    const dupNote = dupUp + dupNew > 0 ? `；重复 ${dupUp + dupNew} 条已跳过` : ''
+    return { dupUp, dupNew, hadPending, mergedUp, mergedNew }
+  }
+
+  const adoptAnalyze = (reply) => {
+    const { updates, newAssets } = parseAnalyze(reply || '')
+    const r = mergeAnalyzeResult(updates, newAssets)
+    const dupNote = r.dupUp + r.dupNew > 0 ? `；重复 ${r.dupUp + r.dupNew} 条已跳过` : ''
     setMsg(
-      `分析完成：本次新增待落库 更新 ${updates.length - dupUp} 条 / 新资产 ${newAssets.length - dupNew} 个${dupNote}${
-        hadPending ? `；已与上次未落库结果合并（现共 更新 ${mergedUp.length} 条 / 新资产 ${mergedNew.length} 个）` : ''
+      `分析完成：本次新增待落库 更新 ${updates.length - r.dupUp} 条 / 新资产 ${newAssets.length - r.dupNew} 个${dupNote}${
+        r.hadPending ? `；已与上次未落库结果合并（现共 更新 ${r.mergedUp.length} 条 / 新资产 ${r.mergedNew.length} 个）` : ''
       }，请勾选后落库`
     )
   }
@@ -743,76 +968,141 @@ export default function LongFormPage() {
     e.target.value = ''
     if (!file) return
     try {
-      setSourceText(await readDocumentFile(file))
+      const content = await readDocumentFile(file)
+      // 必修4同型横扫（第十一轮）：导入覆盖前脏检查——当前分析原文非空且与将导入内容不同时先 confirm，避免静默覆盖已粘贴/导入的原文（sourceText 虽已入草稿(item9)，但覆盖后旧文即丢、无恢复入口）
+      if (String(sourceText || '').trim() && String(sourceText) !== String(content) && !window.confirm('导入会替换当前的分析原文（当前未另存的内容将丢失）。确定导入吗？')) return
+      setSourceText(content)
     } catch (err) {
       setMsg(err && err.message ? err.message : String(err))
     }
   }
 
-  const applyUpdates = async () => {
+  // L2/L-4：资产落库三函数各一把 in-flight 守卫——防同一"落库"按钮双击跑两遍(重复写库/压历史/计数翻倍)。与 saveChapter 的 chapterSavingRef 同范式。
+  //   L-4 三点改进：①per-modal 三把独立锁(两个预览弹窗的"落库选中"不再互相阻塞)；②阻塞时 setMsg 给反馈，不再静默 return 让用户以为没反应；
+  //   ③catch fn 的 rejection 并提示(原来 runAssetOp 返回的 promise 无人 catch→未处理 rejection)。
+  //   #4(锁粒度不变量·入注防复审重复标记)：三锁拆分后三函数不再互串行，但并发实际不可达——三个预览弹窗都是 fixed inset-0 全屏遮罩、且关闭都在 await persistBook 之后，
+  //     同一时刻只有一个弹窗可点；守卫只为兜"同一按钮双击"(第二次落库前 modal 未关)，per-modal 锁已足够，无需全局串行。
+  const updatesOpRef = useRef(false)
+  const newOpRef = useRef(false)
+  const settleOpRef = useRef(false)
+  const runAssetOp = async (ref, fn) => {
+    if (ref.current) {
+      setMsg('正在落库，请稍候…（已在处理上一次点击，避免重复写入）')
+      return
+    }
+    ref.current = true
+    try {
+      await fn()
+    } catch (e) {
+      setMsg('落库失败：' + ((e && (e.message || e.reason)) || String(e)))
+    } finally {
+      ref.current = false
+    }
+  }
+
+  const applyUpdates = () => runAssetOp(updatesOpRef, async () => {
     if (!book) return
     const ups = pendingUpdates.filter((_, i) => selUp.includes(i))
-    const assets = (book.assets || []).map((a) => {
-      // M31：追加模式下同一资产可能有多条(来自不同章)更新，全部按顺序合并；原实现 find 只取第一条，其余静默丢弃
-      const us = ups.filter((x) => x.name === a.name)
-      if (!us.length) return a
-      // LF-7：a.detail 可能为 undefined，模板直接拼接会产出 "undefined｜…" 脏字；用 filter(Boolean) 跳过空段
-      // B4：state 写结构化 v2（原来直接写中文字符串）——把粗状态词(活跃/死亡/…)并入 plot 维度，其它维度原样保留(增量更新不重建，inkos 原则②)
+    const base = (book.assets || [])
+    // M5：每条更新用 findAssetByName 解析目标资产(精确 + 别名/《》/空格容错)，不再严格 x.name===a.name 静默跳过。
+    //   按「解析出的资产 id」聚合(比 ContinuePage 的按名聚合更稳：两个不同名解析到同一资产时合并而非后者覆盖前者)。
+    //   M31 保留：同一资产多条更新按选中顺序合并、state 取最后一条为最终态。
+    const byId = new Map() // assetId -> [updates]
+    let unmatched = 0
+    let noName = 0
+    ups.forEach((u) => {
+      if (!u || !u.name) {
+        noName += 1
+        return
+      }
+      const a = findAssetByName(base, u.name)
+      if (!a) {
+        unmatched += 1
+        return
+      }
+      if (!byId.has(a.id)) byId.set(a.id, [])
+      byId.get(a.id).push(u)
+    })
+    const assets = base.map((a) => {
+      const us = byId.get(a.id)
+      if (!us || !us.length) return a
+      // B4：state 写结构化 v2——粗状态词(活跃/死亡/…)并入 plot 维度，其它维度原样保留(增量更新不重建，inkos 原则②)
       const st = normalizeState(a.state)
-      const word = us[us.length - 1].state
+      const lastU = us[us.length - 1] // M31 跨章追加时取最后一条为最终态
+      const word = lastU.state
       const tag = STATE_V1_MAP[word] || STATE_V1_MAP[String(word || '').toLowerCase()]
       if (tag) st.plot = { ...(st.plot || {}), tag }
       if (word) st.legacy = st.legacy || word
-      st.meta = { updatedAt: Date.now(), updatedBy: 'analyze', sourceCh: chapterNo }
-      return { ...a, detail: [a.detail, ...us.map((u) => u.info)].filter(Boolean).join('｜'), state: st }
+      // L1：sourceCh 优先该条自带的 fromCh(分析时所在章)、无则兜底当前章——与 M1 同源。M31 跨章追加 + M-D1 跨刷新恢复后，
+      //   一律用当前章会把它章分析出的状态记成本章(尤其恢复后切到别章再落库)。对齐 applyNew 的 n.reveal||n.fromCh||chapterNo 范式。
+      st.meta = { updatedAt: Date.now(), updatedBy: 'analyze', sourceCh: lastU.fromCh || chapterNo }
+      // 存疑2（第十轮·用户拍板）：detail 追加判重，统一续写页 ContinuePage 口径（`!detail.includes(u.info)` 才追加）——原 [a.detail,...infos].filter(Boolean).join 无判重，
+      //   同一章分次分析落库会把同一句 info 堆叠重复。LF-7 的 undefined 兜底改用 String(a.detail||'')（等价原 filter(Boolean) 跳空、且不产出 "undefined｜…" 脏字）。
+      let detail = String(a.detail || '')
+      us.forEach((u) => {
+        if (u.info && !detail.includes(u.info)) detail = detail ? `${detail}｜${u.info}` : String(u.info)
+      })
+      return { ...a, detail, state: st }
     })
     await persistBook({ ...book, assets })
     setPendingUpdates((p) => p.filter((_, i) => !selUp.includes(i)))
     setUpdatesOpen(false)
     setSelUp([])
-    setMsg(`已落库 ${ups.length} 条资产更新`)
-  }
+    // 与 ContinuePage 同口径：报「实写资产数」，名字未建档/无名的按条数单独提示，不再拿「勾选数」冒充「实写数」
+    const skipped = unmatched + noName
+    setMsg(`已落库更新 ${byId.size} 个资产` + (skipped ? `（${skipped} 条因名字未建档/无名已跳过，可先到资产库建档或核对资产名）` : ''))
+  })
 
-  const applyNew = async () => {
+  const applyNew = () => runAssetOp(newOpRef, async () => {
     if (!book) return
     const news = pendingNew.filter((_, i) => selNew.includes(i))
     // M31：追加模式下待落库列表里可能出现同名新资产(重复分析同一章/多章提到同一角色)，
     // 只按库内已有名字过滤会让同名条目各生成一个 id 落库成重复资产 → 这里连库内与本次选中一起按名字去重
-    const seen = new Set((book.assets || []).map((a) => a.name))
+    // L：去重键过 dashOut 归一——原来用裸 a.name，带《》/首尾空格的同名(「青云山」vs「《青云山》」)会漏判成两条重复资产。
+    //   L②注(如实)：dashOut 只去《》+首尾空白、**不折叠内部空格**(normName 才折叠)，故与 findByName/isAssetWorthSaving 的 normName 口径略有出入(内部多空格的名字仍可能判不等)，但足以兜住《》/首尾空格差异。不改 dashOut(它是 assets.js 共享判据)。
+    const seen = new Set((book.assets || []).map((a) => dashOut(a.name)).filter(Boolean))
     const add = []
     let skipped = 0
     news.forEach((n) => {
-      if (!n.name || seen.has(n.name)) {
+      const nk = dashOut(n.name)
+      if (!nk || seen.has(nk)) {
         skipped += 1
         return
       }
-      seen.add(n.name)
-      add.push({
-        id: `na_${Date.now().toString(36)}_${add.length}`,
-        // 结算/分析回复里的类型是中文词(人物/地点/…)，落库前归一成英文枚举(typeKeyOf)，否则分类筛选与图谱着色对不上
-        type: typeKeyOf(n.type),
-        name: n.name,
-        detail: n.desc,
-        aliases: [],
-        tier: 'B',
-        is_public: false,
-        state: 'alive',
-        ch_reveal: n.reveal || n.fromCh || chapterNo,
-        ch_rumor: 0,
-        knowers: [],
-        links: [],
-      })
+      seen.add(nk)
+      // L4：过 normalizeAsset 统一口径——原来直接 push 裸对象，写 v1 字符串 state:'alive'(非 v2 结构)与死字段 is_public，
+      //   与读入口(M4)/saveEdit/quickCreateAsset 的 v2 口径分叉。normalizeAsset 把 state 迁 v2、补 aliases/knowers/links/ch_rumor 默认、按 holder/place 派生边。
+      //   is_public 是只写不读的死字段(assets.js 已标注待删)，不再写入；id 显式给则保留(na_ 前缀不变)。
+      add.push(
+        normalizeAsset(
+          {
+            id: `na_${Date.now().toString(36)}_${add.length}`,
+            type: typeKeyOf(n.type), // 结算/分析回复里的类型是中文词(人物/地点/…)，归一成英文枚举，否则分类筛选与图谱着色对不上
+            name: n.name,
+            detail: n.desc,
+            tier: 'B',
+            state: 'alive',
+            ch_reveal: n.reveal || n.fromCh || chapterNo,
+          },
+          { idPrefix: 'lf' }
+        )
+      )
     })
     await persistBook({ ...book, assets: [...(book.assets || []), ...add] })
     setPendingNew((p) => p.filter((_, i) => !selNew.includes(i)))
     setNewOpen(false)
     setSelNew([])
     setMsg(`已落库 ${add.length} 个新资产${skipped ? `（重复/无名 ${skipped} 个已跳过）` : ''}`)
-  }
+  })
 
   const exportAll = () => {
     if (!book) return
-    const text = chapters.map((c) => `${c.title}\n\n${c.text}\n`).join('\n')
+    // #5：无已落库章节时不导出空文件——否则用户拿到一个空文档还以为导出成功
+    if (!chapters.length) {
+      setMsg('还没有已保存的章节可导出；先写正文并点「保存本章」，再导出全书。')
+      return
+    }
+    const text = chapters.map((c) => `${c.title}\n\n${c.text || ''}\n`).join('\n') // item16：c.text 加 ||''（与 :522 setChapterText、:1058 dirty 判定同口径）——旧书章节可能无 text 字段，模板串会把 undefined 转成字面 "undefined" 导进全文
     // L14：①exportDocument 是 async(docx 路径 await import('docx') 可能失败)，不 catch 会产生未处理 rejection、导出失败时界面无提示；
     //      ②导出的是已落库章节，当前编辑区若有未保存改动则不含它，先提示避免用户以为导出了最新全文
     const cur = chapters.find((c) => c.no === chapterNo)
@@ -830,23 +1120,31 @@ export default function LongFormPage() {
   }
   const saveEdit = () => {
     if (!editAsset || !editDraft) return
-    updateAsset(editAsset.id, {
+    // M1+M3：改调共享 saveEditAsset(= normalizeAsset 全量合并 + rebuildDerivedEdges)，与 ContinuePage 同一出处。
+    //   白名单字段用 editDraft 覆盖、其余保留 editAsset 原值(含 H1 的 reveal_volume/rumor_volume、B5 的 tier/aliases/state)。
+    //   M3(改位置留两条 located_in)由 normalizeAsset→rebuildDerivedEdges strip 旧 derived 边、按最新 holder/place/controller 重算解决。
+    // controller 只在解析出确定值(非 undefined)时才进白名单：否则 normalizeAsset 会把 `'controller' in src` 判真、
+    //   绕过 rebuildDerivedEdges 的 prevCtrl 沿用，把用户没动的既有 controlled_by 边误清空。holder 无此问题(held_by 纯由 holder 派生)。
+    const ctrlVal = editDraft.controller !== undefined ? editDraft.controller : editAsset.controller
+    const edited = {
       name: editDraft.name,
       type: editDraft.type,
-      // B5：白名单补 tier/aliases/state——EditAssetModal(C 文件)加了 StatePanel/分层/别名后，这些字段回写时不再被 saveEdit 丢弃。
-      // !== undefined 兜底：弹窗尚未提供某字段时保留原值不被覆盖；state 过 normalizeState 保证落库是 v2(幂等，旧书字符串也会被规范化)。
       tier: editDraft.tier !== undefined ? editDraft.tier : editAsset.tier,
       detail: editDraft.detail,
-      aliases: splitListValue(editDraft.aliasesStr !== undefined ? editDraft.aliasesStr : editDraft.aliases),
-      state: normalizeState(editDraft.state !== undefined ? editDraft.state : editAsset.state),
+      aliases: editDraft.aliasesStr !== undefined ? editDraft.aliasesStr : editDraft.aliases,
+      state: editDraft.state !== undefined ? editDraft.state : editAsset.state,
+      // M1：holder/controller 补进白名单——EditAssetModal 有这两个输入框(写进 editDraft.holder/controller)，
+      //   原白名单漏了 → {...editAsset,...edited} 取旧值，用户改持有者/控制方静默无效(held_by/controlled_by 边不更新)。
+      holder: editDraft.holder !== undefined ? editDraft.holder : editAsset.holder,
+      ...(ctrlVal !== undefined ? { controller: ctrlVal } : {}),
       ch_reveal: Number(editDraft.ch_reveal) || 0,
       ch_rumor: Number(editDraft.ch_rumor) || 0,
-      knowers: String(editDraft.knowersStr || '')
-        .split(/[,，、]/)
-        .map((s) => s.trim())
-        .filter(Boolean),
+      reveal_volume: Number(editDraft.reveal_volume) || 0,
+      rumor_volume: Number(editDraft.rumor_volume) || 0,
+      knowers: editDraft.knowersStr !== undefined ? editDraft.knowersStr : editAsset.knowers,
       links: editDraft.links || [],
-    })
+    }
+    updateAsset(editAsset.id, saveEditAsset(editAsset, edited, { idPrefix: 'lf' }))
     setEditAsset(null)
     setEditDraft(null)
     setMsg('资产已更新')
@@ -893,7 +1191,7 @@ export default function LongFormPage() {
     setSelFlow(fl.sel)
     setPendingHook(hk.merged)
     setSelHook(hk.sel)
-    if (updates.length || newAssets.length) adoptAnalyze(reply)
+    if (updates.length || newAssets.length) mergeAnalyzeResult(updates, newAssets) // L4：复用本次已解析的 updates/newAssets，不再对同一 reply 二次 parseAnalyze
     setSettlePreviewOpen(true)
     setMsg(
       `结算解析完成：本次 状态变更 ${stateChanges.length} / 资产流转 ${flows.length} / 伏笔推进 ${hookMoves.length}` +
@@ -903,124 +1201,141 @@ export default function LongFormPage() {
   }
 
   // 落库选中：一次性合并三段产出后 persistBook（不逐条写盘）。
-  const applySettlement = async () => {
+  const applySettlement = () => runAssetOp(settleOpRef, async () => {
     if (!book) return
-    const assets = (book.assets || []).map((a) => ({ ...a }))
+    let assets = (book.assets || []).map((a) => ({ ...a }))
     const foreshadows = (book.foreshadows || []).map((f) => ({ ...f }))
-    const idxByName = {}
-    assets.forEach((a, i) => {
-      if (!(a.name in idxByName)) idxByName[a.name] = i
-    })
-    // ① 状态变更：增量并入 state（保留 id 与无关维度，inkos 原则②）。A4：doneSc 只数真正写入的(名册无此资产则跳过)
+    // ① 状态变更：增量并入 state（保留 id 与无关维度，inkos 原则②）。
+    //   M5：名字用 findAssetByName(精确 + 别名/《》/空格容错)，不再严格全等 → 别名名不再静默跳过。
+    //   A4：doneSc 只数真正写入的(名册无此资产 / dimKey 空→applyStateChange 原样返回，都跳过且不计数，否则实写计数虚高)。
     const selSc = pendingState.filter((_, i) => selState.includes(i))
     let doneSc = 0
     selSc.forEach((sc) => {
-      const i = idxByName[sc.name]
-      if (i == null) return
-      assets[i] = { ...assets[i], state: applyStateChange(assets[i].state, sc, chapterNo) }
+      if (!sc.dimKey) return
+      const target = findAssetByName(assets, sc.name) // M5
+      if (!target) return
+      const i = assets.findIndex((a) => a.id === target.id)
+      // L4+L-新1：第三参传 sc.fromCh||0 → applyStateChange 内 since = sc.since || sc.fromCh || 0。
+      //   AI 未给生效章(sc.since 空)时用「采纳结算时所在章」fromCh 兜底(mergeSeg 采纳结算时已打)，不再恒 0；也不用当前章 chapterNo(跨刷新/切章后会记错章)。与 ContinuePage 同处对齐。
+      assets[i] = { ...assets[i], state: applyStateChange(assets[i].state, sc, sc.fromCh || 0) }
       doneSc += 1
     })
-    // ② 资产流转：人物 hold 追加一条；获得且未建档→入表(A7：type 取预览里用户可改的 assetType，默认 item)；损毁/消耗/丢失→标注不删(拍板5)
+    // ② 资产流转：改用共享 applyFlowToRoster(与 ContinuePage 同口径)——D6 gain/transferred 同步 holder+held_by、
+    //   D7 新建档不把流转章写 ch_reveal(流转章≠透出章)、D8 建档传 holder、D9 person 未建档顺便建最小 person(不静默丢整条)、
+    //   D10 名字别名容错、M2 phys 字段级合并(保 firstCh/lastCh；lose→tag 'lost' 不再记 broken；不注入「已损毁(已丢失)」矛盾句)。
+    //   共享函数是纯变换、返回新名册，故逐条 reduce 累积(assets 重新赋值)；写库仍走本页 persistBook(共享函数不含 put)。
     const selFl = pendingFlow.filter((_, i) => selFlow.includes(i))
-    let newItemCount = 0
+    let newItem = 0
+    let newPerson = 0
     let doneFl = 0
     selFl.forEach((fl) => {
-      const ch = fl.ch || chapterNo
-      let touched = false
-      const pi = idxByName[fl.person]
-      if (pi != null && fl.asset) {
-        const st = normalizeState(assets[pi].state)
-        const hold = Array.isArray(st.hold) ? [...st.hold] : []
-        if (!hold.some((h) => h.name === fl.asset && h.change === fl.change && h.ch === ch)) hold.push({ name: fl.asset, change: fl.change || 'gain', ch })
-        st.hold = hold
-        st.meta = { updatedAt: Date.now(), updatedBy: 'analyze', sourceCh: ch }
-        assets[pi] = { ...assets[pi], state: st }
-        touched = true
-      }
-      const ai = idxByName[fl.asset]
-      if (fl.change === 'gain' && ai == null && fl.asset) {
-        assets.push(normalizeAsset({ name: fl.asset, type: typeKeyOf(fl.assetType || 'item'), ch_reveal: ch }, { idPrefix: 'lf' }))
-        idxByName[fl.asset] = assets.length - 1
-        newItemCount += 1
-        touched = true
-      } else if (ai != null && (fl.change === 'broken' || fl.change === 'consumed' || fl.change === 'lose')) {
-        const st = normalizeState(assets[ai].state)
-        const noteWord = fl.changeRaw || (fl.change === 'consumed' ? '已消耗' : fl.change === 'lose' ? '已丢失' : '已损毁')
-        st.phys = { tag: 'broken', note: noteWord, ...(fl.ch ? { since: fl.ch } : {}) }
-        st.meta = { updatedAt: Date.now(), updatedBy: 'analyze', sourceCh: ch }
-        assets[ai] = { ...assets[ai], state: st }
-        touched = true
-      }
-      if (touched) doneFl += 1
+      if (!fl.asset) return // 与 ContinuePage 一致：无资产名的流转整条跳过、不计入 doneFl(计入下方 skips)
+      // M1：章号兜底优先条目自带的 fromCh(采纳结算时所在章)、再兜底当前章——AI 未给 ch 时，若用当前章，
+      //   M-D1 持久化后刷新恢复→切到别章再落库会把流转记错章。对齐 applyNew 的 n.reveal||n.fromCh||chapterNo 范式。
+      const res = applyFlowToRoster(assets, { ...fl, ch: fl.ch || fl.fromCh || chapterNo }, { idPrefix: 'lf' })
+      assets = res.assets
+      res.created.forEach((c) => {
+        if (c.type === 'person') newPerson += 1
+        else newItem += 1
+      })
+      // M-D3：doneFl 计数统一为「!res.skipped 即计数」(以 ContinuePage 结算落库口径为准)——原来判 personId/targetId/created，
+      //   会在"资产未建档且动作非获得"(res.skipped 非空、但人物侧可能命中)时仍计数，与续写页漂移。skipped 的条数由下方 selFl.length-doneFl 兜住。
+      if (!res.skipped) doneFl += 1
     })
     // ③ 伏笔推进：planted→advanced/resolved/deferred/superseded；mention 不改 state(设计§4.6：仅提及不算推进)。A4：doneHk 只数真改的
     const selHk = pendingHook.filter((_, i) => selHook.includes(i))
     let doneHk = 0
     selHk.forEach((hm) => {
-      const f = foreshadows.find((x) => x.title === hm.title)
+      // L6：伏笔按 title 归一化匹配(findForeshadowByTitle)——伏笔对象无 aliases，producer 侧做「归一后精确 → 双向包含取最长≥2字」，兜住 AI 回填 title 的改写/空格/书名号出入。未命中仍走下方 skips 计数。
+      const f = findForeshadowByTitle(foreshadows, hm.title)
       if (!f || !hm.move || hm.move === 'mention') return
       f.state = hm.move
-      if (hm.move === 'advanced' || hm.move === 'resolved') f.lastAdvancedChapter = hm.ch || chapterNo
+      // M1：同 flows——伏笔推进章优先 hm.fromCh(采纳时所在章)再兜底当前章，防跨刷新/切章后记错章
+      if (hm.move === 'advanced' || hm.move === 'resolved') f.lastAdvancedChapter = hm.ch || hm.fromCh || chapterNo
       if (hm.move === 'resolved' && hm.note) f.payoff_hint = hm.note
       doneHk += 1
     })
     await persistBook({ ...book, assets, foreshadows })
-    setPendingState([])
-    setPendingFlow([])
-    setPendingHook([])
+    // A#2：只移除【已勾选落库】的三段条目，未勾选的留存(与 applyUpdates / applyNew 同口径)——
+    //   原来整体清空会把没勾的一起丢；配合 M-D1 持久化，未勾条目跨刷新也在，让工具栏「未落库的不丢」对状态/流转/伏笔三段都成真。
+    setPendingState((p) => p.filter((_, i) => !selState.includes(i)))
+    setPendingFlow((p) => p.filter((_, i) => !selFlow.includes(i)))
+    setPendingHook((p) => p.filter((_, i) => !selHook.includes(i)))
     setSelState([])
     setSelFlow([])
     setSelHook([])
     setSettlePreviewOpen(false)
     // A4：报「实际写入数」；勾选但被跳过的(名册无此资产/伏笔、仅提及伏笔)单独提示，计数不再≠实写
     const skips = [
-      selSc.length - doneSc > 0 ? `状态变更 ${selSc.length - doneSc} 条跳过(名册无此资产)` : '',
-      selFl.length - doneFl > 0 ? `流转 ${selFl.length - doneFl} 条跳过(人物/资产对不上)` : '',
+      selSc.length - doneSc > 0 ? `状态变更 ${selSc.length - doneSc} 条跳过(名册无此资产或维度未识别)` : '',
+      selFl.length - doneFl > 0 ? `流转 ${selFl.length - doneFl} 条跳过(无资产名 / 资产未建档且动作非获得)` : '',
       selHk.length - doneHk > 0 ? `伏笔 ${selHk.length - doneHk} 条跳过(未入库或仅提及)` : '',
     ].filter(Boolean)
+    // 新入表分「道具/人物」两类计数(与 ContinuePage createdNote 同口径)——D9 顺便建的人物也报出来，不再只数道具
+    const createdNote =
+      newItem || newPerson ? `（新入表 ${[newItem ? `${newItem} 个道具` : '', newPerson ? `${newPerson} 个人物` : ''].filter(Boolean).join('、')}）` : ''
     setMsg(
-      `已结算落库：状态变更 ${doneSc} / 资产流转 ${doneFl}${newItemCount ? `（新入表 ${newItemCount}）` : ''} / 伏笔 ${doneHk}` + (skips.length ? `；${skips.join('、')}` : '')
+      `已结算落库：状态变更 ${doneSc} / 资产流转 ${doneFl}${createdNote} / 伏笔 ${doneHk}` + (skips.length ? `；${skips.join('、')}` : '')
     )
-  }
+  })
 
   // 结算预览的只读辅助：旧值(该维度当前状态中文)、资产是否已建档、伏笔当前 state
   const oldStateWord = (sc) => {
-    const a = ((book && book.assets) || []).find((x) => x.name === sc.name)
+    const a = findAssetByName((book && book.assets) || [], sc.name) // M5：与结算落库同口径(别名/《》/空格容错)，预览「旧值」不再对别名资产误显示 (新资产)
     if (!a) return '(新资产)'
     const st = a.state && a.state.v === 2 ? a.state : normalizeState(a.state)
     const dim = sc.dimKey
-    if (dim === 'place') return st.place && st.place.ref ? `在${st.place.ref}` : '(未记录)'
+    // inferred place 不加「在」、直接返回原词(与 C 区 ContinuePage 的 oldStateWord、B 区 placePhrase 同口径)——预览与落库/注入一致，不对推定短语(前往昆仑)断言位置
+    if (dim === 'place') return st.place && st.place.ref ? (st.place.inferred ? st.place.ref : `在${st.place.ref}`) : '(未记录)'
     if (dim === 'hold') return `持有 ${(st.hold || []).filter((h) => h.change === 'gain' || !h.change).map((h) => h.name).filter(Boolean).join('、') || '(无)'}`
     const o = st[dim]
     if (!o) return '(未记录)'
     return o.note || (o.tag ? stateLabel(dim, o.tag) : '(未记录)')
   }
-  const assetExists = (name) => ((book && book.assets) || []).some((a) => a.name === name)
-  const foreshadowStateOf = (title) => (((book && book.foreshadows) || []).find((f) => f.title === title) || {}).state || '未入库'
+  const assetExists = (name) => !!findAssetByName((book && book.assets) || [], name) // M5：与结算落库同口径(别名容错)
+  // L6：预览也走 findForeshadowByTitle(与 applySettlement 的伏笔推进落库同源)——原来 f.title===title 严格全等，AI 回填 title 带空格/《》/改写时，
+  //   预览显示"未入库→resolved"但落库其实模糊命中并真改了 state → 人在环路看到的与真实写入不一致。
+  const foreshadowStateOf = (title) => (findForeshadowByTitle((book && book.foreshadows) || [], title) || {}).state || '未入库'
 
   // ==================== B7 手动新增资产（NewAssetModal）====================
   // onSubmit(asset, info)：asset 已由 NewAssetModal 过 normalizeAsset(带 id/links/state v2)。create/force→追加；merge→按 mergedFrom 替换(保留 id)；empty→只提示
+  // 第1项(A2 双写)：这两个函数与图谱 LinkEditor 的 updateAsset(走 mutateBook)同屏可毫秒级重叠(顺便建档 + 改边)，
+  // 故一并走 mutateBook(基于 bookRef.current 乐观更新)，不再用闭包 book 的 persistBook，堵住"乐观更新被陈旧闭包覆盖"的唯一真实窗口。
   const handleAssetSubmit = async (asset, info) => {
-    if (!book) return
     if (!asset) {
       if (info && info.reason) setMsg(info.reason)
       return
     }
     if (info && info.mode === 'merge' && info.mergedFrom) {
-      await persistBook({ ...book, assets: (book.assets || []).map((a) => (a.id === info.mergedFrom ? asset : a)) })
+      await mutateBook((b) => ({ ...b, assets: (b.assets || []).map((a) => (a.id === info.mergedFrom ? asset : a)) }))
       setMsg(`已合并进《${asset.name}》`)
     } else {
-      await persistBook({ ...book, assets: [...(book.assets || []), asset] })
+      await mutateBook((b) => ({ ...b, assets: [...(b.assets || []), asset] }))
       setMsg(`已新增资产《${asset.name}》`)
     }
     // 不整表 buildLinks：避免覆盖用户手改的边(设计§4.2)；新资产的显式边由 normalizeAsset 从表单/controller/holder/state.place 生成
   }
   // LinkEditor「顺便建档」/结算未建档道具：建一条最小资产(只有名字+类型)，符合"人在环路+不阻断"
+  // M-新1：返回形状与 ContinuePage.quickCreateAsset 对齐({ ok, ... })，让 LinkEditor 的「顺便建档」在失败时能按 r.ok===false 回滚乐观标记；mutateBook reject 被 try/catch 兜住，不让 rejection 逃逸。
   const quickCreateAsset = async ({ name, type }) => {
-    if (!book || !name) return
-    const minimal = normalizeAsset({ name, type: type || 'person' }, { idPrefix: 'lf' })
-    await persistBook({ ...book, assets: [...(book.assets || []), minimal] })
-    setMsg(`已顺便建档《${name}》（只有名字，其余字段可后补）`)
+    if (!name) return { ok: false, msg: '没有名字', error: '没有名字' }
+    // A#4：append 前查重(对齐 ContinuePage 走 ua.addAsset 的统一入口)——同名已建档则不再无判据直接 append 造重复资产。
+    //   用 bookRef.current(最新)而非闭包 book，避免快速连点漏判；返回 { ok:false, reason:'duplicate' } 让 LinkEditor 按 r.ok===false 回滚乐观标记。
+    const dup = findByName((bookRef.current && bookRef.current.assets) || [], name)
+    if (dup) {
+      setMsg(`「${name}」已在资产库，未重复建档`)
+      return { ok: false, reason: 'duplicate', existing: dup, name, msg: `「${name}」已在资产库`, error: 'duplicate' }
+    }
+    try {
+      const minimal = normalizeAsset({ name, type: type || 'person' }, { idPrefix: 'lf' })
+      await mutateBook((b) => ({ ...b, assets: [...(b.assets || []), minimal] }))
+      setMsg(`已顺便建档《${name}》（只有名字，其余字段可后补）`)
+      return { ok: true, name, asset: minimal }
+    } catch (e) {
+      const msg = (e && (e.message || e.reason)) || '建档失败'
+      setMsg(`「${name}」建档未成功：${msg}`)
+      return { ok: false, name, msg, error: msg }
+    }
   }
 
   // M43：加载中 / 读取失败 / 确实没书，三态分别给文案——故障不再被说成"空书库"
@@ -1109,7 +1424,7 @@ export default function LongFormPage() {
             历史版本（{currentHistory.length}）
           </button>
         </div>
-        {(pendingUpdates.length > 0 || pendingNew.length > 0) && (
+        {(pendingUpdates.length > 0 || pendingNew.length > 0 || pendingState.length > 0 || pendingFlow.length > 0 || pendingHook.length > 0) && (
           <div className="mb-3 flex flex-wrap items-center gap-2">
             {pendingUpdates.length > 0 && (
               <button onClick={() => setUpdatesOpen(true)} className={ghostBtn}>
@@ -1119,6 +1434,13 @@ export default function LongFormPage() {
             {pendingNew.length > 0 && (
               <button onClick={() => setNewOpen(true)} className={ghostBtn}>
                 查看新资产（{pendingNew.length}）
+              </button>
+            )}
+            {/* M2：状态结算三段(状态变更/资产流转/伏笔推进)补一个重入口——原来只在 adoptSettle 里 setSettlePreviewOpen(true)，
+                M-D1 持久化后刷新虽恢复了三段，却没有按钮能再打开结算预览(只能等下次跑结算合并带出)，使「未落库的不丢」对这三段落空。 */}
+            {pendingState.length + pendingFlow.length + pendingHook.length > 0 && (
+              <button onClick={() => setSettlePreviewOpen(true)} className={ghostBtn}>
+                查看状态结算（{pendingState.length + pendingFlow.length + pendingHook.length}）
               </button>
             )}
             <span className="text-xs text-stone-500">分析结果需查看勾选后才落库（默认不勾选；多次分析会累加，未落库的不丢）</span>
@@ -1136,7 +1458,7 @@ export default function LongFormPage() {
 
       {drawerOpen && (
         <div className="fixed inset-0 z-40 bg-black/40" onClick={() => setDrawerOpen(false)}>
-          <aside className="h-full w-72 overflow-y-auto border-r border-stone-200 bg-paper p-3" onClick={(e) => e.stopPropagation()}>
+          <aside className="h-full w-72 overflow-y-auto border-r border-stone-200 bg-paper p-3" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="章节树">
             <div className="mb-2 flex items-center justify-between gap-2">
               <h3 className="text-sm font-semibold">章节树</h3>
               <button onClick={() => setDrawerOpen(false)} className="text-stone-400 hover:text-stone-600" aria-label="收起">
@@ -1222,7 +1544,7 @@ export default function LongFormPage() {
       />
 
       {sourceOpen && (
-        <div className="fixed inset-0 z-[56] flex items-center justify-center bg-black/50 p-4">
+        <div className="fixed inset-0 z-[56] flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" aria-label="分析原文">
           <div className="flex max-h-[86vh] w-[min(680px,94vw)] flex-col overflow-hidden rounded-2xl bg-paper shadow-2xl">
             <div className="flex items-center justify-between border-b border-stone-200 px-5 py-3">
               <span className="font-semibold text-ink">分析原文 → 资产更新/新资产</span>
@@ -1259,7 +1581,7 @@ export default function LongFormPage() {
       )}
 
       {updatesOpen && (
-        <div className="fixed inset-0 z-[57] flex items-center justify-center bg-black/50 p-4" onClick={() => setUpdatesOpen(false)}>
+        <div className="fixed inset-0 z-[57] flex items-center justify-center bg-black/50 p-4" onClick={() => setUpdatesOpen(false)} role="dialog" aria-modal="true" aria-label="已有资产更新">
           <div className="flex max-h-[80vh] w-[min(640px,94vw)] flex-col overflow-hidden rounded-2xl bg-paper shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-stone-200 px-5 py-3">
               <span className="font-semibold text-ink">已有资产更新预览（勾选后落库）</span>
@@ -1276,7 +1598,7 @@ export default function LongFormPage() {
                   <span className="font-medium text-ink">{u.name}</span>
                   <span className="flex-1 text-stone-600">{u.info}</span>
                   <select value={u.state} onChange={(e) => setPendingUpdates((p) => p.map((x, j) => (j === i ? { ...x, state: e.target.value } : x)))} className="rounded border border-stone-300 bg-paper px-1 py-0.5">
-                    {['活跃', '死亡', '毁坏', '隐藏', '升迁'].map((s) => (
+                    {STATE_WORDS_CN.map((s) => (
                       <option key={s} value={s}>
                         {s}
                       </option>
@@ -1307,7 +1629,7 @@ export default function LongFormPage() {
       )}
 
       {newOpen && (
-        <div className="fixed inset-0 z-[57] flex items-center justify-center bg-black/50 p-4" onClick={() => setNewOpen(false)}>
+        <div className="fixed inset-0 z-[57] flex items-center justify-center bg-black/50 p-4" onClick={() => setNewOpen(false)} role="dialog" aria-modal="true" aria-label="新资产">
           <div className="flex max-h-[80vh] w-[min(640px,94vw)] flex-col overflow-hidden rounded-2xl bg-paper shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-stone-200 px-5 py-3">
               <span className="font-semibold text-ink">新资产预览（勾选后落库）</span>
@@ -1385,6 +1707,9 @@ export default function LongFormPage() {
         thinking
         onClose={() => setComposeOpen(false)}
         onAdopt={(reply) => {
+          // item1（第十轮）：采纳生成稿会覆盖编辑区正文——有未保存手写改动时先确认（与 loadChapter/rollbackChapter 同口径 isChapterDirty）；
+          //   取消则 return、不关弹窗（PromptEditorModal H8 保留已生成 reply，用户可先「保存本章」存下手写再回来采纳，不丢生成稿）
+          if (isChapterDirty() && !window.confirm(`第${chapterNo}章有未保存的改动（正文/章名/摘要），采纳生成稿会覆盖当前编辑区内容。确定采纳吗？`)) return
           setChapterText(reply)
           setComposeOpen(false)
           // 防剧透门(M45)：①名字≥2字才做包含匹配，避免单字资产名(李/京/城)命中"行李/李白"误报；
@@ -1405,7 +1730,7 @@ export default function LongFormPage() {
       />
 
       {outlineOpen && (
-        <div className="fixed inset-0 z-[55] flex items-center justify-center bg-black/50 p-4" onClick={() => setOutlineOpen(false)}>
+        <div className="fixed inset-0 z-[55] flex items-center justify-center bg-black/50 p-4" onClick={() => setOutlineOpen(false)} role="dialog" aria-modal="true" aria-label="结构大纲">
           <div className="flex max-h-[86vh] w-[min(820px,94vw)] flex-col overflow-hidden rounded-2xl bg-paper shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-stone-200 px-5 py-3">
               <span className="font-semibold text-ink">全书详纲（{volumeChapters.length} 章 · 已排到第 {maxPlanChapter} 章）</span>
@@ -1453,7 +1778,7 @@ export default function LongFormPage() {
 
       {/* 5.5 章节历史版本弹窗：新版在上，逐版可回滚(载回编辑区，确认后保存生效) */}
       {historyOpen && (
-        <div className="fixed inset-0 z-[58] flex items-center justify-center bg-black/50 p-4" onClick={() => setHistoryOpen(false)}>
+        <div className="fixed inset-0 z-[58] flex items-center justify-center bg-black/50 p-4" onClick={() => setHistoryOpen(false)} role="dialog" aria-modal="true" aria-label="历史版本">
           <div className="flex max-h-[80vh] w-[min(640px,94vw)] flex-col overflow-hidden rounded-2xl bg-paper shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-stone-200 px-5 py-3">
               <span className="font-semibold text-ink">第{chapterNo}章 · 历史版本（{currentHistory.length}）</span>
@@ -1509,7 +1834,7 @@ export default function LongFormPage() {
 
       {/* B6 结算预览：状态变更(旧值→新值,可改状态词)/资产流转/伏笔推进，默认全选、逐条可取消，落库选中才写 */}
       {settlePreviewOpen && (
-        <div className="fixed inset-0 z-[57] flex items-center justify-center bg-black/50 p-4" onClick={() => setSettlePreviewOpen(false)}>
+        <div className="fixed inset-0 z-[57] flex items-center justify-center bg-black/50 p-4" onClick={() => setSettlePreviewOpen(false)} role="dialog" aria-modal="true" aria-label="状态结算预览">
           <div className="flex max-h-[86vh] w-[min(720px,95vw)] flex-col overflow-hidden rounded-2xl bg-paper shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-stone-200 px-5 py-3">
               <span className="font-semibold text-ink">结算第{chapterNo}章 · 预览勾选后落库</span>
@@ -1525,6 +1850,8 @@ export default function LongFormPage() {
                     <input type="checkbox" checked={selState.includes(i)} onChange={(e) => setSelState(e.target.checked ? [...selState, i] : selState.filter((x) => x !== i))} />
                     <span className="font-medium text-ink">{sc.name}</span>
                     <span className="rounded bg-stone-200 px-1 text-stone-600">{sc.dim || sc.dimKey}</span>
+                    {/* #2：维度未识别(dimKey 空)→applyStateChange 原样返回不落库，明确标出，避免用户以为勾选就会写入(对齐 ContinuePage) */}
+                    {!sc.dimKey && <span className="rounded bg-red-100 px-1 text-red-500">维度未识别，不落库</span>}
                     <span className="text-stone-400">{oldStateWord(sc)} →</span>
                     <input value={sc.state} onClick={(e) => e.stopPropagation()} onChange={(e) => setPendingState((p) => p.map((x, j) => (j === i ? { ...x, state: e.target.value } : x)))} className="w-24 rounded border border-stone-300 bg-paper px-1 py-0.5" aria-label="新状态词" />
                     {sc.note && <span className="text-stone-500">{sc.note}</span>}
@@ -1540,13 +1867,34 @@ export default function LongFormPage() {
                     <input type="checkbox" checked={selFlow.includes(i)} onChange={(e) => setSelFlow(e.target.checked ? [...selFlow, i] : selFlow.filter((x) => x !== i))} />
                     <span className="font-medium text-ink">{fl.person}</span>
                     <span className="rounded bg-stone-200 px-1 text-stone-600">{fl.changeRaw || fl.change}</span>
+                    {/* #1：changeKeyOf 认不出的动作词(夺走/赠予…)→ fl.change 为空，不猜 gain；标红让用户改成正确动作(否则落库只记原词进 note) */}
+                    {!fl.change && (
+                      <span className="flex items-center gap-1 text-red-400">
+                        动作未识别，请改
+                        <select
+                          value=""
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => setPendingFlow((p) => p.map((x, j) => (j === i ? { ...x, change: e.target.value } : x)))}
+                          className="rounded border border-stone-300 bg-paper px-1 py-0.5 text-stone-700"
+                          aria-label="流转动作"
+                        >
+                          <option value="">选择动作</option>
+                          {[['gain', '获得'], ['lose', '失去'], ['broken', '损坏'], ['consumed', '消耗'], ['transferred', '易主']].map(([v, lab]) => (
+                            <option key={v} value={v}>
+                              {lab}
+                            </option>
+                          ))}
+                        </select>
+                      </span>
+                    )}
                     <span className="text-stone-700">{fl.asset}</span>
                     {fl.asset && fl.change === 'gain' && !assetExists(fl.asset) && (
                       <span className="flex items-center gap-1 text-red-400">
                         未建档，落库建为
                         {/* A7：gain 未建档时类型不再硬编码 item——让用户在预览里改（默认 item），落库按此 type 建最小资产 */}
+                        {/* 尾批③：parseAnalyze 现产出中文类型词(如「灵兽」)，与本页 applyNew 的 typeKeyOf 归一同口径，否则 select value 匹配不到英文 option→预览空白；空值仍守 item(typeKeyOf('')='person' 不可用) */}
                         <select
-                          value={fl.assetType || 'item'}
+                          value={fl.assetType ? typeKeyOf(fl.assetType) : 'item'}
                           onClick={(e) => e.stopPropagation()}
                           onChange={(e) => setPendingFlow((p) => p.map((x, j) => (j === i ? { ...x, assetType: e.target.value } : x)))}
                           className="rounded border border-stone-300 bg-paper px-1 py-0.5 text-stone-700"
@@ -1598,7 +1946,6 @@ export default function LongFormPage() {
       {/* B7 手动新增资产（阶段0 NewAssetModal，全字段可空、全空不入库、重名给合并/仍新增） */}
       <NewAssetModal
         open={newAssetOpen}
-        mode="create"
         assets={(book && book.assets) || []}
         perVol={perVol}
         chapterNo={chapterNo}

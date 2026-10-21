@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { baseName, extOf, buildExportName, textToDocHtml, textToDocxBlob, docxToText } from '../docio.js'
+import { baseName, extOf, buildExportName, textToDocHtml, textToDocxBlob, docxToText, readDocumentFile } from '../docio.js'
 
 describe('docio 文件名工具', () => {
   it('剥离扩展名 / 取扩展名（大小写无关）', () => {
@@ -49,5 +49,32 @@ describe('docio .docx 读写往返', () => {
     // 关键字符不丢：全角空格缩进与中文引号
     expect(back).toContain('夜色如墨，风声鹤唳。')
     expect(back).toContain('“你是谁？”')
+  })
+})
+
+// 第十轮 item10/必修B：txt/md 编码探测（UTF-8 fatal → gbk 兜底 → decodeLooksBroken 乱码探测）
+describe('docio readDocumentFile 编码探测', () => {
+  const mkFile = (bytes, name = 'novel.txt') => ({ name, arrayBuffer: async () => bytes })
+  const sample = '第一章 测试正文，少年觉醒异能，从校园成长到域主。'
+
+  it('UTF-8 .txt 正常解码、原文零改动', async () => {
+    const out = await readDocumentFile(mkFile(Buffer.from(sample, 'utf8')))
+    expect(out).toBe(sample)
+  })
+
+  it('UTF-16LE（无 BOM）→ gbk 解出高控制符乱码 → decodeLooksBroken 拦住、抛编码错误（item10 生效）', async () => {
+    await expect(readDocumentFile(mkFile(Buffer.from(sample, 'utf16le')))).rejects.toThrow(/无法识别文件编码/)
+  })
+
+  // ⚪ 已知且**接受**的产品范围外限制（非 bug、勿再 flag）：Big5/Shift-JIS→gbk 解出的是**错位汉字**（坏字占比 ~0%），绕过 decodeLooksBroken → 返回可见乱码。
+  //   【产品决策（用户 2026-10-20）：产品场景 = 简体中文，UTF-8 + GBK 已覆盖用户全部导入需求；Big5（繁中）/ Shift-JIS（日文）不在范围内，不做自动编码识别。
+  //   此类乱码是**可见**的（用户导入后立即在原文框看到错字、非静默损坏既有数据），可自行另存 UTF-8/GBK 重导 —— 危害可控、接受、不修。】
+  //   本用例锚定这一**已接受的现状**（不是待修 gap）：断言 Big5 当前返回可见乱码而非抛错；decodeLooksBroken 判据/阈值刻意不动（启发式识别繁中/日文误判真实 GBK 的代价更高）。
+  it('【范围外·已接受】Big5 .txt → gbk 解成可见错位汉字、不报错（简中产品不做繁中/日文自动识别，用户 2026-10-20 裁定）', async () => {
+    const big5 = Uint8Array.from([0xb4, 0xfa, 0xb8, 0xd5]) // Big5「測試」；gbk 会解成「代刚」（可见乱码）
+    const out = await readDocumentFile(mkFile(big5))
+    expect(typeof out).toBe('string')
+    expect(out.length).toBeGreaterThan(0) // 有字数、用户能在原文框看到乱码（可见、非静默、非空）
+    expect(out).not.toBe('測試') // 是错位汉字、非正确解码 —— 已接受的范围外行为，不是待修 bug
   })
 })

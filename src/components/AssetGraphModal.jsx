@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { LINK_LABEL } from '../lib/parseAssets.js'
 // C(资产库阶段2)：perVolOf(透出章按卷估算单一出处) + ChapterField(透出/传闻章统一显示) + LinkEditor(加边/删边/顺便建档)
-import { perVolOf } from '../lib/assets.js'
+import { perVolOf, ASSET_TYPE_LABEL, dashOut } from '../lib/assets.js'
 import ChapterField from './ChapterField.jsx'
 import LinkEditor from './LinkEditor.jsx'
 
@@ -10,51 +10,72 @@ import LinkEditor from './LinkEditor.jsx'
 // 关系类型显示中文（LINK_LABEL），存储保持英文枚举。
 const W = 860
 const H = 560
-// C(设计§2.1)：节点色/图例补 skill(功法)/beast(宠物)两类新资产类型（图例由 Object.keys(TYPE_COLOR) 自动带出）
+// C(设计§2.1)：节点色/图例补 skill(功法)/beast(灵兽)两类新资产类型（图例由 Object.keys(TYPE_COLOR) 自动带出）
 const TYPE_COLOR = { person: '#C9A96A', faction: '#7FA8B0', place: '#8FAF7E', item: '#B08AC9', group: '#8A8A93', skill: '#D98E4A', beast: '#6FB492' }
-const TYPE_LABEL = { person: '人物', faction: '势力', place: '地点', item: '道具', group: '群像', skill: '功法', beast: '宠物' }
+// 类型中文名复用 assets.js 的 ASSET_TYPE_LABEL（单一出处）——此前本地重复一份 TYPE_LABEL，改标签时会与之漂移
 
-function seedPos(i, n) {
-  const angle = i * 2.39996
-  const r = 120 + (i % 5) * 34 + (n % 3) * 12
+// M-F5：种子位置改用「资产 id 的稳定哈希」而非数组下标 i——原来增删任一资产会让后面所有资产的下标位移，
+//   未手动拖过(无 savedPos、fixed=false)的节点种子全变→整张图重排。用 id 哈希后，增删只影响新节点自身，既有节点种子不变。
+//   注：改种子算法会让"当前未固定节点"一次性换到新布局(此后稳定)；已拖过并落库的 fixed 节点不受影响。
+function hashId(id) {
+  const s = String(id == null ? '' : id)
+  let h = 0
+  for (let k = 0; k < s.length; k++) h = (h * 31 + s.charCodeAt(k)) | 0
+  return Math.abs(h)
+}
+function seedPos(seed) {
+  const angle = seed * 2.39996
+  const r = 120 + (seed % 5) * 34 + ((seed >> 3) % 3) * 12
   return { x: W / 2 + r * Math.cos(angle), y: H / 2 + r * Math.sin(angle) * 0.82 }
 }
 
-function forceLayout(nodes, edges) {
-  // fixed = 用户手动拖过并已存库的节点：布局时固定不动，只让新节点围绕它收敛，避免每次刷新把手动布局打散(H14)
-  const p = nodes.map((n) => ({ x: n.x, y: n.y, fixed: !!n.fixed }))
-  for (let it = 0; it < 140; it++) {
-    for (let i = 0; i < p.length; i++) {
-      for (let j = i + 1; j < p.length; j++) {
-        let dx = p[i].x - p[j].x
-        let dy = p[i].y - p[j].y
-        let d2 = dx * dx + dy * dy
-        if (d2 < 1) d2 = 1
-        const f = 1800 / d2
-        const d = Math.sqrt(d2)
-        dx /= d
-        dy /= d
-        if (!p[i].fixed) { p[i].x += dx * f; p[i].y += dy * f }
-        if (!p[j].fixed) { p[j].x -= dx * f; p[j].y -= dy * f }
-      }
-    }
-    edges.forEach(([a, b]) => {
-      const dx = p[b].x - p[a].x
-      const dy = p[b].y - p[a].y
-      const d = Math.max(1, Math.sqrt(dx * dx + dy * dy))
-      const f = 0.02 * (d - 95)
-      if (!p[a].fixed) { p[a].x += (dx / d) * f; p[a].y += (dy / d) * f }
-      if (!p[b].fixed) { p[b].x -= (dx / d) * f; p[b].y -= (dy / d) * f }
-    })
-    p.forEach((q) => {
-      if (q.fixed) return
-      q.x += (W / 2 - q.x) * 0.012
-      q.y += (H / 2 - q.y) * 0.012
-      q.x = Math.min(W - 30, Math.max(30, q.x))
-      q.y = Math.min(H - 24, Math.max(24, q.y))
-    })
+// M-F6：力导向的物理/迭代次数(FORCE_ITERS)/力常量完全不动——只把「何时算」从一次性同步改成 rAF 分帧(见组件内 effect)。
+//   forceStep 是原 for 循环体的逐字抽取，故分帧跑满 FORCE_ITERS 轮与同步跑产出逐像素一致(统筹脚本已证差异 0.000000px)。
+//   为何不用「早停」替代：无退火时布局在 ~3px 平台震荡永不收敛(早停触发不了)；加退火又会让节点重叠(最短边=0)。故只优化「算的时机」。
+const FORCE_ITERS = 140
+// M-F6①：布局缓存提到**模块级**——AssetGraphModal 在 LongFormPage 里是条件挂载({graphOpen && …}，关窗即卸载)，
+//   组件内 useRef 缓存会随卸载销毁，"重开弹窗命中缓存"就是假的。模块级 Map 才能跨开合/跨书复用。key = book.id::layoutKey。
+//   容量上限防长会话无界增长(Map 保持插入序，超限删最旧)；每条只是 n 个 {x,y}，占用很小。
+const layoutCache = new Map()
+const LAYOUT_CACHE_MAX = 60
+function cacheLayout(key, val) {
+  layoutCache.set(key, val)
+  if (layoutCache.size > LAYOUT_CACHE_MAX) {
+    const oldest = layoutCache.keys().next().value
+    if (oldest !== undefined) layoutCache.delete(oldest)
   }
-  return p
+}
+function forceStep(p, edges) {
+  for (let i = 0; i < p.length; i++) {
+    for (let j = i + 1; j < p.length; j++) {
+      let dx = p[i].x - p[j].x
+      let dy = p[i].y - p[j].y
+      let d2 = dx * dx + dy * dy
+      if (d2 < 1) d2 = 1
+      const f = 1800 / d2
+      const d = Math.sqrt(d2)
+      dx /= d
+      dy /= d
+      // fixed = 用户手动拖过并已存库的节点：布局时固定不动，只让新节点围绕它收敛，避免每次刷新把手动布局打散(H14)
+      if (!p[i].fixed) { p[i].x += dx * f; p[i].y += dy * f }
+      if (!p[j].fixed) { p[j].x -= dx * f; p[j].y -= dy * f }
+    }
+  }
+  edges.forEach(([a, b]) => {
+    const dx = p[b].x - p[a].x
+    const dy = p[b].y - p[a].y
+    const d = Math.max(1, Math.sqrt(dx * dx + dy * dy))
+    const f = 0.02 * (d - 95)
+    if (!p[a].fixed) { p[a].x += (dx / d) * f; p[a].y += (dy / d) * f }
+    if (!p[b].fixed) { p[b].x -= (dx / d) * f; p[b].y -= (dy / d) * f }
+  })
+  p.forEach((q) => {
+    if (q.fixed) return
+    q.x += (W / 2 - q.x) * 0.012
+    q.y += (H / 2 - q.y) * 0.012
+    q.x = Math.min(W - 30, Math.max(30, q.x))
+    q.y = Math.min(H - 24, Math.max(24, q.y))
+  })
 }
 
 export default function AssetGraphModal({ open, onClose, book, onUpdateAsset, onDeleteAsset, onDelLink, onSavePos, onRebuildLinks, onAddAsset }) {
@@ -63,56 +84,61 @@ export default function AssetGraphModal({ open, onClose, book, onUpdateAsset, on
   const [view, setView] = useState({ scale: 1, tx: 0, ty: 0 })
   // M47：点边不再立即永久删除——记下待确认的边，在底部出一条非阻塞确认条；hoverEdge 用于高亮即将操作的边
   const [confirmEdge, setConfirmEdge] = useState(null)
-  const [hoverEdge, setHoverEdge] = useState(-1)
+  // L16：hoverEdge 存边的稳定三元组{fromId,toName,type}(与 confirmEdge 同口径)，不存数组下标——edges 重排(增删资产/边)后下标会指向别的边、hover 高亮短暂落错。null=无 hover。
+  const [hoverEdge, setHoverEdge] = useState(null)
   const dragRef = useRef(null)
   const draggedRef = useRef(false)
   const panRef = useRef(null)
   const svgRef = useRef(null)
+  const dragResetRafRef = useRef(0) // L8：拖拽松手后"吞 click"的 rAF id，卸载时 cancel
 
   const assets = (book && book.assets) || []
-  const savedPos = (book && book.graphPos) || {}
+  const graphPos = book && book.graphPos // 引用稳定(book 不变则不变)，供 posKey 的 useMemo 依赖
+  const savedPos = graphPos || {}
+  // L-1：graphPos 签名进缓存键——手拖节点落库后 graphPos 变→缓存失效重算，非 fixed 邻居才会围绕新固定位重新收敛
+  //   (否则命中旧缓存、邻居仍围绕手拖前的旧位=仅视觉偏差)。拖一次重算一次(rAF 分帧不阻塞)，是力导向"钉住后周围松弛"的标准行为。
+  //   ⚠ posKey 必须同时进 nodes memo 的 deps(见下)——否则 nodes 的 fixed/savedPos 陈旧，重算时手拖节点不被当固定点会漂移(比原视觉问题更糟)。
+  //   #3(预期行为·入注防复审重复标记)：posKey 进键后每次手拖落库都缓存 miss→从种子重跑 140 轮、非 fixed 节点会松弛挪位。这是标准力导向"钉住一个、周围重新松弛"的行为，非 bug；
+  //     重算走 rAF 分帧不阻塞主线程。若产品上要"手拖后其余节点完全不动"，需改成只固定全部已存节点、不对非 fixed 重算(另一套布局策略)，非本轮范围。
+  const posKey = useMemo(() => JSON.stringify(graphPos || {}), [graphPos])
   // C(需求4)：透出/传闻章「按卷估算」与长篇页/资产库同源(perVolOf 单一出处)，ChapterField 用它，清掉图谱原来的第三套口径(M49)
   const perVol = perVolOf(book)
 
-  // 力导向布局只在"资产名单或书"变化时重跑：改透出章/详情/拖拽保存不触发 140 轮重算
-  const layoutKey = assets.map((a) => a.name).join(',')
+  // 力导向布局缓存键的名字签名部分：资产名单变化时失效重算(改透出章/详情不动名字→仍命中缓存、不触发 140 轮重算)；拖拽存库由 posKey 负责失效(见 L-1)。
+  // L5：用 JSON.stringify 而非 join(',')——资产名含半角逗号时 join 会碰撞(「张,三」+「李四」与「张三」+「李,四」拼出同一签名)，JSON 数组无歧义。
+  const layoutKey = JSON.stringify(assets.map((a) => a.name))
   const nodes = useMemo(() => {
-    // C6：用 id→index 与 name→首个index 映射定位布局边，替代 assets.indexOf(每条边 O(n) 线性查找)与 find(重名时与渲染边口径不一致)
+    // M-F6：本 memo 只产出「种子坐标 + 元数据」，不再在此同步跑 forceLayout——力导向改由下方 rAF 分帧 effect 计算(结果写进 forcePos)。
+    //   M-F5：种子用稳定 id 哈希 seedPos(hashId(a.id))，增删资产不再重排既有节点。C5：节点半径仍由 edges 派生的 degMap 提供(见下)。
+    return assets.map((a) => {
+      const hasSaved = !!savedPos[a.id]
+      const sp = savedPos[a.id] || seedPos(hashId(a.id))
+      return { id: a.id, name: a.name, type: a.type, x: sp.x, y: sp.y, fixed: hasSaved }
+    })
+    // L-新6：deps 含 assets 与 edges memo 同源——原来 nodes 按 [layoutKey,book.id]、edges 按 [assets]，渲染用 nodes[e.a].id 取端点，
+    //   同名资产换序(assets 变而名字签名不变)时 nodes 不重算、edges 重算 → 下标错配连错节点。同依赖 assets 后两者永远同序。
+    // L-1：deps 加 posKey(=graphPos 签名，等价于把 savedPos 纳入依赖)——手拖落库后 savedPos 变，nodes 须重算带上最新 fixed/坐标，
+    //   否则下方 effect 用陈旧 nodes 重算力导向会让手拖节点漂移(比原视觉问题更糟)。eslint-disable 仅因 savedPos 是经 posKey 间接入依赖、linter 看不出来。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assets, posKey])
+
+  const { edges } = useMemo(() => {
     const idx = {}
     const nameIdx = {}
     assets.forEach((a, i) => {
       idx[a.id] = i
-      if (!(a.name in nameIdx)) nameIdx[a.name] = i
-    })
-    // C5：deg 不在此处算——本 memo 只按名字签名(layoutKey)重跑，增删边后名字不变则不重算，deg 会陈旧；
-    // 节点半径改由 edges 派生的 degMap 提供(见下)，增删边即时更新且不触发 140 轮力导向重跑。
-    const raw = assets.map((a, i) => {
-      const hasSaved = !!savedPos[a.id]
-      const sp = savedPos[a.id] || seedPos(i, assets.length)
-      return { id: a.id, name: a.name, type: a.type, x: sp.x, y: sp.y, fixed: hasSaved }
+      // L17(已知限制·标注)：links 按「名字」引用目标、不含 id，故同名资产无法区分——这里取首个同名。若确有重名资产，
+      //   边会一律连到第一个；彻底解需 links 存目标 id(数据模型改动，属 B 区)，本轮不擅改。
+      const nk = dashOut(a.name)
+      if (nk && !(nk in nameIdx)) nameIdx[nk] = i
     })
     const es = []
     assets.forEach((a) =>
       (a.links || []).forEach((l) => {
-        const ti = nameIdx[l.to]
-        if (ti !== undefined) es.push([idx[a.id], ti])
-      })
-    )
-    const p = forceLayout(raw, es)
-    return raw.map((n, i) => ({ ...n, x: p[i].x, y: p[i].y }))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layoutKey, book && book.id])
-
-  const { edges } = useMemo(() => {
-    const idx = {}
-    assets.forEach((a, i) => {
-      idx[a.id] = i
-    })
-    const es = []
-    assets.forEach((a) =>
-      (a.links || []).forEach((l, li) => {
-        const t = assets.find((x) => x.name === l.to)
-        if (t) es.push({ a: idx[a.id], b: idx[t.id], fromId: a.id, linkIdx: li, type: l.type, toName: l.to })
+        // M-F3：目标名过 dashOut 归一再查(与卡片侧 isDangling 双向归一同口径)——带空格/《》的边不再漏画/漏删、头部「N 边」计数不再偏少。
+        //   toName 仍存原始 l.to：删边(onDelLink→LongFormPage.delLink)按 l.to===toName 精确匹配，归一会删不掉。
+        const ti = nameIdx[dashOut(l.to)]
+        if (ti !== undefined) es.push({ a: idx[a.id], b: ti, fromId: a.id, type: l.type, toName: l.to })
       })
     )
     return { edges: es }
@@ -128,25 +154,74 @@ export default function AssetGraphModal({ open, onClose, book, onUpdateAsset, on
     return m
   }, [edges])
 
-  // M46：渲染前先一次性建 id→坐标 查表（只在 nodes / dragPos 变化时重建），posOf 由 O(n) 线性 find 降为 O(1) 查表。
-  // 原实现每条边调 2 次 nodes.find、每个节点调 1 次，拖动时每帧 O(E·n)（300 边×200 节点=每帧 12 万次查找）明显掉帧。
+  // ==================== M-F6：力导向 = 缓存 + rAF 分帧（物理/迭代/力常量不动，只改"何时算"）====================
+  // 布局边直接复用渲染 edges 的 [a,b] 下标对：两者同源(都按 dashOut 归一名字匹配)、与旧 nodes memo 内联的 es 逐条等价。
+  const layoutEdges = useMemo(() => edges.map((e) => [e.a, e.b]), [edges])
+  const [forcePos, setForcePos] = useState(null) // 力导向算出的坐标(与 nodes 同序)；null=尚未算，渲染先用种子位
+  // 缓存键 = book.id + layoutKey(名字签名) + posKey(graphPos 签名)：重开弹窗 / 只改透出章·详情(名字与手拖位都不变)命中缓存、零重算；
+  //   拖拽存库→posKey 变→失效重算(L-1：非 fixed 邻居围绕新固定位重新收敛)。与 nodes memo 的重算触发([assets,posKey])一致。
+  const rafRef = useRef(0)
+  // M-F6②：useLayoutEffect + 首帧同步跑一次 tick——原 useEffect 先 setForcePos(种子位)会被绘一帧，每次开弹窗都闪一下种子螺旋。
+  //   useLayoutEffect 在 paint 前同步执行：首帧 tick 直接算到收敛(小图)或算满 8ms(大图)再 setForcePos，paint 出来的不是种子位、不闪。
+  useLayoutEffect(() => {
+    if (!open) return // 关窗不算布局，也不留 rAF
+    const key = `${book && book.id}::${layoutKey}::${posKey}` // L-1：含 graphPos 签名，拖拽存库即失效重算
+    const cached = layoutCache.get(key) // M-F6①：模块级缓存，跨开合/跨书真命中
+    if (cached) {
+      // H1-缓存回弹(原第四轮 H1，方案b；与「H1-删边确认」「H1-草稿flush」是不同事，L-3 消歧)+L-1：posKey 进键后，手拖落库→缓存失效重算；命中缓存时 graphPos 必与算缓存时一致→fixed 节点在缓存里已是 savedPos 位。
+      //   下面对 fixed 节点再用 nodes 的 savedPos 覆盖一次属防御性冗余(正常恒等)，兜住任何"缓存与当前 savedPos 不一致"的边角，成本极低。
+      //   (cached 与 nodes 同序：命中意味着 layoutKey 相同=同名同序，forcePos 本就按下标与 nodes 对齐消费。)
+      setForcePos(cached.map((cp, i) => (nodes[i] && nodes[i].fixed ? { x: nodes[i].x, y: nodes[i].y } : cp)))
+      return
+    }
+    const p = nodes.map((n) => ({ x: n.x, y: n.y, fixed: !!n.fixed }))
+    if (!p.length) {
+      setForcePos([])
+      cacheLayout(key, [])
+      return
+    }
+    let it = 0
+    const tick = () => {
+      const t0 = performance.now()
+      // 时间盒分帧：每帧最多算 ~8ms（给渲染留余量），大图不再一次性阻塞主线程；forceStep 与同步跑逐字一致 → 产出逐像素相同
+      while (it < FORCE_ITERS) {
+        forceStep(p, layoutEdges)
+        it += 1
+        if (performance.now() - t0 >= 8) break
+      }
+      const snap = p.map((q) => ({ x: q.x, y: q.y }))
+      setForcePos(snap)
+      if (it < FORCE_ITERS) rafRef.current = requestAnimationFrame(tick) // 未收敛：下一帧继续（渲染中间态=收敛动画）
+      else cacheLayout(key, snap) // 收敛完成，缓存最终坐标
+    }
+    tick() // 首帧同步跑（useLayoutEffect 内、paint 前）：小图一帧收敛到位、大图至少算 8ms，都不闪种子位
+    return () => cancelAnimationFrame(rafRef.current) // 关窗 / 切书 / 卸载都取消未跑完的 rAF，不泄漏
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, nodes, layoutEdges, layoutKey, posKey, book && book.id])
+
+  // M46：渲染前一次性建 id→坐标 查表，posOf 由 O(n) 线性 find 降为 O(1)。坐标优先级：dragPos(本次拖动) > forcePos(力导向收敛/动画中) > nodes 种子位。
   const posMap = useMemo(() => {
     const m = new Map()
-    nodes.forEach((n) => m.set(n.id, n))
+    nodes.forEach((n, i) => {
+      const fp = forcePos && forcePos[i]
+      m.set(n.id, fp ? { x: fp.x, y: fp.y } : { x: n.x, y: n.y })
+    })
     Object.keys(dragPos).forEach((id) => {
       if (dragPos[id]) m.set(id, dragPos[id])
     })
     return m
-  }, [nodes, dragPos])
+  }, [nodes, forcePos, dragPos])
   const posOf = (id) => posMap.get(id) || { x: W / 2, y: H / 2 }
   const node = assets.find((a) => a.id === nodeId) || null
 
-  const toLayout = (e) => {
+  // M-F4：抽出按 clientX/clientY 换算布局坐标，供鼠标(toLayout)与触摸(onTouchMove 拖节点)共用
+  const toLayoutXY = (clientX, clientY) => {
     const r = svgRef.current.getBoundingClientRect()
-    const sx = ((e.clientX - r.left) / r.width) * W
-    const sy = ((e.clientY - r.top) / r.height) * H
+    const sx = ((clientX - r.left) / r.width) * W
+    const sy = ((clientY - r.top) / r.height) * H
     return { x: (sx - view.tx) / view.scale, y: (sy - view.ty) / view.scale }
   }
+  const toLayout = (e) => toLayoutXY(e.clientX, e.clientY)
   const onMove = (e) => {
     if (dragRef.current) {
       draggedRef.current = true
@@ -161,15 +236,22 @@ export default function AssetGraphModal({ open, onClose, book, onUpdateAsset, on
   }
   const onUp = () => {
     if (dragRef.current) {
-      // 只提交实际拖动过的节点(dragPos)，不把未拖节点的力导向位置一并钉死(H14)；已存布局由 saveGraphPos 合并保留
+      // 只提交实际拖动过的节点(dragPos)，不把未拖节点的力导向位置一并钉死(H14)；已存布局由 saveGraphPos 合并保留。
+      // #12：merged 只保留"当前仍存在"的资产——dragPos 会累积本次会话所有拖过的节点(含其间被删的)，不过滤会把死键写进 book.graphPos 长期累积。
+      //   (不清 dragPos：L④注——L-1 后 nodes memo deps 已含 posKey(graphPos 签名)，存库→graphPos 变→nodes/forcePos 带最新 savedPos 重算，清 dragPos 也不再弹回力导向位；
+      //    保留 dragPos 只是让它以未取整的精确坐标覆盖显示，省掉 savedPos 取整(Math.round)的 <1px 视觉差，无正确性影响。原"deps 不含 savedPos 会弹回"的前提已被 L-1 作废。)
+      const aliveIds = new Set(assets.map((a) => a.id))
       const merged = {}
       Object.keys(dragPos).forEach((id) => {
+        if (!aliveIds.has(id)) return
         merged[id] = { x: Math.round(dragPos[id].x), y: Math.round(dragPos[id].y) }
       })
-      onSavePos && onSavePos(merged)
+      // #11：merged 为空(单击节点未移动 / 拖过的节点都已删)时不写库，避免 saveGraphPos({}) 触发整本 put
+      if (Object.keys(merged).length) onSavePos && onSavePos(merged)
       dragRef.current = null
       // 拖拽松手后紧随的 click 要吞掉（否则顺带弹出编辑框）；click 在 mouseup 同步序列后触发，rAF 在其后重置
-      requestAnimationFrame(() => {
+      // L8：记下 rAF id 供卸载时 cancel——原来不取消，卸载后回调仍会给已卸载组件的 ref 赋值(无实害，顺手补干净)
+      dragResetRafRef.current = requestAnimationFrame(() => {
         draggedRef.current = false
       })
     }
@@ -204,6 +286,9 @@ export default function AssetGraphModal({ open, onClose, book, onUpdateAsset, on
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
+  // L8：卸载时取消"吞 click"的 dragReset rAF（无实害——回调只给 ref 赋值不 setState——但避免卸载后回调空跑）
+  useEffect(() => () => cancelAnimationFrame(dragResetRafRef.current), [])
+
   const touchRef = useRef(null)
   const onTouchStart = (e) => {
     if (e.touches.length === 2) {
@@ -211,7 +296,16 @@ export default function AssetGraphModal({ open, onClose, book, onUpdateAsset, on
       touchRef.current = { mode: 'pinch', d0: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), scale0: view.scale }
     } else if (e.touches.length === 1) {
       const t = e.touches[0]
-      touchRef.current = { mode: 'pan', x: t.clientX, y: t.clientY, tx: view.tx, ty: view.ty }
+      // M-F4：单指先判落点是否命中节点——命中则拖节点(兑现底部「拖拽节点=调布局」承诺)，落空白才平移整图。
+      //   原来单指一律记 pan、节点拖拽只绑 onMouseDown(触摸端不触发)，导致平板上拖节点变成平移整图。
+      const g = t.target && t.target.closest ? t.target.closest('[data-node-id]') : null
+      const nid = g && g.getAttribute('data-node-id')
+      if (nid) {
+        dragRef.current = nid
+        touchRef.current = { mode: 'drag', id: nid }
+      } else {
+        touchRef.current = { mode: 'pan', x: t.clientX, y: t.clientY, tx: view.tx, ty: view.ty }
+      }
     }
   }
   const onTouchMove = (e) => {
@@ -229,19 +323,33 @@ export default function AssetGraphModal({ open, onClose, book, onUpdateAsset, on
         const ly = (my - v.ty) / v.scale
         return { scale: ns, tx: mx - ns * lx, ty: my - ns * ly }
       })
+    } else if (tr.mode === 'drag' && e.touches.length === 1) {
+      // M-F4：触摸拖节点——与鼠标 onMove 的 dragRef 分支同口径(夹到画布内、写 dragPos)
+      const t = e.touches[0]
+      draggedRef.current = true
+      const p = toLayoutXY(t.clientX, t.clientY)
+      setDragPos((d) => ({ ...d, [tr.id]: { x: Math.min(W - 30, Math.max(30, p.x)), y: Math.min(H - 24, Math.max(24, p.y)) } }))
     } else if (tr.mode === 'pan' && e.touches.length === 1) {
       const t = e.touches[0]
       setView((v) => ({ ...v, tx: tr.tx + ((t.clientX - tr.x) / r.width) * W, ty: tr.ty + ((t.clientY - tr.y) / r.height) * H }))
     }
   }
   const onTouchEnd = () => {
+    // M-F4：触摸拖节点松手走与鼠标 onUp 同一套提交(合并 dragPos→onSavePos、rAF 吞掉随后的 click)；onUp 内部按 dragRef 决定是否提交
+    if (touchRef.current && touchRef.current.mode === 'drag') onUp()
     touchRef.current = null
+  }
+  // L-新5：触摸被系统打断(来电/浏览器手势/手掌误触)触发 touchcancel——若不清，dragRef/touchRef/panRef 残留会让后续移动继续拖节点或平移(卡住)。
+  const onTouchCancel = () => {
+    if (touchRef.current && touchRef.current.mode === 'drag') onUp() // 拖节点被打断：提交已拖到的位置(onUp 内清 dragRef/panRef、rAF 复位 draggedRef)
+    touchRef.current = null
+    panRef.current = null
   }
 
   if (!open) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4" onClick={onClose} role="dialog" aria-modal="true" aria-label="关系网图谱">
       <div className="flex max-h-[92vh] w-[min(980px,96vw)] flex-col overflow-hidden rounded-2xl bg-paper shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-stone-200 px-5 py-3">
           <span className="whitespace-nowrap font-semibold text-ink">关系网图谱（{assets.length} 节点 / {edges.length} 边）</span>
@@ -249,7 +357,7 @@ export default function AssetGraphModal({ open, onClose, book, onUpdateAsset, on
             {Object.keys(TYPE_COLOR).map((t) => (
               <span key={t} className="flex items-center gap-1 whitespace-nowrap">
                 <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: TYPE_COLOR[t] }} />
-                {TYPE_LABEL[t]}
+                {ASSET_TYPE_LABEL[t]}
               </span>
             ))}
             <button onClick={onClose} className="ml-2 text-stone-400 hover:text-stone-600" aria-label="关闭">
@@ -285,6 +393,7 @@ export default function AssetGraphModal({ open, onClose, book, onUpdateAsset, on
           onTouchStart={onTouchStart}
           onTouchMove={onTouchMove}
           onTouchEnd={onTouchEnd}
+          onTouchCancel={onTouchCancel}
           onMouseMove={onMove}
           onMouseUp={onUp}
           onMouseLeave={onUp}
@@ -297,9 +406,34 @@ export default function AssetGraphModal({ open, onClose, book, onUpdateAsset, on
               const pa = posOf(nodes[e.a].id)
               const pb = posOf(nodes[e.b].id)
               const label = `${nodes[e.a].name} —${LINK_LABEL[e.type] || e.type}→ ${e.toName}`
-              const active = hoverEdge === i || (confirmEdge && confirmEdge.i === i)
+              // L4+L16：hover 与待确认高亮都用三元组(fromId+toName+type)定位，与删除同口径——不用数组下标 i，否则改动别的资产使 edges 重排后高亮会落到错边
+              const isHover = hoverEdge && hoverEdge.fromId === e.fromId && hoverEdge.toName === e.toName && hoverEdge.type === e.type
+              const active = isHover || (confirmEdge && confirmEdge.fromId === e.fromId && confirmEdge.toName === e.toName && confirmEdge.type === e.type)
               // M47：命中线宽度按缩放反比补偿，缩到 40% 时屏幕上仍有约 12px 可点区（原 1px 线在 40% 下只有 0.4px，基本点不到）
               const hitWidth = Math.max(8, 12 / view.scale)
+              const enterH = () => {
+                // 拖节点时不切 hover 高亮，避免每帧多一次 state 更新(M46)
+                if (!dragRef.current) setHoverEdge({ fromId: e.fromId, toName: e.toName, type: e.type })
+              }
+              const leaveH = () => setHoverEdge((h) => (h && h.fromId === e.fromId && h.toName === e.toName && h.type === e.type ? null : h))
+              const clickE = () => {
+                if (draggedRef.current) return
+                // A6+L4：confirmEdge 只存稳定标识三元组(fromId+toName+type)，不存数组下标 i——高亮与删除都按三元组，edges 重排后不会错位/失效
+                setConfirmEdge({ fromId: e.fromId, toName: e.toName, type: e.type, label })
+              }
+              // AGM#11：自环边(from===to)两端正长线与命中线都零长度→点不到、删不掉。改画成节点上方一个小环，给可见+可点命中区，仍走同一 confirmEdge 删除口径。
+              if (e.a === e.b) {
+                const nr = 6 + Math.min(8, (degMap[nodes[e.a].id] || 0) * 1.4)
+                const lr = 7
+                const cy = pa.y - nr - lr - 1
+                return (
+                  <g key={i}>
+                    <title>{`${label}（自环，点击后在底部确认删除）`}</title>
+                    <circle cx={pa.x} cy={cy} r={lr} fill="none" stroke={active ? '#e11d48' : '#8a8a93'} strokeOpacity={active ? 0.95 : 0.6} strokeWidth={active ? 2 : 1} pointerEvents="none" />
+                    <circle cx={pa.x} cy={cy} r={lr} fill="transparent" pointerEvents="all" className="cursor-pointer" onMouseEnter={enterH} onMouseLeave={leaveH} onClick={clickE} />
+                  </g>
+                )
+              }
               return (
                 <g key={i}>
                   <title>{`${label}（点击后在底部确认删除）`}</title>
@@ -322,16 +456,9 @@ export default function AssetGraphModal({ open, onClose, book, onUpdateAsset, on
                     strokeWidth={hitWidth}
                     pointerEvents="stroke"
                     className="cursor-pointer"
-                    onMouseEnter={() => {
-                      // 拖节点时不切 hover 高亮，避免每帧多一次 state 更新(M46)
-                      if (!dragRef.current) setHoverEdge(i)
-                    }}
-                    onMouseLeave={() => setHoverEdge((h) => (h === i ? -1 : h))}
-                    onClick={() => {
-                      if (draggedRef.current) return
-                      // A6：confirmEdge 存稳定标识(fromId+toName+type)而非 linkIdx 下标——点边选中与确认删除之间若发生 rebuildLinks/增删边使 links 重排，按下标会删错边
-                      setConfirmEdge({ i, fromId: e.fromId, toName: e.toName, type: e.type, label })
-                    }}
+                    onMouseEnter={enterH}
+                    onMouseLeave={leaveH}
+                    onClick={clickE}
                   />
                 </g>
               )
@@ -342,6 +469,7 @@ export default function AssetGraphModal({ open, onClose, book, onUpdateAsset, on
               return (
                 <g
                   key={n.id}
+                  data-node-id={n.id}
                   className="cursor-pointer"
                   onMouseDown={(e) => {
                     e.stopPropagation()
@@ -372,7 +500,7 @@ export default function AssetGraphModal({ open, onClose, book, onUpdateAsset, on
               onClick={() => {
                 onDelLink(confirmEdge.fromId, confirmEdge.toName, confirmEdge.type)
                 setConfirmEdge(null)
-                setHoverEdge(-1)
+                setHoverEdge(null)
               }}
               className="rounded border border-red-300 bg-red-700 px-2 py-0.5 text-onaccent hover:bg-red-600"
             >
@@ -385,7 +513,7 @@ export default function AssetGraphModal({ open, onClose, book, onUpdateAsset, on
         )}
 
         <div className="border-t border-stone-200 px-5 py-2 text-[11px] text-stone-400">
-          点击节点=快捷修改；拖拽节点=调整布局(松手存 IndexedDB)；点击边=选中，再在上方确认条里删除该绑定。数据源=book.assets.links（IndexedDB books store）。
+          点击节点=快捷修改；拖拽节点=调整布局(松手存 IndexedDB)；点击边=选中，再在底部确认条里删除该绑定。数据源=book.assets.links（IndexedDB books store）。
         </div>
       </div>
 
@@ -396,11 +524,14 @@ export default function AssetGraphModal({ open, onClose, book, onUpdateAsset, on
             e.stopPropagation() // A1：节点弹窗遮罩嵌在图谱外层(onClick=onClose)内，点空白只关节点弹窗，不冒泡关掉整个图谱
             setNodeId(null)
           }}
+          role="dialog"
+          aria-modal="true"
+          aria-label="资产节点详情"
         >
           <div className="w-[min(430px,92vw)] rounded-xl bg-paper p-4 shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="mb-2 flex items-center justify-between">
               <span className="font-semibold text-ink">
-                {node.name} <span className="text-xs text-stone-400">({TYPE_LABEL[node.type] || node.type})</span>
+                {node.name} <span className="text-xs text-stone-400">({ASSET_TYPE_LABEL[node.type] || node.type})</span>
               </span>
               <button onClick={() => setNodeId(null)} className="text-stone-400 hover:text-stone-600">
                 ×
@@ -420,6 +551,15 @@ export default function AssetGraphModal({ open, onClose, book, onUpdateAsset, on
                 links={node.links || []}
                 onChange={(next) => {
                   setConfirmEdge(null) // 边列表变了，清掉可能已失效的待确认删边(M47 同源：防按下标删错)
+                  // H1-删边确认(原第12a轮 H1，与「H1-缓存回弹」「H1-草稿flush」是不同事，L-3 消歧)：LinkEditor 内「删边」直接走 onChange 落库、不可撤销，与图谱「点边选中后底部确认删除」口径矛盾。
+                  //   在 onChange 边界拦截：next 比当前少一条=发生删边→加二次确认。取消则不 persist；LinkEditor 受控于 node.links，
+                  //   不更新即回退(被删的行重新出现)，等于撤销。加边(next 变多)/改边(条数不变)不拦，保持原即时保存手感。
+                  const cur = node.links || []
+                  if (next.length < cur.length) {
+                    const gone = cur.find((l) => !next.some((n) => n.type === l.type && n.to === l.to))
+                    const desc = gone ? `「${gone.to}」这条关系` : '一条关系'
+                    if (!window.confirm(`确定删除 ${desc} 绑定吗？此操作不可撤销。`)) return
+                  }
                   onUpdateAsset(node.id, { links: next })
                 }}
                 assets={assets}
@@ -431,6 +571,8 @@ export default function AssetGraphModal({ open, onClose, book, onUpdateAsset, on
             </div>
             <button
               onClick={() => {
+                // H4：删除资产不可撤销(连同其绑定边)，加二次确认——与 M8 已给 AssetModal/EditAssetModal 的删除确认一致，防误点
+                if (!window.confirm(`确定删除资产《${node.name}》吗？其绑定边会一并删除，此操作不可撤销。`)) return
                 onDeleteAsset(node.id)
                 setNodeId(null)
               }}

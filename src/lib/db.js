@@ -5,6 +5,11 @@ const DB_VERSION = 6
 let dbPromise = null
 
 function openDB() {
+  // item11：隐私/无痕模式或禁用存储的浏览器里 indexedDB 未定义，直接 indexedDB.open 会抛「indexedDB is not defined」ReferenceError，
+  //   泄漏到 UI 变成看不懂的英文报错/白屏。先判存在性、给人话错误（不缓存，存储恢复后下次调用可正常打开）。
+  if (typeof indexedDB === 'undefined') {
+    return Promise.reject(new Error('当前浏览器禁用了本地存储（IndexedDB），无法保存书籍数据。请退出隐私/无痕模式，或更换浏览器后重试。'))
+  }
   if (dbPromise) return dbPromise
   dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION)
@@ -21,9 +26,10 @@ function openDB() {
     }
     req.onsuccess = () => {
       const db = req.result
-      // M-5：连接建立后被浏览器关闭（其他标签页升级触发 versionchange、或存储被驱逐）时，清掉缓存的 dbPromise，
-      //   否则后续所有操作会复用一个已关闭的连接、事务永不 settle、无限挂起。onclose 兜住浏览器主动关闭。
-      db.onversionchange = () => db.close()
+      // M-5：连接被浏览器关闭（其他标签页升级触发 versionchange、或存储被驱逐）时，必须同步清掉缓存的 dbPromise，
+      //   否则后续所有操作会复用一个已关闭的连接、事务同步抛 InvalidStateError，且 :40 的 catch 对已 resolved 的 dbPromise 永不触发 → 刷新前永不自愈。
+      //   注意：显式 db.close() 不会触发 onclose 事件，所以 onversionchange 分支必须在 close() 后自己置空 dbPromise；onclose 只兜住浏览器异常关闭。
+      db.onversionchange = () => { db.close(); dbPromise = null }
       db.onclose = () => { dbPromise = null }
       resolve(db)
     }
@@ -41,18 +47,22 @@ function openDB() {
 export async function getAll(store) {
   const db = await openDB()
   return new Promise((resolve, reject) => {
-    const req = db.transaction(store, 'readonly').objectStore(store).getAll()
+    const t = db.transaction(store, 'readonly')
+    const req = t.objectStore(store).getAll()
     req.onsuccess = () => resolve(req.result || [])
     req.onerror = () => reject(req.error)
+    t.onabort = () => reject(req.error || new Error('读取被中止')) // H9：读事务被中止时也要 settle，否则 promise 永不 resolve、书库永久转圈（put/del/clearStore 早已补，读侧此前漏）
   })
 }
 
 export async function getById(store, id) {
   const db = await openDB()
   return new Promise((resolve, reject) => {
-    const req = db.transaction(store, 'readonly').objectStore(store).get(id)
+    const t = db.transaction(store, 'readonly')
+    const req = t.objectStore(store).get(id)
     req.onsuccess = () => resolve(req.result)
     req.onerror = () => reject(req.error)
+    t.onabort = () => reject(req.error || new Error('读取被中止')) // H9：同 getAll
   })
 }
 
