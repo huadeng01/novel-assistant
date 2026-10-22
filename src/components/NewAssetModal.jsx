@@ -55,21 +55,12 @@ const blankDraft = () => ({
 // （空表单本来就没有数据损失风险，弹框只增加摩擦）。只有 type 没有别的也算全空（type 有默认值，不构成「用户填了内容」）；
 // 只有 name → 入库（最小资产，符合「数量宁多」的既有取向）。
 //
-// props（B28：本组件现只负责「新增」——edit 分支是死链已删，编辑资产走独立的 EditAssetModal）
-//   open         是否渲染
-//   assets       名册（重名判据 + LinkEditor/StatePanel 的候选）
-//   perVol       perVolOf(book)（ChapterField 的按卷估算，两页必须同源，需求4）
-//   chapterNo    当前章号（写进 state.meta.sourceCh）
-//   onSubmit     (asset, info) => void；info = { mode:'create'|'merge'|'empty', mergedFrom?:id }
-//   onClose      关闭
-//   onQuickCreate ({name,type}) => void  LinkEditor「顺便建档」透传（不传则只在表单内本地记名）
 export default function NewAssetModal({ open, assets = [], perVol = 40, chapterNo = 0, onSubmit, onClose, onQuickCreate, idPrefix = 'mn' }) {
   const [draft, setDraft] = useState(blankDraft)
   const [msg, setMsg] = useState('')
   const [dupe, setDupe] = useState(null)
 
   // 打开时重置草稿；关弹窗不销毁组件实例也没关系，下次 open 会重灌
-  // B28：删掉 mode==='edit' 分支——两调用方(ContinuePage/LongFormPage)都硬编 mode="create"、从不传 initial，编辑走独立的 EditAssetModal，故 edit 分支是死链。
   useEffect(() => {
     if (!open) return
     setDraft({ ...blankDraft(), state: normalizeState(null) })
@@ -115,7 +106,6 @@ export default function NewAssetModal({ open, assets = [], perVol = 40, chapterN
       return
     }
     const asset = toAsset()
-    // 重名：不静默丢弃，给「合并 / 仍新增」两个选择（B28：edit 分支已删，不再需要按 initial.id 排除自身）
     const hit = findByName(roster, asset.name)
     if (hit) {
       setDupe(hit)
@@ -124,13 +114,11 @@ export default function NewAssetModal({ open, assets = [], perVol = 40, chapterN
     }
     setDupe(null)
     if (onSubmit) onSubmit(asset, { mode: 'create' })
-    // M27：不再 setMsg——紧接 onClose() 后弹窗即卸载(!open return null)，msg 永不渲染(死代码)；成功提示由父层(ContinuePage setAssetMsg)负责
     if (onClose) onClose()
   }
 
   const doMerge = () => {
     if (!dupe) return
-    // #9：draft 的别名/知情人存在表单字段 aliasesStr/knowersStr，而 mergeAssetDraft→normalizeAsset 只读 aliases/knowers；
     //   直传原始 draft 会静默丢掉用户填的别名/知情人 → 先 splitListValue 转成数组再合并。
     const merged = mergeAssetDraft(dupe, { ...draft, aliases: splitListValue(draft.aliasesStr), knowers: splitListValue(draft.knowersStr) }, { idPrefix })
     if (onSubmit) onSubmit(merged, { mode: 'merge', mergedFrom: dupe.id })
@@ -146,8 +134,6 @@ export default function NewAssetModal({ open, assets = [], perVol = 40, chapterN
   }
 
   const set = (patch) => setDraft((d) => ({ ...d, ...patch }))
-  // P2：与 EditAssetModal 的 showState=true 对齐——原来只有 STATE_TYPES(person/group/item/beast) 才显示状态面板，
-  //   但结算/编辑侧对任意类型都写 state（EditAssetModal M7 已全类型显示）。新建 faction/place/skill 时不给状态、
   //   存盘后编辑又能改，前后矛盾。统一为所有类型都显示。
   const showState = true
   const showTier = draft.type === 'person' || draft.type === 'group'
@@ -158,7 +144,6 @@ export default function NewAssetModal({ open, assets = [], perVol = 40, chapterN
   }
   const quickCreate = useMemo(
     () => ({ name, type }) => {
-      // M-新1：回传 onQuickCreate 的返回值——LinkEditor 靠 `r.ok === false` 判断建档失败并回滚乐观标记；
       //   原来这里丢弃返回值(恒 undefined)，LinkEditor 的回滚对 NewAssetModal 这条路径永不生效、失败仍标「已建档」。
       if (onQuickCreate) return onQuickCreate({ name, type })
       setMsg(`「${name}」未在名册：本次先保留为悬空目标（只提示不阻断），可在资产库里再补建档。`)
@@ -192,7 +177,6 @@ export default function NewAssetModal({ open, assets = [], perVol = 40, chapterN
                 value={draft.type}
                 onChange={(e) => {
                   const type = e.target.value
-                  // item6（第十轮）：切类型时清掉不再适用于新类型的 holder/controller——门控(持有者 item||beast、控制方 place)只藏 UI 不清值，残留值会
                   //   ①计入 assets.js COUNTED_FIELDS ⟹「已填 N 项」虚高 + 遮罩脏检查 confirm 误报"已填内容"；②经 normalizeAsset 落库 ⟹ 人物/势力带 holder 脏字段。
                   set({ type, ...(type !== 'item' && type !== 'beast' ? { holder: '' } : {}), ...(type !== 'place' ? { controller: '' } : {}) })
                 }}
@@ -232,9 +216,6 @@ export default function NewAssetModal({ open, assets = [], perVol = 40, chapterN
           {showState && <StatePanel value={draft.state} onChange={(state) => set({ state })} assets={roster} chapterNo={chapterNo} updatedBy="user" />}
 
           <div className="flex flex-wrap gap-2">
-            {/* item5：控制方只在 place 渲染——controlled_by 仅 LINK_BY_TYPE.place 白名单含（assets.js:490），
-                faction 白名单是反向的 controls（faction 控制别的资产，而非被控制）；原 `place || faction` 让 faction 填的控制方
-                经 rebuildDerivedEdges:594 白名单过滤被静默丢弃（假成功）。按 assets.js 实际派生边白名单门控。 */}
             {draft.type === 'place' && (
               <div className="min-w-[12rem] flex-1">
                 <label className={label}>控制方（可空）</label>
@@ -248,8 +229,6 @@ export default function NewAssetModal({ open, assets = [], perVol = 40, chapterN
                 </datalist>
               </div>
             )}
-            {/* item24：持有者门控改 item||beast，与 assets.js:603 rebuildDerivedEdges（item||beast 都派生 held_by）、
-                LINK_BY_TYPE.beast 含 held_by、EditAssetModal:164 同口径——原来只 item，新建妖兽填不了持有者，存盘后编辑又能填（前后矛盾）。 */}
             {(draft.type === 'item' || draft.type === 'beast') && (
               <div className="min-w-[12rem] flex-1">
                 <label className={label}>持有者（可空）</label>
@@ -309,7 +288,6 @@ export default function NewAssetModal({ open, assets = [], perVol = 40, chapterN
               <button onClick={submit} className={genBtn}>
                 新增资产
               </button>
-              {/* item7：取消走 requestClose 脏检查（与遮罩同口径），不再裸 onClose——已填 detail 误点即全丢。 */}
               <button onClick={requestClose} className={ghostBtn}>
                 取消
               </button>

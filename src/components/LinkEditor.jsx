@@ -116,7 +116,6 @@ export default function LinkEditor({ links, onChange, assets = [], assetType = '
   const [draft, setDraft] = useState({ type: '', to: '', since_ch: '' })
   const [created, setCreated] = useState([])
   const [tip, setTip] = useState('')
-  // A#4：建档回调可能是 async（LongFormPage 的 quickCreateAsset）——await 期间禁用「顺便建档」按钮防重复点。
   //   creatingRef 做同步防重入（双击在 setState 重渲染前都能挡住），creating 状态驱动按钮 disabled。
   const [creating, setCreating] = useState(false)
   const creatingRef = useRef(false)
@@ -133,7 +132,6 @@ export default function LinkEditor({ links, onChange, assets = [], assetType = '
   const patchAt = (i, patch) => {
     const next = list.map((l, j) => (j === i ? { ...l, ...patch } : l))
     const key = (l) => `${l.type}→${l.to}`
-    // P1-9：改类型/目标撞上已有边时，原实现用 filter 去重——它删的是数组里靠后的那条，往往正是「用户正在编辑的这一行」，
     //   于是行凭空消失且无任何提示。改为：命中重复就不 emit（保留原行不动）+ setTip 告知，由用户决定改回还是删掉另一条。
     //   只改 since_ch 时 type→to 不变、不会误判（现有行本就已去重）。
     const dup = next.some((l, j) => j !== i && key(l) === key(next[i]))
@@ -156,7 +154,6 @@ export default function LinkEditor({ links, onChange, assets = [], assetType = '
       setTip('填一个目标资产名（名册外的名字也行，可顺便建档）')
       return
     }
-    // 去重：与 addLink / mergeRelations 同判据（to+type 相同即视为同一条），连点两次不会产生重复边(M48)
     if (list.some((l) => l.to === to && l.type === draft.type)) {
       setTip(`「${LINK_LABEL[draft.type] || draft.type} → ${to}」这条关系已存在，未重复添加`)
       return
@@ -169,10 +166,8 @@ export default function LinkEditor({ links, onChange, assets = [], assetType = '
 
   const quickCreate = async (name, linkType) => {
     const n = dashOut(name)
-    if (!n || creatingRef.current) return // A#4：建档在飞时不重入
-    // H7：建档类型按「触发建档的那条边」的关系类型推导——已存在悬空边(下方 onClick 传 l.type)用 l.type，新增行用 draft.type；原写法一律用 draft.type 会给已存在边建错类型
+    if (!n || creatingRef.current) return
     const type = LINK_TARGET_TYPE[linkType || draft.type] || 'person'
-    // M-C + A#4：onQuickCreate 可能是 async（LongFormPage）——必须 await 才能拿到 { ok:false } 做回滚；
     //   原来不 await 时 r 是 Promise、r.ok===false 永假、回滚分支是死代码（ContinuePage 同步版才碰巧生效）。
     //   await 对同步返回值也兼容（ContinuePage 同步 quickCreateAsset 不受影响）；回调不返回值(undefined)按成功处理，向后兼容 A 区 AssetGraphModal。
     if (onQuickCreate) {
@@ -182,7 +177,6 @@ export default function LinkEditor({ links, onChange, assets = [], assetType = '
       try {
         r = await onQuickCreate({ name: n, type })
       } catch (err) {
-        // L7：onQuickCreate 抛错（建档 async 失败）原来只有 try/finally 无 catch → reject 逸出成 unhandled rejection、用户也无提示
         setTip(`「${n}」建档失败：${err?.message || String(err)}`)
         return
       } finally {
@@ -195,7 +189,6 @@ export default function LinkEditor({ links, onChange, assets = [], assetType = '
       }
     }
     if (!created.includes(n)) setCreated((c) => [...c, n])
-    // P2：没接 onQuickCreate 回调时并不会真建档（只在本弹窗记名、让红字消失）——原来一律说「已建档」是撒谎
     setTip(
       onQuickCreate
         ? `「${n}」已按${ASSET_TYPE_LABEL[type] || type}建档（只有名字，其余字段可空着后面补）`
@@ -218,7 +211,6 @@ export default function LinkEditor({ links, onChange, assets = [], assetType = '
       {list.length === 0 && !adding && <div className="text-[11px] text-stone-400">暂无绑定边。点「+ 加一条关系」手动挂人物↔地点/道具/势力。</div>}
 
       {list.map((l, i) => {
-        // P2：created 里存的是 dashOut 归一后的名字（quickCreate 存的），这里比对也要 dashOut——
         //   原来用裸 l.to，带空格/书名号的目标即便已「顺便建档」红字也不消失（与下方新增行的 dashOut(draft.to) 判据不一致）
         const dangling = isDangling(l.to, assets) && !created.includes(dashOut(l.to))
         return (

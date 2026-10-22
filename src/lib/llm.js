@@ -1,5 +1,5 @@
 // DeepSeek API 客户端：浏览器直连（已验证官方支持 CORS），SSE 流式解析
-import { safeGetItem, safeSetItem } from './utils.js' // B27：localStorage 容错读写单一出处（原本页与 App.jsx 各留一份逐字等价副本，已下沉 utils.js）
+import { safeGetItem, safeSetItem } from './utils.js'
 
 const API_URL = 'https://api.deepseek.com/v1/chat/completions'
 const MODEL = 'deepseek-chat'
@@ -8,20 +8,22 @@ const MODEL = 'deepseek-chat'
 // 与 DeepSeek 同为 OpenAI 兼容协议，chatStream / chatJSON 全链复用，切换只改 url/model。
 // 模型 ID 可在「我的」页自定义，默认 qwen3.8-max。
 const QWEN_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'
+// 通义千问默认模型 id。
 export const QWEN_DEFAULT_MODEL = 'qwen3.8-max'
 
-// H1：localStorage 在隐私模式/禁用存储下 getItem/setItem 会**抛错**（不只是 undefined）。KeyBanner 等组件在渲染期
-//   调 writerProviderLabel()→writerProvider()，裸读抛错 = 整页白屏。safeGetItem/safeSetItem 已下沉 utils.js（B27，见顶部 import）：
-//   读失败返回 null、写失败静默，与 App.jsx 同一出处、不再各留副本。
 
+// 读用户自定义的模型 id，没存则回默认模型。
 export const getQwenModel = () => safeGetItem('qwen_model') || QWEN_DEFAULT_MODEL
 
 // 写作引擎选择：'qwen'（默认，项目主引擎 qwen3.8-max）或 'deepseek'，存 localStorage。
 // 全站所有生成请求（写作/规划/归档/重写）统一走当前选中的引擎，API Key 各自独立保存。
 // 决策3(B)：默认回落值 deepseek→qwen（此前无 localStorage 记录时回落 deepseek，与项目主引擎不符；App.jsx:86 的 UI 默认那半边在 C 区、不归本次）
 export const writerProvider = () => (safeGetItem('writer_provider') === 'deepseek' ? 'deepseek' : 'qwen')
+// 把当前写作引擎（deepseek / qwen）写进 localStorage。
 export const setWriterProvider = (p) => safeSetItem('writer_provider', p === 'qwen' ? 'qwen' : 'deepseek')
+// 引擎 id 到中文名的映射。
 export const WRITER_LABELS = { deepseek: 'DeepSeek', qwen: '通义千问' }
+// 当前引擎的中文名。
 export const writerProviderLabel = () => WRITER_LABELS[writerProvider()]
 
 // 当前写作引擎的连接配置（url / model / 文案标签 / 本机存的 Key / 是否需要关思考模式）
@@ -83,15 +85,10 @@ export const LLM_TIMEOUT = {
   //   全库零调用方（仅测试断言其大小关系），已删——所有流式走 STREAM_IDLE/STREAM_TOTAL、所有非流式走 JSON。
 }
 
-// B30：结构化抽取/分析类调用的低温度单一出处——诊断(DiagnosePanel)与文风分析(useLibrary)都要「格式稳、少发挥」，
-//   原各写死 0.3（两处易漂移）。创作正文仍走 chatStream 默认 0.9、一般 JSON 走 chatJSON 默认 0.4，不用本常量。
+// 结构化输出（JSON）请求使用的温度。
 export const STRUCTURED_TEMP = 0.3
 
-// item42：qwen 思考模式的思维链(reasoning_content) token 上限。思考按输出 token 计费、且在未设上限时默认=模型最大思维链长度
-//   （qwen3.8-max 极大）；长章 prompt 下思考会把 max_tokens=16000 输出配额吃光 → content 阶段无空间 → 正文全空。
-//   本轮浏览器实测坐实：长篇「写章」~255s 空稿、completion +18579 token 而正文 0 字、reasoning_content 5435 字仍在涨、finishReason=null。
-//   官方推荐治本（help.aliyun.com/zh/model-studio/deep-thinking）：显式 enable_thinking=true + thinking_budget 锁思考上限、与正文余量解耦。
-//   4000 给足「落笔前规划」，又留 16000−4000=12000 token 正文余量（目标 2500 字≈5000 token，充裕）。仅 qwen 流式思考路径用（见 doFetch）。
+// 开启思考模式的请求里思考 token 的预算。
 export const THINKING_BUDGET = 4000
 
 // 合并「外部用户 signal」与「内部看门狗计时器」为单个可传给 fetch 的 signal。
@@ -168,6 +165,7 @@ export function parseUsage(u) {
   return { promptTokens, completionTokens, totalTokens }
 }
 
+// 新建一份空的用量账本结构（次数与 token 计数归零）。
 export function emptyUsageLedger() {
   return { calls: 0, observed: 0, promptTokens: null, completionTokens: null, totalTokens: null, byProvider: {} }
 }
@@ -217,6 +215,7 @@ export function recordLlmUsage({ provider = '', usage = null } = {}) {
   return llmUsage()
 }
 
+// 读本机累计的 AI 用量账本。
 export function llmUsage() {
   const l = usageLedger
   return { ...l, byProvider: Object.fromEntries(Object.entries(l.byProvider).map(([k, v]) => [k, { ...v }])) }
@@ -254,8 +253,9 @@ export function llmUsageText(l) {
 // 而 429 在 friendlyError 里只是「请稍等几秒再试」，会让整卷规划静默失败。
 // 超限的调用**排队等**，不丢弃、不并发打出去。
 export const LLM_MAX_CONCURRENT_DEFAULT = 3
+// 读用户设置的并发上限，缺省回默认值。
 export function llmMaxConcurrent() {
-  const n = Number(safeGetItem('llm_max_concurrent')) // H1：safeGetItem 容错，隐私模式 getItem 抛错时退回默认并发
+  const n = Number(safeGetItem('llm_max_concurrent'))
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : LLM_MAX_CONCURRENT_DEFAULT
 }
 
@@ -266,7 +266,6 @@ const slotQueue = []
 export function withLlmSlot(run) {
   return new Promise((resolve, reject) => {
     const start = () => {
-      // L-8：真正起跑前再校验一次并发上限——llmMaxConcurrent() 是动态读的，用户中途调小后，
       //   已排队被唤醒的 start 不能照旧放行（会超限）。超限则退回队首，等下次有槽位释放再被唤醒。
       //   退回时 activeSlots 必 ≥ max ≥ 1（否则不会走到这），故一定还有在跑的请求会触发下一次唤醒，不会饿死。
       if (activeSlots >= llmMaxConcurrent()) { slotQueue.unshift(start); return }
@@ -316,7 +315,6 @@ async function callWithTimeoutInner({ signal, idleMs, totalMs, retries = 1, run 
 async function doFetch({ apiKey, messages, stream, temperature, jsonMode, maxTokens, signal, url, model, provider, frequencyPenalty, presencePenalty, thinking = false }) {
   // 未显式传 url 时（写作链路）按当前选中的写作引擎路由；显式传 url/model/provider 的（如指定引擎测试 Key）不受影响
   const cfg = url ? { url, model, provider } : writerConfig(thinking)
-  // H7：写作链路（无显式 url）的 Key 只认当前选中引擎自己的 writerConfig().key；为空则明确报错，
   //   不再回落到调用方传入的 apiKey —— 那可能是另一家引擎的 Key，打到当前引擎域名会 401、且 friendlyError 会指认错引擎。
   const effectiveKey = url ? apiKey : cfg.key
   if (!effectiveKey) throw new Error(`当前写作引擎（${cfg.provider || '未知'}）未填 API Key，请到「我的」页面填写后再试。`)
@@ -327,15 +325,11 @@ async function doFetch({ apiKey, messages, stream, temperature, jsonMode, maxTok
   // qwen3 系列默认开启思考模式：思考内容走 reasoning_content 字段，本站解析器只读 content，
   // 表现为长时间无响应；且官方要求思考模式只能用于流式请求，非流式（归档/诊断等 JSON 调用）会报错。
   // 建书等求快的调用关思考（noThinking=true → enable_thinking=false）；成文与灵感补全问题要落笔前规划，
-  // 显式打开思考（thinking=true → writerConfig.noThinking=false → 走下面 else-if 支：显式置 enable_thinking=true 并锁 thinking_budget，见 item42）。
-  //   （B29/第十轮订正：原注释写「不置 enable_thinking、qwen 走默认思考开」——item42 起已改为显式置 true + thinking_budget，原表述与实现矛盾，此处更正。）
-  // item9：qwen3 思考模式只支持流式；非流式（testKeyFor 探活、归档/诊断 JSON）必须关思考，否则有效 Key 也返回 400。
   //   显式 url 路径（testKeyFor）的 cfg 不带 noThinking，故这里直接按「非流式 + dashscope(qwen) 域名」兜底关闭。
   const isQwen = String(cfg.url || '').includes('dashscope')
   if (cfg.noThinking || (!stream && isQwen)) {
     body.enable_thinking = false
   } else if (isQwen && stream) {
-    // item42：qwen 流式思考路径（成文/灵感补全，thinking=true → writerConfig.noThinking=false）——显式开思考 + 锁 thinking_budget，
     //   否则思考无上限（默认=模型最大思维链长度）会把 max_tokens=16000 吃光 → content 阶段无空间 → 正文全空（本轮实测 ~255s 空稿、completion +18579/正文 0）。
     //   dashscope 兼容模式把 thinking_budget 直接放进 body JSON（官方文档确认，与 enable_thinking 同法；见 THINKING_BUDGET 注释）。
     //   deepseek（!isQwen，非思考）与 qwen 非流式/建书快路（上面已 enable_thinking=false）都不进这支、不加 thinking_budget。
@@ -380,11 +374,10 @@ async function readJsonUsage(res, provider) {
   try {
     data = await res.json()
   } catch (e) {
-    recordLlmUsage({ provider, usage: null }) // L(尾批)：body 非法 JSON 也是一次真实发出的请求，按 item7 口径计入 calls（此前 res.json() 抛错则漏记账，与 item7「HTTP/网络失败也进 calls」矛盾）
+    recordLlmUsage({ provider, usage: null })
     throw e
   }
   recordLlmUsage({ provider, usage: data?.usage })
-  // item11：body 可能是合法 JSON 的 null（空响应/204），原样返回会让调用方 chatJSON 的 `data.choices` 抛 TypeError（读 null 的属性）。
   //   非对象一律归一成 {}，调用方 `data.choices?.[0]?.message?.content || ''` 自然得空串、走 extractJSON 的"格式不正确"友好错误而非裸崩。
   return data && typeof data === 'object' ? data : {}
 }
@@ -416,13 +409,11 @@ export async function chatStream({
     run: async (wdSignal, touch) => {
       // 每次尝试都要清空：超时重试是从头重生成，上一次尝试的 finish_reason 不属于这一份文本
       if (finishInfo && typeof finishInfo === 'object') { finishInfo.finishReason = ''; finishInfo.truncated = false; finishInfo.incomplete = false }
-      // L-7：在请求起点捕获一次 provider，finally 记账用这个局部值——流式请求可能持续数十秒，
       //   期间用户若切换写作引擎，到 finally 再读 writerConfig().provider 会把这次消耗记到错误的引擎名下。
       const provider = writerConfig(thinking).provider
       // 流式 usage 只在最后一个分片出现（且该分片 choices 为空）；逐分片覆盖即可拿到最终值。
       // 放在 finally 里记账：僵死流被看门狗 abort、或用户点停止时，这一次请求**已经真实烧了 token**，
       // 不记就会让「总调用次数」少算（重试从头再写一遍，那一份也算）。此时 usage 多半没读到 → 记 null。
-      // item7：doFetch 也移进 try —— HTTP/网络失败同样是一次真实发出的请求，要进 calls（此前 doFetch 在 try 外，失败不记账、与「calls=真实请求数」矛盾）。
       let usage = null
       try {
         const res = await doFetch({ apiKey, messages, stream: true, temperature, signal: wdSignal, frequencyPenalty, presencePenalty, maxTokens, thinking })
@@ -471,10 +462,8 @@ export async function chatStream({
             }
           }
         }
-        // M11：流正常结束(done)但全程没收到 finish_reason 分片（服务端提前 FIN，非僵死）→ full 可能是半截正文。
         // 用独立的 incomplete 标记（不覆盖 truncated，避免与 length 截断混淆、也不把"正常收尾但 provider 不发 finish_reason"误判成坏稿）；UI 据此提示"可能不完整"。
         if (finishInfo && typeof finishInfo === 'object' && full && !finishInfo.finishReason) finishInfo.incomplete = true
-        // item8：空流标记——全程无任何正文 delta 时 full=''，调用方此前无法区分「AI 返回空稿」与「正常」；置 empty 供 UI 提示
         if (finishInfo && typeof finishInfo === 'object') finishInfo.empty = !full
         return full
       } finally {
@@ -494,20 +483,18 @@ export async function chatJSON({ apiKey, messages, temperature = 0.4, signal, ti
     totalMs: null,
     retries,
     run: async (wdSignal) => {
-      // M15：在 await 之前捕获一次 provider，记账用它——否则请求期间用户切换写作引擎，会把这次消耗记到错误的引擎名下（同 chatStream 的 L-7）。
       const provider = writerConfig().provider
       let res
       try {
         res = await doFetch({ apiKey, messages, stream: false, temperature, jsonMode: true, signal: wdSignal })
       } catch (e) {
-        recordLlmUsage({ provider, usage: null }) // item7：HTTP/网络失败也是一次真实发出的请求，要进 calls（此前只在 readJsonUsage 成功路径记账）
+        recordLlmUsage({ provider, usage: null })
         throw e
       }
       return readJsonUsage(res, provider)
     },
   })
   const text = data.choices?.[0]?.message?.content || ''
-  // M10：非流式也读 finish_reason；被长度截断时报"超长"而非让 extractJSON 抛"格式不正确"误导用户去反复重试
   if (data.choices?.[0]?.finish_reason === 'length') throw new Error('AI 回复超长被截断，请缩小任务范围或分步生成（并非格式错误）')
   return extractJSON(text)
 }
@@ -527,12 +514,10 @@ export function extractJSON(text) {
         try {
           return JSON.parse(slice.replace(/,\s*([}\]])/g, '$1'))
         } catch (e) {
-          // M12：以 [ 开头就该返回数组；两次解析都失败直接抛，不静默落到对象分支返回单个对象（会让期望数组的调用方拿到对象而不自知）
           throw new Error('数组 JSON 解析失败：' + (e && e.message ? e.message : String(e)))
         }
       }
     }
-    // L(尾批)：以 [ 开头却找不到闭合 ]（数组未闭合）——同 M12 口径直接抛，不静默落到下面对象分支把 [{…} 解析成单个对象返回（期望数组的调用方会拿到对象而不自知）
     throw new Error('数组 JSON 未闭合（缺 ]）：AI 的输出格式不正确，正在准备重试…')
   }
   const start = cleaned.indexOf('{')
@@ -552,7 +537,6 @@ export function extractJSON(text) {
 // 指定引擎测试 Key（「我的」页两个写作引擎各自测试用，不依赖当前选中项）
 export async function testKeyFor(provider, apiKey) {
   const cfg = provider === 'qwen' ? { url: QWEN_URL, model: getQwenModel(), provider: '通义千问' } : { url: API_URL, model: MODEL, provider: 'DeepSeek' }
-  // M-A1：探活此前裸调 doFetch、无 signal 不过看门狗 ⟹ dashscope 僵死(连接活但不吐字)时 fetch 永不 settle、ProfilePage 测试按钮永久卡「测试中」（全站唯一没过看门狗的生成类请求）。
   //   加 AbortController 超时兜底（探活 max_tokens=1，正常几百 ms~数秒返回，给 20s 上限）；超时 abort → 抛友好错误让 UI 显示失败而非永挂。
   //   仍直接 doFetch、不经 readJsonUsage ⟹ 不计入账本（保持上面「探活不计入」口径）。
   const ac = new AbortController()

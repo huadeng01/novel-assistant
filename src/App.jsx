@@ -7,7 +7,7 @@ import ContinuePage from './pages/ContinuePage.jsx'
 import LongFormPage from './pages/LongFormPage.jsx'
 import ProfilePage from './pages/ProfilePage.jsx'
 import RanksPage from './pages/RanksPage.jsx'
-import { safeGetItem } from './lib/utils.js' // B27：localStorage 容错读单一出处（原本页留一份多行副本、llm.js 留一份单行副本，已统一下沉 utils.js）
+import { safeGetItem } from './lib/utils.js'
 
 const TABS = [
   { id: 'revise', label: '改写润色', icon: 'pencil' },
@@ -18,8 +18,6 @@ const TABS = [
   { id: 'profile', label: '我的', icon: 'user' },
 ]
 
-// P1-7：页面级错误边界——任一页 render 抛错时，原来会整站白屏(连同顶部导航一起没)，用户未落库的编辑全丢且无从恢复。
-//   这里只包住 <main> 里的页面内容(导航栏留在边界外仍可点)，出错时给兜底 UI + 一键回改写页；切 tab 时 key 变化会重挂载自动清错。
 class PageErrorBoundary extends Component {
   constructor(props) {
     super(props)
@@ -50,9 +48,9 @@ class PageErrorBoundary extends Component {
   }
 }
 
+// 应用根组件：顶部页签导航、按页签渲染六个页面、页面级错误边界、两个引擎的 Key 与引擎选择全局状态。
 export default function App() {
   // 记住上次停留的页签：中断/刷新后重进直接回到原页面，配合长篇页的书级恢复实现无缝续写
-  // #3：持久化的 tab id 可能是脏值(旧版页签名 / 手改 localStorage)→ 首屏匹配不到任何页、整页空白；用 TABS 白名单校验，脏值回落 'revise'
   const [tab, setTabState] = useState(() => {
     const t = safeGetItem('na_tab')
     return TABS.some((x) => x.id === t) ? t : 'revise'
@@ -61,7 +59,6 @@ export default function App() {
   //   原来 key={tab}、恢复只 setTab('revise')：若出错时就在 revise，tab 不变→key 不变→不重挂载，子树立刻再抛同错、恢复按钮像失效。
   const [remountN, setRemountN] = useState(0)
   const setTab = (t) => {
-    // L16：localStorage 写入在隐私模式/存储被禁用/配额满时会抛错；若不保护，抛错会让后面的 setTabState 不执行 → 点导航栏页签完全没反应(界面像卡死)
     try {
       localStorage.setItem('na_tab', t)
     } catch {
@@ -77,9 +74,7 @@ export default function App() {
     setQwenKey(safeGetItem('qwen_api_key') || '')
   }
   // 写作引擎（DeepSeek / 通义千问）选择状态；下发给各页面的 Key 始终对应当前选中的引擎，缺 Key 引导也自然指向对应引擎。
-  // #2：writerProvider()(llm.js) 内部裸读 localStorage，隐私模式抛错→整站白屏；App 侧改用已包 try/catch 的 safeGetItem 判定初始引擎(llm.js 内部裸读属 B 区，报告标注转 B)
   // 决策3：默认引擎改为通义千问（项目主引擎 qwen3.8-max）——只有用户显式存过 'deepseek' 才回落 DeepSeek，其余(含首次/无存储)默认 qwen。
-  // C3（审计轮5 记接受、不改）：引擎「真值」存在两份——App 的 provider state（下发 activeKey 给各页）与 llm.js writerConfig() 内部裸读 localStorage。
   //   正常情况两者一致（changeProvider 同时 setWriterProvider + setProviderState）；仅在隐私模式/配额满致 setWriterProvider 写失败时可能短暂分叉，属可接受边缘，不额外同步。
   const [provider, setProviderState] = useState(() => (safeGetItem('writer_provider') === 'deepseek' ? 'deepseek' : 'qwen'))
   const changeProvider = (p) => {
@@ -94,26 +89,16 @@ export default function App() {
 
   return (
     <div className="min-h-screen text-ink">
-      <header className="sticky top-0 z-20 glass border-b border-stone-200/70 bg-paper/85 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-2 px-4 py-3">
-          <h1 className="flex shrink-0 items-center gap-2 text-lg font-bold tracking-wide">
-            {/* 朱砂印章：产品的签名元素 */}
-            <span
-              aria-hidden
-              className="flex h-8 w-8 rotate-[-3deg] items-center justify-center rounded-[0.3rem] bg-amber-600 text-base text-paper shadow-sm"
-            >
-              墨
-            </span>
-            墨语<span className="ml-1 hidden text-sm font-normal text-stone-400 sm:inline">AI 小说写作助手</span>
-          </h1>
-          <nav className="flex gap-1" aria-label="主导航">
+      <header className="px-3 pt-3">
+        <div className="glass mx-auto flex max-w-6xl items-center rounded-full border border-white/30 px-2 py-1.5 sm:px-3">
+          <nav className="flex w-full items-center gap-1" aria-label="主导航">
             {TABS.map((t) => (
               <button
                 key={t.id}
                 onClick={() => setTab(t.id)}
                 aria-current={tab === t.id ? 'page' : undefined}
-                className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${
-                  tab === t.id ? 'bg-stone-800 text-white' : 'text-stone-600 hover:bg-stone-100'
+                className={`flex flex-1 items-center justify-center whitespace-nowrap rounded-full px-2 py-2 text-sm font-medium transition-colors ${
+                  tab === t.id ? 'bg-white/20 text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.4)]' : 'text-stone-600 hover:bg-white/10 hover:text-white'
                 }`}
               >
                 <Ic n={t.icon} className="mr-1" />
@@ -128,7 +113,6 @@ export default function App() {
         <PageErrorBoundary key={`${tab}:${remountN}`} onRecover={() => { setTab('revise'); setRemountN((n) => n + 1) }}>
           {tab === 'revise' && <RevisePage apiKey={activeKey} onNeedKey={() => setTab('profile')} />}
           {tab === 'continue' && <ContinuePage apiKey={activeKey} onNeedKey={() => setTab('profile')} />}
-          {/* LF-5：LongFormPage 已自管 Key 读取与缺 Key 引导，不再从 App 接收 apiKey/onNeedKey（A 区已改） */}
           {tab === 'longform' && <LongFormPage />}
           {tab === 'wizard' && <WizardPage onOpenLongForm={() => setTab('longform')} />}
           {tab === 'ranks' && <RanksPage />}

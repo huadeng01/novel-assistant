@@ -1,7 +1,6 @@
 // 文风活簇——从 longform.js 抽出（暗箱流水线废弃处置 A）。
 // 页面层真正使用的 longform 部分即此文件，均经 longform.js 的 `export * from './style.js'` re-export 间接消费：
 //   WizardPage(distillStyleBand) / useLibrary(distillStyleBand) / RevisePage(resolveStyleRec)。
-//   B29 订正：原消费方列表含 ContinuePage，但续写页已删文风块、实测不 import longform/style（零引用），故移除。
 // longform.js 通过 `export * from './style.js'` re-export，保证既有 import 不断。
 import { PRESET_STYLES } from '../corpus/presetStyles.js'
 import { benchmarkRefOf } from './worldviews/index.js'
@@ -54,11 +53,9 @@ function blendHabits(recs, skin, opts = {}) {
 // 多本文风档案融合成一个混合文风：habits 按来源书配额取，forbidden 跨全体档案并集去重，profile/samples 择一（主导嗓音）。
 // 主导嗓音优先：skin 池优先取 origin==='user' 子集；无用户书时回退全体（预置档案里按 skinScore 择一）。
 export function blendStyles(styleRecs, opts = {}) {
-  // item1：过滤放宽到 forbidden——一份只有禁用词（无 profile/habits）的档案此前被滤掉，它的 forbidden 进不了并集
   const recs = (Array.isArray(styleRecs) ? styleRecs : []).filter((s) => s && (s.profile || (Array.isArray(s.habits) && s.habits.length) || (Array.isArray(s.forbidden) && s.forbidden.length)))
   if (!recs.length) return null
   if (recs.length === 1) {
-    // item2：返回**浅拷贝**而非入参原引用——单档时 recs[0] 可能就是 PRESET_STYLES 里的对象，直接交出去会被调用方 mutate 污染预置档案；
     //   顺带补齐 thresholds/skinFrom 归一，使单档与多档返回形状一致。
     const only = recs[0]
     return { ...only, thresholds: only.thresholds || metricsToThresholds(only.metrics || null), skinFrom: only.skinFrom || only.bookId || '来源' }
@@ -155,11 +152,11 @@ export function dialogueVerbScan(text, opts = {}) {
   return { shuoCount: shuoSamples.length, shuoSamples: [...new Set(shuoSamples)].slice(0, 8), daoCount, over: shuoSamples.length >= severe }
 }
 
+// 功能性动词词表，文风量化时用于区分叙述句与功能句。
 export const STYLE_FUNC_WORDS = ['的', '了', '着', '是', '在', '而', '却', '便', '都', '就', '也', '还', '把', '被', '让', '向', '从', '到']
 // 参与指纹聚合的数值维度（computeStyleMetrics 的键子集，排除 chars 这类规模量）
 export const STYLE_METRIC_KEYS = ['sentMean', 'sentStd', 'longPct', 'paraMedian', 'ultrashortPct', 'comma', 'exclaim', 'question', 'ellipsis', 'emdash', 'shuoRatio', 'daoRatio', 'runOnMax', 'funcWordRatio']
 // 各维度中文名（与 STYLE_METRIC_KEYS 一一对应，单一事实源）。
-// item8(档3)：当前**零消费方**——原消费方 UI 漂移面板(styleDriftScan)已随暗箱流水线删除；与仍被 computeStyleMetrics 使用的 STYLE_METRIC_KEYS 配对，作为将来恢复量化校验的预留保留（不删，删了会破坏 KEYS↔LABELS 一一映射）。
 export const STYLE_METRIC_LABELS = { sentMean: '平均句长', sentStd: '句长波动', longPct: '长句占比', paraMedian: '段落中位长', ultrashortPct: '超短段占比', comma: '逗号密度', exclaim: '叹号密度', question: '问号密度', ellipsis: '省略号密度', emdash: '破折号密度', shuoRatio: '「说」引导密度', daoRatio: '「道」引导密度', runOnMax: '最长无停顿串', funcWordRatio: '虚词占比' }
 
 // 单份文本的多维文体计量（点值）。空/纯空白安全返回全零，绝不抛异常。

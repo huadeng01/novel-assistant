@@ -6,7 +6,6 @@ import { ASSET_TYPE_LABEL, LINK_LABEL, countByType, dashOut, isDangling, isMissi
 const genBtn = 'rounded-lg bg-red-700 px-4 py-1.5 text-sm text-onaccent hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-40'
 const ghostBtn = 'rounded-lg border border-stone-300 bg-stone-50 px-4 py-1.5 text-sm text-stone-700 hover:bg-stone-100'
 
-// #4：最近编辑的相对时间（决策#4：只做「最近编辑过」的轻量显示，不做按最近修改排序）
 const relTime = (ts) => {
   const diff = Date.now() - Number(ts || 0)
   if (!Number.isFinite(diff) || diff < 0) return ''
@@ -38,9 +37,7 @@ export default function AssetModal({
   onFilterChange,
 }) {
   const [innerFilter, setInnerFilter] = useState('all')
-  // M24：把「全表扫描」提前用 useMemo 建成索引——occupantsByPlace(地点「此地有谁」)，避免每张资产卡渲染时对全表 .filter。
   //   hooks 必须在 early-return 之前调用。
-  // P1-10：悬空边判定改用 assets.js isDangling 单一出处（dashOut 归一两边）——原来用 nameSet.has(l.to) 比的是原值，
   //   与 LinkEditor 的 isDangling 口径不一致：同一条带空格/书名号的边，卡片标红而弹窗不标红。nameSet 随之删除。
   const all = useMemo(() => (book && book.assets) || [], [book])
   const occupantsByPlace = useMemo(() => {
@@ -48,7 +45,6 @@ export default function AssetModal({
     all.forEach((a) => {
       if (!a || a.type === 'place') return
       const p = a.state && a.state.place
-      // P2：移动中 / 下落不明 = 当前不固定在某地，不该算进「此地有谁」
       if (p && (p.tag === 'moving' || p.tag === 'missing')) return
       const edgeTo = ((a.links || []).find((l) => l.type === 'located_in') || {}).to
       // inferred（推定短语，如「前往昆仑」）：ref 不是确定地名、B区也不为它建 located_in 边 → 不按 ref 归入；
@@ -71,7 +67,6 @@ export default function AssetModal({
     if (filterProp != null) onFilterChange && onFilterChange(k)
     else setInnerFilter(k)
   }
-  // item3：filter 回调加 `a &&` 守卫（与本文件 occupantsByPlace :49、assets.js filterAssets/countByType 同口径）——
   //   all 里可能混入 null 资产，原来 filter≠'all' 时裸取 a.type 抛 TypeError；null 若漏进下面的 .map 也会崩，故整个回调先剔 null。
   const assets = all.filter((a) => a && (filter === 'all' ? true : filter === 'missing' ? isMissingReveal(a, perVol) : a.type === filter))
   const counts = countByType(all, perVol)
@@ -81,7 +76,6 @@ export default function AssetModal({
   })
 
   // 双向位置(设计 §8 拍板2)：人物「此人位于哪」= state.place 优先、回落 located_in 边。
-  // P2：原来只取 place.ref、忽略 place.tag，把「流放于幽州 / 被囚于天牢 / 移动中」一律显示成「此人位于：幽州」——语义错。
   //   按 tag 给出准确说法（tag 缺省或 at 才是「在某地」）。
   const PLACE_LEAD = {
     at: (r) => `此人在${r}`,
@@ -106,7 +100,6 @@ export default function AssetModal({
     const lead = PLACE_LEAD[p && p.tag] || PLACE_LEAD.at
     return lead(ref)
   }
-  // 地点「此地有谁」= 查预建索引(M24)，不再每卡全表 filter
   const whoHere = (placeName) => occupantsByPlace.get(dashOut(placeName)) || [] // 尾批[5]：与索引键同走 dashOut 归一
 
   return (

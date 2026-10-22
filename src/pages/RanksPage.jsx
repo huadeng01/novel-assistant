@@ -3,9 +3,9 @@ import Ic from '../components/Ic.jsx'
 import { loadRanks, ranksSummary, generatedLabel, gendersOf, listsByGender } from '../lib/ranks.js'
 import { chatJSON, writerConfig } from '../lib/llm.js'
 import { rankInsightMessages } from '../lib/prompts.js'
+import { safeGetItem, safeSetItem } from '../lib/utils.js'
 
 // 榜单区（顶栏「榜单」页）：展示各平台【热门榜快照】（内置静态数据，非实时）。
-// 数据来自同源静态 public/ranks.json（M22：原抓取脚本 scripts/fetch-ranks.mjs 已随项目精简移除、快照不再每日更新；实际快照日期见页内 generatedLabel），
 // 本页运行时【不发起任何跨域抓取】——只显示最新元数据；点击书名 → 外链跳转平台官方阅读页，
 // 本应用不存储、不展示、不缓存任何正文章节（合规红线）。
 
@@ -15,14 +15,7 @@ const RANK_STYLE = {
   3: 'bg-amber-700/75 text-white',
 }
 
-// P1-17：AI 故事偏向分析结果按「平台:频道:榜单下标」缓存到 localStorage——RankInsight 组件按这个 key 重挂载，
-//   原来切榜单 / 切 tab 即丢已烧 token 的分析；缓存后切回来直接回读，不必重跑。
 const INSIGHT_PREFIX = 'na_rank_insight_'
-// 必修6（第十一轮·毒丸第3处，同型 item2 RevisePage / 必修A DiagnosePanel）：RankInsight 结果归一。
-//   readInsight 原来只校验 presence（books/overview/genres 存在），不校验元素字段类型；AI 把 overview 返对象、或 genres[]/books[] 元素的
-//   genre/count/title/orientation/synopsis 返对象/数组时，直接渲染（:428/:439/:450…）会抛「Objects are not valid as a React child」→ 整页落 PageErrorBoundary；
-//   且结果已写 localStorage(:33) → 每次进该榜单持续崩、只能清数据逃生。（item25 的 `||''`/`||0` 只兜 undefined/falsy，兜不住 truthy 的对象/数组。）
-//   对象/数组归空（既防崩、又不显「[object Object]」），字符串/数字保留；新鲜结果、写缓存前、缓存回读三处都过。
 const insightStr = (v) => (v == null ? '' : typeof v === 'object' ? '' : String(v))
 const sanitizeInsight = (d) => {
   if (!d || typeof d !== 'object') return null
@@ -37,21 +30,18 @@ const sanitizeInsight = (d) => {
 const readInsight = (cacheKey) => {
   if (!cacheKey) return null
   try {
-    const d = JSON.parse(localStorage.getItem(INSIGHT_PREFIX + cacheKey) || 'null')
-    return d && (Array.isArray(d.books) || d.overview || Array.isArray(d.genres)) ? sanitizeInsight(d) : null // 必修6：缓存回读也归一（防本修复前写入的毒丸缓存）
+    const d = JSON.parse(safeGetItem(INSIGHT_PREFIX + cacheKey) || 'null')
+    return d && (Array.isArray(d.books) || d.overview || Array.isArray(d.genres)) ? sanitizeInsight(d) : null
   } catch {
     return null
   }
 }
 const writeInsight = (cacheKey, data) => {
   if (!cacheKey) return
-  try {
-    localStorage.setItem(INSIGHT_PREFIX + cacheKey, JSON.stringify(data))
-  } catch {
-    /* 存储不可用 / 配额满：缓存存不下不影响本次分析 */
-  }
+  safeSetItem(INSIGHT_PREFIX + cacheKey, JSON.stringify(data))
 }
 
+// 榜单页：展示各平台热门榜快照与 AI 故事偏向分析。
 export default function RanksPage() {
   const [state, setState] = useState({ loading: true, data: null, error: '' })
   const [active, setActive] = useState('') // 当前选中平台 id
@@ -62,7 +52,6 @@ export default function RanksPage() {
     setState((s) => ({ ...s, loading: true }))
     return loadRanks(signal).then((r) => {
       if (r.error === 'aborted') return null
-      // RP13：刷新失败(r.data=null)时保留已加载的榜单，只把 error 透出——原来直接 data:r.data 会把榜单清空退回错误态
       setState((s) => ({ loading: false, data: r.data ?? s.data, error: r.ok ? '' : r.error }))
       return r.data
     })
@@ -100,11 +89,9 @@ export default function RanksPage() {
   const platformGenders = useMemo(() => gendersOf(source), [source])
   // 按当前频道过滤后的榜单集合（listIdx 在此集合内取值）。
   const visLists = useMemo(() => (source && source.ok ? listsByGender(source, gender) : []), [source, gender])
-  // P2：切换频道后 visLists 可能变短，listIdx 会越界——用夹取后的有效下标同时驱动「取哪条榜单」与「哪个 tab 高亮」，
   //   原来 list 夹取了、高亮却用裸 listIdx，越界时榜单显示着却没有任何 tab 高亮。
   const effListIdx = visLists.length ? Math.min(listIdx, visLists.length - 1) : 0
   const list = visLists.length ? visLists[effListIdx] : null
-  // P2：generatedLabel 原来在同一行 JSX 里算两次，这里算一次复用
   const snapLabel = state.data ? generatedLabel(state.data) : ''
 
   const selectPlatform = (id) => { setActive(id); setGender('全部'); setListIdx(0) }
@@ -165,8 +152,6 @@ export default function RanksPage() {
         </section>
       )}
 
-      {/* P2（补 RP13）：刷新失败但保留了上次数据时，错误原来被 `!state.data` 挡掉、用户看不到——给一条非阻断提示，
-          别让人以为当前是最新快照。首屏就失败(无数据)仍走上面的整块错误态。 */}
       {!state.loading && state.error && state.data && (
         <p className="mb-3 rounded-xl bg-amber-50 px-4 py-2 text-xs text-amber-700">
           <Ic n="alert" className="mr-1 align-[-0.125em]" />刷新失败（{state.error}）；当前显示的是上次成功加载的榜单快照。
@@ -191,8 +176,6 @@ export default function RanksPage() {
             ))}
           </nav>
 
-          {/* item25：source=null（active 未匹配任何平台——初始未选中 / 刷新后 active 指向已不存在的平台 / 挂载 fetch 被 abort 未自动选中）时，
-              nav 有按钮但无选中、下面三个内容分支(source&&!ok / source&&ok / insight)全不渲染 ⟹ 正文全空且无提示。补一条显式引导。 */}
           {!source && (
             <section className="glass-card rounded-2xl bg-paper p-8 text-center shadow-sm">
               <p className="text-sm text-stone-500">
@@ -335,7 +318,6 @@ function BookRow({ book }) {
 function RankInsight({ platformName, listName, books, cacheKey = '' }) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  // P1-17：初值从 localStorage 回读（组件按 cacheKey 重挂载，切回本榜即恢复上次分析，不重烧 token）
   const [data, setData] = useState(() => readInsight(cacheKey))
   const [fromCache, setFromCache] = useState(() => !!data) // L：复用上一行已算出的 data，不再二次 readInsight（二次 JSON.parse）
   // 5.1：发送前提示词确认（人在环路）。点"分析本榜"先弹窗展示将发送的 system+user，可查看/编辑，确认后才真正发 chatJSON（保留 jsonMode / temperature 0.5）。
@@ -367,10 +349,10 @@ function RankInsight({ platformName, listName, books, cacheKey = '' }) {
       if (!res || (!Array.isArray(res.books) && !res.overview)) {
         setErr('AI 返回的内容格式不正确，请点「重新分析」重试。')
       } else {
-        const clean = sanitizeInsight(res) // 必修6：归一后再上屏 + 落缓存——毒丸（对象/数组字段）既不进 state 也不进 localStorage，避免刷新/切回持续崩
+        const clean = sanitizeInsight(res)
         setData(clean)
         setFromCache(false)
-        writeInsight(cacheKey, clean) // P1-17：落缓存，切榜单/切 tab 再回来不丢
+        writeInsight(cacheKey, clean)
       }
     } catch (e) {
       if (!mountedRef.current) return
@@ -419,7 +401,6 @@ function RankInsight({ platformName, listName, books, cacheKey = '' }) {
       <p className="mt-1 text-[11px] leading-relaxed text-stone-400">
         基于本榜 {books.length} 本书的公开元数据（题材 / 简介），由 AI 归纳整榜故事偏向，并逐本提炼故事梗概。不联网、不杜撰元数据之外的情节。
       </p>
-      {/* P1-17：回读的是上次缓存的分析（非本次新跑）——如实标注，榜单快照未变时无需重烧 token */}
       {data && fromCache && !busy && (
         <p className="mt-1 text-[11px] text-stone-400"><Ic n="box" /> 这是上次分析的缓存结果（切走再切回不丢）；榜单未变无需重跑，点「重新分析」可刷新。</p>
       )}
@@ -487,7 +468,6 @@ function RankInsight({ platformName, listName, books, cacheKey = '' }) {
     {promptConfirm && (
       <div
         className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
-        // P1-16：已编辑过提示词则遮罩不响应，避免误点丢掉改过的提示词（与 RevisePage / DiagnosePanel / PromptEditorModal C1 统一）
         onClick={() => { if (!promptConfirm.edited) setPromptConfirm(null) }}
         role="dialog"
         aria-modal="true"

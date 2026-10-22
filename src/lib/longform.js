@@ -1,5 +1,3 @@
-// 暗箱流水线废弃处置 A：longform.js 的废弃流水线（planVolume/archiveChapter/consistencyGate/
-// codeLayerAudit/splitChapters/各类 scan/gate/anchor/counter/foreshadow 等）已物理删除。
-// 文风活簇抽到 ./style.js；本文件保留为 re-export 瘦壳，使页面层既有
-// `import { distillStyleBand, resolveStyleRec } from '../lib/longform.js'` 不断。
+// 文风相关函数的转发壳：真实实现住在 style.js（文风蒸馏、预设语料合成、题材嗓音映射）。
+// 保留这个文件只是为了让页面里既有的 `import { ... } from '../lib/longform.js'` 写法继续可用。
 export * from './style.js'

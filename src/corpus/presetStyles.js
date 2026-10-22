@@ -3,7 +3,6 @@
 //   profile/habits/metrics 仍按各书真实语料标定。skinScore 是**显式覆盖字段**（与 profile 文案长度解耦，防止一次纯文案改写静默改掉默认主导嗓音）。
 //   skinScore 现排序（genreSkinOf 取最高者为默认主导嗓音）：perfect 1829 > fox 1699 > undead 1617 > infinite 1509 > jianlai 1467；prometheus 1845 已删（原最高）。
 // 【预留字段】metrics / thresholds / bandReliable：原消费方（暗箱 styleDriftScan 漂移门 / codeLayerAudit 自适应阈值）已随暗箱流水线物理删除，
-//   现无下游读取（仅 style.js blendStyles 透传进聚合档案）；作为文风档案元数据保留，供将来恢复量化校验时复用，开销可忽略(M10)。
 export const PRESET_STYLES = [
   {
     bookId: 'preset:jianlai',
@@ -34,7 +33,6 @@ export const PRESET_STYLES = [
     genreZh: '玄幻',
     origin: 'preset',
     skinScore: 1829, // 冻结常量·勿按当前 profile 重算（决策7：与文案长度解耦防默认嗓音漂移；按现 profile 重算会得 fox 最高=嗓音漂移）·五本最高=默认主导嗓音(prometheus 1845 已删)，排序见文件头
-    // 任务A bug3：全书 6602007 字 / 5404 窗，distillStyleBand 真值（reliable=true）。paraMedian 37.97≈外部实测报告 avgParaLen p50=36.2（profiles.json 仓库内不含）；comma 875.67/万字 = 五本最高，印证本档【L43】「短句+逗号最密」的真实签名。
     metrics: { sentMean: { mean: 28.96, std: 4.17 }, sentStd: { mean: 15.77, std: 2.28 }, longPct: { mean: 31.99, std: 11.29 }, paraMedian: { mean: 37.97, std: 5.6 }, ultrashortPct: { mean: 14.79, std: 7.89 }, comma: { mean: 875.67, std: 69.15 }, exclaim: { mean: 68.73, std: 36.74 }, question: { mean: 32.3, std: 22.61 }, ellipsis: { mean: 8.99, std: 10.19 }, emdash: { mean: 0.78, std: 2.86 }, shuoRatio: { mean: 0, std: 0.19 }, daoRatio: { mean: 6.67, std: 10.19 }, runOnMax: { mean: 19.59, std: 3.14 }, funcWordRatio: { mean: 10.06, std: 1.17 } },
     thresholds: { dashMax: 2, dialogueSevere: 3, runOnMinLen: 40 },
     bandReliable: true,

@@ -74,6 +74,7 @@ function normalizeSource(s) {
 
 // 频道性别归一化：只认「男频 / 女频」，其余（含空值、'全部'、未知）一律收敛为「全部」。
 export const GENDERS = ['全部', '男频', '女频']
+// 把频道写法归一为 男频 / 女频 / 全部。
 export function normalizeGender(g) {
   const s = String(g || '').trim()
   return s === '男频' || s === '女频' ? s : '全部'
@@ -93,9 +94,10 @@ export function gendersOf(source) {
 export function listsByGender(source, gender) {
   const lists = (source && Array.isArray(source.lists)) ? source.lists : []
   if (!gender || gender === '全部') return lists
-  return lists.filter((l) => normalizeGender(l && l.gender) === gender || normalizeGender(l && l.gender) === '全部') // item13：加 `l &&` 守卫，与本文件 :60/:86 同口径（lists 混入 null 时裸 l.gender 抛 TypeError；仅手工替换 ranks.json 才触发）
+  return lists.filter((l) => normalizeGender(l && l.gender) === gender || normalizeGender(l && l.gender) === '全部') // 榜单列表可能混入 null，取字段前先守卫
 }
 
+// 汇总各平台榜单的元数据摘要。
 export function ranksSummary(data) {
   const sources = (data && Array.isArray(data.sources)) ? data.sources : []
   const okCount = sources.filter((s) => s && s.ok).length
@@ -104,6 +106,7 @@ export function ranksSummary(data) {
   return { platformCount: sources.length, okCount, failCount, bookCount }
 }
 
+// 榜单快照的生成日期文案。
 export function generatedLabel(data) {
   if (!data) return ''
   if (data.generatedAtLocal) return data.generatedAtLocal

@@ -52,7 +52,7 @@ describe('docio .docx 读写往返', () => {
   })
 })
 
-// 第十轮 item10/必修B：txt/md 编码探测（UTF-8 fatal → gbk 兜底 → decodeLooksBroken 乱码探测）
+// txt/md 导入的编码探测：UTF-8 严格解码失败后回退 gbk，再用乱码特征判断是否仍解坏
 describe('docio readDocumentFile 编码探测', () => {
   const mkFile = (bytes, name = 'novel.txt') => ({ name, arrayBuffer: async () => bytes })
   const sample = '第一章 测试正文，少年觉醒异能，从校园成长到域主。'

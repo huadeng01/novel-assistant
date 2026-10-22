@@ -15,8 +15,6 @@
 // benchmark 字段 = 题材 → 基准书形态参照的单一出处（不在别处另设第二张表）。
 // direct: true  = 这本基准书的题材就是本内置题材；缺省 = 仅「同族形态参照」。
 // 无 benchmark 字段 = 五本语料里没有该题材形态的书，或族指向不唯一 → 诚实标为无参照，不硬贴。
-// A#6：整表 export——WizardPage 第7步体量锚 namespace 探测 worldviews.GENRE_STYLE_TABLE，直接读 chapterWords 作模糊兜底
-//   （chapterWordsFor 精确未命中时，由该页用 g.includes(k) 模糊回退；本表仍是题材章字数单一出处，别处不得另写第二份）。
 export const GENRE_STYLE_TABLE = {
   仙侠: { chapterWords: 10000, avgParaLen: 48, evidence: '章字数 p10·p50·p90 = 5296·9440·17166；段长 39.9·48.7·59.5', benchmark: { genreZh: '仙侠', direct: true } },
   历史: { chapterWords: 4300, avgParaLen: 30, evidence: '' },
@@ -54,8 +52,6 @@ export function benchmarkRefOf(genre) {
   return { genre: g, genreZh: hit.benchmark.genreZh, direct: hit.benchmark.direct === true }
 }
 
-// A#6：题材 → 该题材档的每章字数目标（chapterWords），供 WizardPage 第7步体量锚兜底（替代硬编码 PER_CHAPTER_WORDS=2500，
-//   否则仙侠「章均约1万字」被按2500估成约4倍章数、排章体量锚失真）。与 benchmarkRefOf/avgParaLenFor 共用 GENRE_STYLE_TABLE 单一出处。
 // 入参兼容两种形状（以 A 区探测为准）：字符串题材 chapterWordsFor('仙侠')，或对象 chapterWordsFor({ genre })——WizardPage 实际调的是后者。
 // 题材精确未命中 / 脏数据一律返回 undefined（不返 0/NaN），让调用方安全回落到它自己的默认值、不阻断；模糊命中(g.includes)交给 WizardPage 读表兜底那条路径。
 export function chapterWordsFor(arg) {
@@ -72,10 +68,11 @@ export function chapterWordsFor(arg) {
 // 系数与 novel-local worldviews/index.js 逐字一致：下沿 2/3、上沿 4/3（T-paraband-caliber 标定 v2）。
 // 缺字段/非法值一律回退默认档 30（= novel-local DEFAULT_GENRE_STYLE.avgParaLen，也是 GENRE_STYLE_TABLE
 //   里 11 个未映射题材共用的 avgParaLen），不抛错。这是全项目段长数字的唯一出处，别处不得再写第二个数。
-const PARA_BAND_MIN_RATIO = 2 / 3 // B28：仅 paraBandFor 内部用，去 export
-const PARA_BAND_MAX_RATIO = 4 / 3 // B28：仅 paraBandFor 内部用，去 export
-const PARA_BAND_DEFAULT_AVG_PARA_LEN = 30 // B28：仅 paraBandFor 内部用，去 export
+const PARA_BAND_MIN_RATIO = 2 / 3
+const PARA_BAND_MAX_RATIO = 4 / 3
+const PARA_BAND_DEFAULT_AVG_PARA_LEN = 30
 
+// 把目标段长换算成段落字数带宽（下沿约三分之二、上沿约三分之四），无真值时回落默认档。
 export function paraBandFor(avgParaLen) {
   const n = Number(avgParaLen)
   const target = Number.isFinite(n) && n > 0 ? n : PARA_BAND_DEFAULT_AVG_PARA_LEN
@@ -84,7 +81,6 @@ export function paraBandFor(avgParaLen) {
   return { minPara, maxPara, target, defaulted: !(Number.isFinite(n) && n > 0) }
 }
 
-// B-H3：从 book 推导真实 avgParaLen（段长目标），供 LongFormPage 的 paraBandFor 消费（此前恒传 book.avgParaLen=undefined → 段长恒默认档）。
 // 确定性推导、无写入点也能算，优先级：
 //   ① book.avgParaLen 显式值（若将来建书/绑书时落了值）；
 //   ② 绑定文风的蒸馏指纹 styleMetrics.paraMedian.mean —— 该书**真实**段长中位数（最准，兼容 styleMetrics 是 metrics 对象或整份 band 两种形状）；
@@ -93,7 +89,6 @@ export function paraBandFor(avgParaLen) {
 //   ⑤ 都拿不到 → 返回 undefined，paraBandFor 自动回落默认档 30（不抛错）。
 export function avgParaLenFor(book) {
   const b = book || {}
-  // item4：布尔/数组/对象等脏数据先挡在 Number() 之外——Number(true)=1 会伪装成合法段长（→ paraBandFor 得 {8,12}），
   //   仅接受 number 或非空数字串。（原守卫 Number.isFinite&&>0 挡不住布尔：Number(true)=1 恰好 isFinite 且 >0。）
   const rawApl = b.avgParaLen
   const explicit = (typeof rawApl === 'number' || (typeof rawApl === 'string' && rawApl.trim() !== '')) ? Number(rawApl) : NaN
@@ -114,7 +109,6 @@ export function avgParaLenFor(book) {
   const byGenre = genreAvg(b.genre)
   if (byGenre != null) return byGenre
   // ④ genreNote 兜底：按题材词长度降序匹配（「古代言情」先于「言情」，避免子串误命中），命中即用该题材默认档。
-  //   item3：否定片段里的题材词要跳过——「不要写仙侠、要都市」此前命中仙侠(48)，实际该命中都市(30)。
   //   判据：题材词首次出现处、同一分句内（前面不隔 、，,。；; 换行）若被「不要/别写/避免/非…」等否定引导，则跳过。
   //   （coordinator 提的「取 indexOf 最小的命中键」不解决本例：仙侠在都市之前，min-indexOf 仍取仙侠；故用否定前瞻。）
   const note = String(b.genreNote == null ? '' : b.genreNote)

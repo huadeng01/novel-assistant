@@ -11,7 +11,7 @@ import { continueMessages, followupMessages, incorporateReviseMessages, CONTINUE
 const OLD_TEXT = '第一章的原文，主角刚离开村子。'
 const NEW_TEXT = `${OLD_TEXT}\n\n第二章主角已经进了京城，站在城门下。`
 // 分析时点的故事线：只记录到第一章，天然滞后于 NEW_TEXT
-const TIMELINE = [{ stage: '起因', summary: '主角离开村子' }]
+const CHRONICLE = [{ time: '第一章当天', event: '主角离开村子' }]
 
 const base = {
   text: NEW_TEXT,
@@ -19,7 +19,7 @@ const base = {
   world: '世界观正文',
   characters: '人物卡正文',
   outline: '大纲正文',
-  timeline: TIMELINE,
+  chronicle: CHRONICLE,
   style: '',
   habits: [],
   forbidden: [],
@@ -27,7 +27,7 @@ const base = {
 }
 
 // 所有背景资料块的标签，用来断言它们全部落在原文之前
-const CTX_TAGS = ['【用户续写指令', '【前文摘要', '【世界观设定', '【人物卡', '【故事大纲', '【已有故事线']
+const CTX_TAGS = ['【用户续写指令', '【前文摘要', '【世界观设定', '【人物卡', '【故事大纲', '【已有时间事件账本']
 const TEXT_HEAD = '以下是小说原文'
 
 describe('continueMessages · 原文收尾、背景资料前置', () => {
@@ -53,7 +53,7 @@ describe('continueMessages · 原文收尾、背景资料前置', () => {
   it('原文用的是最新那份（含纳入后的第二章），不是分析时点的旧结尾', () => {
     expect(u).toContain('主角已经进了京城')
     // 最新的结尾必须比滞后的故事线更靠后，模型才会就近取它当起点
-    expect(u.indexOf('主角已经进了京城')).toBeGreaterThan(u.indexOf('【已有故事线'))
+    expect(u.indexOf('主角已经进了京城')).toBeGreaterThan(u.indexOf('【已有时间事件账本'))
   })
 
   it('不再出现把旧故事线抬成起点的措辞', () => {
@@ -81,7 +81,7 @@ describe('continueMessages · 原文收尾、背景资料前置', () => {
 
   it('用户续写指令排在所有背景资料的最前面（最高优先级）', () => {
     expect(u.indexOf('【用户续写指令')).toBeLessThan(u.indexOf('【前文摘要'))
-    expect(u.indexOf('【用户续写指令')).toBeLessThan(u.indexOf('【已有故事线'))
+    expect(u.indexOf('【用户续写指令')).toBeLessThan(u.indexOf('【已有时间事件账本'))
   })
 })
 

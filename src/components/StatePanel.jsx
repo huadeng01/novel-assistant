@@ -10,11 +10,6 @@ const addBtn = 'rounded border border-stone-300 bg-stone-50 px-1.5 py-0.5 text-[
 const sinceBox = (v, set, label = '自第') => (
   <label className="flex items-center gap-1 text-[10px] text-stone-400">
     {label}
-    {/* M-G/L3：章号只接受非负整数，绝不把脏值写进 state——空=0(明确清除)；纯非负整数才 set；其余不 set。
-        诚实说明 type="number" 的实际行为（原注释「受控值弹回原值」不准）：浏览器会把非法中间态归一——
-        输入「-」「12abc」等时 e.target.value 变成空串 → 走 set(0)（按清空处理，不是夹取也不是保留原值）；
-        输入「1.5」时 value 仍是 "1.5"、正则不匹配 → 不 set，state 保持原值，但 DOM 会短暂显示未提交的 "1.5" 直到下次渲染受控值覆盖。
-        无论哪条路径，state 里都不会存入负数/小数/非数字。要彻底消除这段 DOM↔state 短暂分歧需改成 ChapterField 那种本地 text + blur 提交，属可选优化。 */}
     <input
       type="number"
       min="0"
@@ -50,7 +45,6 @@ const sinceBox = (v, set, label = '自第') => (
 export default function StatePanel({ value, onChange, assets = [], chapterNo = 0, updatedBy = 'user', showMeta = true, defaultOpenExtra = false }) {
   const st = useMemo(() => normalizeState(value), [value])
   const [openExtra, setOpenExtra] = useState(defaultOpenExtra)
-  // P2：openExtra 原来只在首次挂载读 defaultOpenExtra，之后 prop 变了不跟随——父组件想「AI 结算后自动展开更多维度」时展不开。
   //   跟随 prop 变化同步（用户手动开合仍由 setOpenExtra 主导，二者不冲突：prop 不变时 effect 不触发）。
   useEffect(() => {
     setOpenExtra(defaultOpenExtra)
@@ -94,14 +88,11 @@ export default function StatePanel({ value, onChange, assets = [], chapterNo = 0
   const tagSelect = (dim, extra = '') => {
     const curTag = (st[dim] && st[dim].tag) || ''
     const opts = stateOptions(dim)
-    // 次修9（第十一轮·存疑E，对齐 LinkEditor TypeSelect 的 M-F 修法）：当前 tag 不在本维 options 里（AI 结算 / 旧书 v1 迁移写入的跨维或历史值）时，
     //   <select value> 找不到匹配 option → 显示空白，且用户一选就把原 tag 永久改掉、原值丢失。补一个「（当前）」兜底 option：如实显示原值、不被误改（用户不主动选就保持不变）。
     const inOptions = opts.some((o) => o.value === curTag)
     return (
       <select
         value={curTag}
-        // 审计轮6 修正(C1 回归)：改 place.tag 只断言状态词、ref 仍是原值（可能仍是推定短语）→ **不清 inferred**。
-        //   清掉会让推定 ref 被当确定地名 → placePhrase 渲染「人在前往昆仑」语病 + 建垃圾 located_in 边 + 假悬空警告（B#1 三症状复活）。
         //   inferred 只在用户改 ref（给出真实地点）时清（见下方 ref onChange）；仅 place 有 inferred 语义，其余维度不涉及。
         onChange={(e) => setObjDim(dim, { tag: e.target.value })}
         className={`${sel} ${extra}`}
@@ -138,7 +129,6 @@ export default function StatePanel({ value, onChange, assets = [], chapterNo = 0
 
   const meta = st.meta
   const hasAny = stateHasContent(st)
-  // P1-13：plot='active'（活跃中）是默认落点，stateHasContent 特意不算它「有内容」（注入时不单独占一行）。
   //   原来用户选了「活跃中」却仍显示「全可空，不填也能保存」，像是没选上——改成如实说明这是默认态、不占注入行。
   const onlyActive = !hasAny && st.plot && st.plot.tag === 'active'
 
@@ -204,8 +194,6 @@ export default function StatePanel({ value, onChange, assets = [], chapterNo = 0
             </div>
           ))}
           <button type="button" onClick={() => addListDim('hold', { name: '', change: 'gain' })} className={addBtn}>
-            {/* item30子2·方案B：流转动作文案从单一出处派生——复用已 import 的 stateOptions('hold')（其源是 assets.js STATE_LABEL.hold，与上方 :185 的流转类型 <select> 同源），
-                删掉这份手写反向表「获得/失去/损坏/消耗/易主」。过滤掉 value='' 的「未设定」项、只取真实动作 label。STATE_LABEL.hold 增删动作时按钮文案与下拉自动同步、不再漂移。 */}
             + 变更（{stateOptions('hold').filter((o) => o.value).map((o) => o.label).join('/')}）
           </button>
           <div className="text-[10px] text-stone-400">损毁/消耗的道具只做标注、不从资产表删除，AI 才知道「为什么主角不用它」。</div>
@@ -227,7 +215,6 @@ export default function StatePanel({ value, onChange, assets = [], chapterNo = 0
           list="statepanel-places"
           placeholder="地点，如：青冥山"
           // 用户手动改 ref = 断言一个确定地点 → 顺手清掉 inferred 标记。
-          // L4：ref 非空才补 tag='at'；ref 清空时连 tag 一起清('')，交给 setObjDim 的 filled 判据——若 note/since 也空则整个 place 落 null，
           //   不再留 {tag:'at', ref:''} 空壳（空壳会被 stateHasContent 当「有内容」、绕过需求7「全空不入库」，违反本文件「空维度落 null」约定）。
           onChange={(e) => {
             const ref = e.target.value
@@ -248,8 +235,6 @@ export default function StatePanel({ value, onChange, assets = [], chapterNo = 0
           ))}
         </datalist>
         {sinceBox(st.place && st.place.since, (since) => setObjDim('place', { since }))}
-        {/* B#2：place.note 输入框——B 区已让 placePhrase 全分支把 place.note 注入给 AI（地点说明），
-            但原来这行只有 tag/ref/since、没有 note 输入口 ⟹ 这份数据用户看不见也改不了(死数据)。补一个说明输入框。 */}
         {noteInput('place', '位置说明（可空），如：被囚于内殿 / 暂居客栈')}
       </div>
       <div className="pb-1 text-[10px] text-stone-400">设了「在某地」会自动补一条「位于」关系边；删边不会清掉这里的位置（避免误清）。位置说明会一并注入给 AI。</div>

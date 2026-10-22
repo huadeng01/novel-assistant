@@ -17,7 +17,6 @@ const ghostBtn = 'rounded-lg border border-stone-300 bg-stone-50 px-4 py-1.5 tex
 // 别名/知情人用表单字符串(aliasesStr/knowersStr)承载，与 NewAssetModal 同范式，并向后兼容长篇页原 knowersStr 契约；保存时由父页转数组。
 // 向后兼容：新增 props(assets/chapterNo/onQuickCreate)可选，长篇页不传也能用(LinkEditor/StatePanel 候选为空则手填)。
 export default function EditAssetModal({ editDraft, setEditDraft, onClose, onSave, onDelete, onMerge, perVol = 40, assets = [], chapterNo = 0, onQuickCreate }) {
-  // P1-11：改名撞上名册里另一个已有资产时，暂存命中项、弹出三选一面板（合并 / 仍要改名 / 回去改），
   //   不再让「保存修改」直接落库造成两条同名资产（边/悬空判定全歧义）。hooks 必须在 early-return 之前调用。
   const [conflict, setConflict] = useState(null) // { hit } | null
   const [nameErr, setNameErr] = useState(false) // M-G：空名保存被拦时提示
@@ -43,7 +42,6 @@ export default function EditAssetModal({ editDraft, setEditDraft, onClose, onSav
     }
     onClose()
   }
-  // P2：支持 Esc 关闭（与项目里各弹窗 / 续写页确认弹窗一致）——原来只能点 ✕ / 取消 / 遮罩
   useEffect(() => {
     if (!draftId) return
     const onKey = (e) => {
@@ -54,7 +52,6 @@ export default function EditAssetModal({ editDraft, setEditDraft, onClose, onSav
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draftId, dirty])
   if (!editDraft) return null
-  // M7：与 ContinuePage.applyStateSettlement 对齐——它按资产名给任意类型写 state，故所有类型都显示 StatePanel；
   //   原白名单 ['person','group','item','beast'] 排除 faction/place/skill，会导致 AI 结算写了状态、编辑弹窗却看不到也改不了。
   const showState = true
   const showTier = editDraft.type === 'person' || editDraft.type === 'group'
@@ -101,11 +98,8 @@ export default function EditAssetModal({ editDraft, setEditDraft, onClose, onSav
                 value={editDraft.type || 'person'}
                 onChange={(e) => {
                   const type = e.target.value
-                  // item6（第十轮）：切类型清掉不再适用的 holder(仅 item/beast)/controller(仅 place)——门控(:164/:175)只藏 UI 不清值 ⟹ 旧值残留、经 onSave→normalizeAsset 落库成脏字段。
                   const clearHolder = type !== 'item' && type !== 'beast'
                   const clearCtrl = type !== 'place'
-                  // 次修11（第十一轮·存疑A）：EditAssetModal 编辑的是**既有资产**——清 holder/controller 会让 onSave→rebuildDerivedEdges 按空值重算、静默移除原有 held_by/controlled_by 边（用户数据）。
-                  //   故确有会被移除的关系时先 confirm，不静默删。（NewAssetModal 是新建、无既有数据，保持 item6 直接清值、不加 confirm。）
                   const curHolder = editDraft.holder != null ? editDraft.holder : ((editDraft.links || []).find((l) => l.type === 'held_by') || {}).to || ''
                   const curCtrl = editDraft.controller != null ? editDraft.controller : ((editDraft.links || []).find((l) => l.type === 'controlled_by') || {}).to || ''
                   const losing = (clearHolder && String(curHolder).trim()) || (clearCtrl && String(curCtrl).trim())
@@ -175,8 +169,6 @@ export default function EditAssetModal({ editDraft, setEditDraft, onClose, onSav
             />
           </div>
 
-          {/* P1-12：持有者 / 控制者输入（与 NewAssetModal 对齐）——held_by / controlled_by 边由这两个字段自动生成，
-              原来这里没有输入框，用户想改/删这两类边「无从下手」，只能去删边、保存后又被 normalizeAsset 按字段重建。 */}
           {(editDraft.type === 'item' || editDraft.type === 'beast') && (
             <div>
               <label className={label}>持有者（可空 · 道具/妖兽专用，自动生成「被持有」边）</label>
@@ -188,9 +180,6 @@ export default function EditAssetModal({ editDraft, setEditDraft, onClose, onSav
               />
             </div>
           )}
-          {/* item5：控制者只在 place 渲染——controlled_by 仅 LINK_BY_TYPE.place 白名单含（assets.js:490），
-              faction 白名单是反向的 controls、其余类型都没有；非 place 类型填了 controller，rebuildDerivedEdges:594 白名单过滤会静默丢弃（假成功）。
-              与上方持有者(item||beast，:164)同口径：按 assets.js 实际派生边白名单门控输入框。 */}
           {editDraft.type === 'place' && (
             <div>
               <label className={label}>控制者（可空 · 自动生成「受控于」边）</label>
@@ -211,14 +200,11 @@ export default function EditAssetModal({ editDraft, setEditDraft, onClose, onSav
             selfName={editDraft.name || ''}
             onQuickCreate={onQuickCreate}
           />
-          {/* P1-12：明示三类派生边的来源，避免用户「删了边保存又冒出来」却不知为何 */}
-          {/* 第十轮订正：文案随 item5 门控更新——持有者输入框仅道具/妖兽显示、控制者仅地点显示（原笼统写「上方的持有者、控制者」，对人物等类型指向了并不存在的输入框） */}
           <p className="text-[10px] leading-relaxed text-stone-400">
             注：「位于 / 被持有 / 受控于」这三类边是自动生成的——「位于」来自下方状态面板的<b>位置</b>（所有类型）；「被持有」来自<b>持有者</b>输入框（仅道具/妖兽显示）、「受控于」来自<b>控制者</b>输入框（仅地点显示）。
             直接在关系列表里删这类边、保存后会按来源字段重建；要改请改对应来源（位置改状态面板、持有/控制改对应输入框）。
           </p>
         </div>
-        {/* P1-11：重名三选一面板——命中名册里另一个已有资产时挡在保存前，避免落库出两条同名 */}
         {conflict && (
           <div className="border-t border-amber-200 bg-amber-50 px-5 py-3">
             <p className="text-xs leading-relaxed text-amber-800">

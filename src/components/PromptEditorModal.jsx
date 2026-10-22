@@ -1,9 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { chatStream, writerConfig } from '../lib/llm.js'
 
-// M3：reply 对应的 prompt 指纹（长度 + 首尾各 16 字）——判断"当前编辑的提示词"与"已生成的 reply"是否还对应。
-//   H8 让重开保留 reply，但重开时 prompt 会重置为最新 initialPrompt（或用户又编辑过），旧 reply 就配不上新提示词；
-//   指纹不匹配时禁止「采纳」，避免把上一次提示词的产物写进当前章。
 const promptFingerprint = (s) => {
   const t = String(s == null ? '' : s)
   return `${t.length}:${t.slice(0, 16)}:${t.slice(-16)}`
@@ -17,7 +14,6 @@ export default function PromptEditorModal({
   initialPrompt = '',
   systemPrompt = '',
   thinking = false,
-  // M30：可选采样温度，缺省 undefined = 沿用 chatStream 默认(0.9，适合创作正文)；
   // 结构化抽取类调用(如长篇页「分析原文」出｜分列表格)由调用方传低值(0.3)减少格式漂移、丢行
   temperature,
   onClose,
@@ -28,9 +24,9 @@ export default function PromptEditorModal({
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
   const [truncated, setTruncated] = useState(false)
-  const [empty, setEmpty] = useState(false) // item21：消费 llm.js 的 finish.empty——AI 全程无正文时置真，回复区显式区分「AI 返回空稿」与「还没发送」
-  const [replyFp, setReplyFp] = useState('') // M3：当前 reply 是基于哪个 prompt 生成的（指纹）；与 prompt 不匹配时禁止采纳
-  const [copied, setCopied] = useState(false) // L8：复制成功的瞬时反馈
+  const [empty, setEmpty] = useState(false)
+  const [replyFp, setReplyFp] = useState('')
+  const [copied, setCopied] = useState(false)
   const abortRef = useRef(null)
   const wasOpenRef = useRef(false)
   // 尾批[1]：追踪本次流式已生成的半截正文——catch 里的 `reply` 闭包是 send() 开始时的旧值(已 setReply(''))，
@@ -38,18 +34,12 @@ export default function PromptEditorModal({
   const replyRef = useRef('')
   const copyTimerRef = useRef(null) // L：「已复制」1.5s 复位定时器——卸载时清掉，避免对已卸载组件 setCopied
 
-  // 只在弹窗由关到开的那一刻用 initialPrompt 重置；弹窗开着时父组件上游文本变化不会覆盖用户已改的提示词（item 28）
   useEffect(() => {
     if (open && !wasOpenRef.current) {
       setPrompt(initialPrompt)
-      // H8：重开不再无条件清空 reply——上次已生成(可能已烧 token)的回复保留，避免"生成完未采纳、关掉重开就全丢"。
-      //   提示词仍重置为最新 initialPrompt；若与保留的 reply 不对应，用户可点「重发」。(C1 已另外堵住遮罩误触关闭)
       setError('')
       setSending(false)
-      // 次修13②（第十一轮·存疑F）：重开是新会话（prompt 已重置为 initialPrompt），上次「空稿」的 amber 提示不该继续挂着 → 一并重置 empty。
-      //   与下面 truncated 不同：empty 意味着 reply=''（无任何内容可保留），重置安全；truncated 配对的是 H8 保留的半截稿，故 #10 刻意不重置 truncated。
       setEmpty(false)
-      // #10(H8 回归)：truncated 必须与 reply 成对——H8 已让重开保留 reply，这里就不能再把 truncated 重置为 false，
       //   否则上次的半截稿重开后"可能被截断"警告消失、采纳按钮照常可点，用户会把半截稿当完整结果采纳。
     }
     wasOpenRef.current = open
@@ -63,7 +53,6 @@ export default function PromptEditorModal({
     if (!open) abortRef.current?.abort()
   }, [open])
 
-  // M2：组件随页面卸载时 open 不变(仍 true)，上面那个 [open] effect 不触发 → 在飞的流式请求(如资产分析第 1 段)继续跑白烧额度、
   //   onDelta 还对已卸载组件 setReply。补一个仅卸载触发的 abort cleanup。此修在共享组件里，覆盖所有用 PromptEditorModal 的页面(含 A 区)。
   //   abort 后 chatStream 抛 AbortError，已被 send() 的 catch 静默处理(PE8：标 truncated、不报错)；卸载后 setState 在 React18 是静默 no-op。
   useEffect(() => () => abortRef.current?.abort(), [])
@@ -74,8 +63,8 @@ export default function PromptEditorModal({
       return
     }
     setSending(true)
-    const prevReply = reply // M19：暂存旧回复，请求失败(非用户中断)时回填，避免"点重发→失败→连上次回复也丢、采纳按钮同时失效"
-    const prevFp = replyFp // M3：与 prevReply 成对暂存指纹
+    const prevReply = reply
+    const prevFp = replyFp
     setReply('')
     replyRef.current = '' // 尾批[1]：清空半截追踪，与 setReply('') 同步
     setError('')
@@ -90,26 +79,22 @@ export default function PromptEditorModal({
       messages.push({ role: 'user', content: prompt })
       await chatStream({ messages, onDelta: (t) => { replyRef.current = t; setReply(t) }, signal: ctrl.signal, finishInfo: finish, maxTokens: 16000, thinking, temperature })
       if (finish.truncated || finish.incomplete) setTruncated(true)
-      setEmpty(!!finish.empty) // item21：空稿标记（llm.js finish.empty=!full）。与 incomplete 互斥（incomplete 要求 full 非空）；但与 truncated **不互斥**——
-      //   第十轮订正：truncated=(finishReason==='length') 不要求 full 非空，思考耗尽输出预算时 finishReason='length'(truncated) 而 full=''(empty) 同真 ⟹ 空稿 + 截断两提示同屏（各自表意、不冲突，原注释误称三者互斥）。
-      setReplyFp(promptFingerprint(systemPrompt + '\0' + prompt)) // M3+PE9：这份 reply 对应当前 system+user（system 换了指纹也换）
+      setEmpty(!!finish.empty)
+      setReplyFp(promptFingerprint(systemPrompt + '\0' + prompt))
     } catch (e) {
-      // C2：手动点「停止」(或看门狗 abort) 会留下已流式生成的半截 reply，但此处 catch 到的是 AbortError、
       // await 之后的 setTruncated 永不执行 ⟹ 半截稿会被当成完整结果直接采纳。在 abort 分支补标记截断。
       // PE8：看门狗超时抛的是 TimeoutError（非 AbortError），同样会留下半截 reply——原来走 else 分支 setReply(prevReply)
       //   把半截稿丢掉、truncated 也已在 send 开头清空 ⟹ 用户既丢了这次已烧 token 的半截稿、又看不到截断警告。与 AbortError 同路处理。
       if (e?.name === 'AbortError' || e?.name === 'TimeoutError') {
-        // 次修13①（第十一轮·存疑F）：首个 delta 前就停止/超时（replyRef 为空、无半截稿）→ 置 empty（走"AI 返回空稿"提示）而非 truncated——
         //   空回复框配"回复可能被截断"警告是误导（根本没有内容可截断）。有半截稿才置 truncated + 指纹（可采纳、带截断警告）。
         if (replyRef.current && replyRef.current.trim()) {
           setTruncated(true)
-          setReplyFp(promptFingerprint(systemPrompt + '\0' + prompt)) // M3+PE9：半截 reply 仍对应当前 system+user（可采纳，但带截断警告）
+          setReplyFp(promptFingerprint(systemPrompt + '\0' + prompt))
         } else {
           setEmpty(true)
         }
       } else {
         // 尾批[1]：非中断失败（网络断 / HTTP 错 / 流式中途报错）——若已流式生成了半截正文，保留它供用户抢救（标截断），
-        //   不再无条件 setReply(prevReply) 把这次已烧 token 的半截稿覆盖成旧稿。只有本次一个字都没出来时才回填旧稿(M19)。
         setError(e?.message || String(e))
         const partial = replyRef.current
         if (partial && partial.trim()) {
@@ -117,8 +102,8 @@ export default function PromptEditorModal({
           setReplyFp(promptFingerprint(systemPrompt + '\0' + prompt)) // 半截稿对应当前 system+user
           // reply 已是半截稿（onDelta 设过），不覆盖
         } else {
-          setReply(prevReply) // M19：本次无任何新内容，回填旧回复，不让用户既丢新结果又丢旧结果
-          setReplyFp(prevFp) // M3：指纹与 reply 成对回填，保持对应关系
+          setReply(prevReply)
+          setReplyFp(prevFp)
         }
       }
     } finally {
@@ -128,7 +113,6 @@ export default function PromptEditorModal({
 
   const stop = () => abortRef.current?.abort()
 
-  // L8：复制按钮原来 `navigator.clipboard?.writeText(reply)` 不处理失败也不提示——非安全上下文(http 局域网 IP / file://)下 clipboard 为 undefined 点了没反应，
   //   writeText 的 promise reject 也是未处理 rejection。这里 try/catch +「已复制」瞬时提示，失败时给出手动复制的引导。
   const doCopy = async () => {
     try {
@@ -144,12 +128,9 @@ export default function PromptEditorModal({
 
   if (!open) return null
 
-  // M3+PE9：当前 system+user 与 reply 的指纹不匹配 = 这份 reply 是上一次提示词生成的（H8 重开保留 reply 但 prompt/system 已重置或被编辑）→ 禁止采纳
   const replyStale = !!reply && replyFp !== promptFingerprint(systemPrompt + '\0' + prompt)
 
   return (
-    // C2（审计轮5 记接受、不改）：遮罩用 `sending || reply ? undefined : onClose` 而非别处的 edited 脏检查——
-    //   本弹窗的诉求是「生成中 / 已有回复时别误点遮罩关掉丢了回复」，sending||reply 正好覆盖；重开重置 prompt 为最新 initialPrompt 是 item28 既有取舍(非回归)。
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" onClick={sending || reply ? undefined : onClose} role="dialog" aria-modal="true" aria-label={title}>
       <div
         className="flex max-h-[88vh] w-[min(760px,94vw)] flex-col overflow-hidden rounded-2xl bg-paper shadow-2xl"
@@ -211,7 +192,6 @@ export default function PromptEditorModal({
           </button>
           {onAdopt && (
             <button
-              // item23：onAdopt 增回传第3参 {truncated, empty}——首段在本弹窗生成，其截断/空稿状态不经调用方的分段循环；
               //   ContinuePage 资产分析据此把「第1段」纳入 truncSegs（原来只报第2..N段、漏报首段）。附加参数向后兼容，其余 onAdopt 消费方忽略即可。
               onClick={() => onAdopt(reply, prompt, { truncated, empty })}
               disabled={!reply || sending || replyStale}

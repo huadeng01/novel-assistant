@@ -1,6 +1,6 @@
-// parseAssets.js 回归网（方案甲步骤2）：把前几轮已修的解析行为钉成测试。只测现有代码、不改 src。
-// 覆盖：决策#7 normState 去兜底、H2 同行段头剥壳、H4 faction/place 尾锚、H5 情绪锚末匹配+INTENSITY_RE、
-//   H6/M1 段头单一出处、M1 人物17列、M2 群像尾1列、M3变体 numVolume、M5 ###子标题、M7 cleanDetail、M11③ backfill 收敛。
+// parseAssets.js 的回归测试网：把已经修稳的解析行为钉成用例，防止后续改动悄悄改坏。只测现有代码、不改 src。
+// 覆盖：状态词归一不兜底「活跃」、段头与首行数据同行的剥壳、势力/地点按尾列锚定、情绪锚取最后一个强度标记、
+//   段头判定单一出处、人物 17 列与群像 5 列的列数漂移、卷号列拒自由文本章号、### 子标题不关段、详情剥 markdown、章号回填单一出处。
 import { describe, it, expect } from 'vitest'
 import {
   parseAnalyze, parseBookAssets, parseAssetTable, parseExpandAssets,

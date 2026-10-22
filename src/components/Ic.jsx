@@ -1,9 +1,5 @@
 // 统一图标组件：全站以 lucide 线条图标替代 emoji，
 // 颜色跟随 currentColor（自动适配墨黑/朱砂主题），尺寸跟随字号。
-// B28：删掉 12 个全站零引用的死图标键（doc/scroll/ok/gear/shield/target/chart/scene/film/rerun/stop/chat）
-//   及其独占的 11 个 lucide import（FileText 保留——notepad 仍在用）。删前已核对全部动态取值：
-//   App TABS(n={t.icon}) = pencil/book/mountain/sprout/flame/user；ContinuePage CollapseBlock(icon) = globe/user/map/hourglass；
-//   RanksPage Chip(icon) = globe/notepad/library/ban；两处三元 = rolling/wand/sparkle——均不含这 12 个。Ic 对未知名 return null，误删即图标静默消失，故逐一核实。
 import {
   Activity, Archive, Ban, BookOpen, Bookmark, Check, ChevronDown,
   ClipboardList, Download, Feather, FileInput, FileText, Flame, Globe,
@@ -52,6 +48,7 @@ const MAP = {
   chevron: ChevronDown,  // 🔽 折叠 / 展开
 }
 
+// 图标组件：按名字 n 返回一个内联 SVG 图标，全站按钮与标题共用同一套图标。
 export default function Ic({ n, className = '', ...rest }) {
   const C = MAP[n]
   if (!C) return null

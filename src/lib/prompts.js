@@ -22,6 +22,7 @@ const STYLE_SYSTEM = `你是一位资深小说编辑，擅长把一位作者的�
 {"style_profile": "对作者写作习惯的完整描述，700~1000 字，逐维度展开、每个维度都给出采样中的具体依据与可执行的模仿要点（要具体到‘句长偏短、对话多省略提示语、段落多在3行内’这种可照做的程度，而非‘文笔优美’这类空话）", "habits": ["可执行模仿指令1（动宾结构，照着做即可，如‘动作戏用不超过15字的短句连缀，一段最多3句’）", "可执行模仿指令2", "可执行模仿指令3", "可执行模仿指令4", "可执行模仿指令5", "可执行模仿指令6", "可执行模仿指令7", "可执行模仿指令8"], "samples": ["从采样片段中原样摘录的典型段落1（150~300字）", "原样摘录的典型段落2", "原样摘录的典型段落3"]}
 habits 必须是能直接指导落笔的模仿指令，不是抽象评价，且应聚焦【可复用的语言习惯指纹】——作者偏爱哪些词、什么语气基调、对话与叙述的口头禅、称呼与语气词习惯、特征动词与搭配——即换个情节也照用的遣词造句习惯，而非规定固定句式结构；【严禁把修辞套路写成硬指标】不得写出「必须用排比」「以感叹号收束」「每章至少 N 处排比/意象罗列」这类句式配额或强制修辞——风格是语言习惯指纹，不是句式模板；若原著确有具象罗列/排比笔法，只客观描述为「作者偶用以顿号或逗号分隔的具象罗列增强气势」的倾向，不规定数量、不强制感叹号、不作为每章必写项；且 8 条中至少 2 条必须是「节奏平衡」类硬指令（如「长短句错落：铺陈背景与心理处照原著本来的节奏写长句，但长句内部必须逗号密集；动作戏与对话用短句」「禁止为模仿而堆砌生僻字与文白夹杂——模仿笔触不等于牺牲叙事节奏与张力」）；【节奏平衡≠压句长】严禁写出「长句必须切碎为短句」「一律改用短句」这类反向指令——若原著以长句为主，节奏平衡类 habit 必须写成「保留原著的长句节奏，长句内部用逗号/顿号切开小句」，否则蒸馏档案会把整本书推成一片短句；【标点约束】habits 中严禁出现任何「省略标点/不用逗号/长句不断开/无引号无标点混排」类指令；凡涉及长句铺陈、排比或罗列多项的习惯，必须同时写明「项与项之间用顿号或逗号分隔」——原著的长句是逗号密集的长句，不是无标点的长串；samples 必须是给定采样片段里逐字存在的原文，不得改写、拼接或自创，且仅供内化笔触——后续写作严禁照抄其原句、人物、专名或情节。`
 
+// 原文蒸馏文风的提示词，返回 system 与 user 两条。
 export function styleAnalyzeMessages(samples) {
   const body = samples.map((s, i) => `【片段${i + 1}】\n${s}`).join('\n\n')
   return [
@@ -49,11 +50,12 @@ export function styleAnalyzeMessages(samples) {
 //     所以移除对检测侧零影响（纯提示词侧松绑）。
 //   · 「不由」→「不由得」：此前提示词禁「不由」而检测器只认「不由得」，两侧口径分叉。统一取「不由得」
 //     （固定副词短语，AI 腔指纹明确；「不由」单独出现多属「不由自主」等正常搭配，禁它误伤更高）。
-const AI_FLAVOR_BANNED_WORDS = [ // B28：仅下方 system 提示词内部拼接用，去 export
+const AI_FLAVOR_BANNED_WORDS = [
   '宛如', '犹如', '恰似', '仿佛画卷', '空气仿佛凝固', '如诗如画', '意味深长',
   '嘴角勾起', '嘴角扬起', '眸光微闪', '眼神闪过', '眼底闪过', '眸中闪过',
   '不禁', '不由得', '心中暗想', '心中五味杂陈',
 ]
+// 去除 AI 味的通用规则段，多个提示词共用。
 export const NO_AI_FLAVOR_RULE = `【去除 AI 味】请像一位真实的作者一样自然书写，严禁使用"AI 腔"套路表达：
 1. 禁用"${AI_FLAVOR_BANNED_WORDS.join('、')}"等空洞修饰；
 2. 禁止形容词堆砌、"XX 的 XX"式空洞排比、每句都叠加修饰语（此条针对抽象修饰语的空洞堆叠；若本书文风档案或模仿清单里确有具象意象罗列的笔法，可照该书风格自然使用，但不得凭空硬造、不设固定配额、更不得以感叹号强行拔高气势；本书风格不含排比时，一律不要插入）；
@@ -81,26 +83,13 @@ export const NO_AI_FLAVOR_RULE = `【去除 AI 味】请像一位真实的作者
 // （逗号 6.68/百字 vs 原著 7.6、run-on 0、均句长 39.8 vs 40.2）；而旧版把「长句/连缀/无引号」也一并补上纪律后过度矫正：
 // 均句长掉到 21.9（原著 40.2）、长句% 13.1（原著 38.6）、感叹号 15→1、独立判官 9→4/16——把作品推向了不像原著的方向。
 // 不改写与标点无关的习惯，幂等（补过一次的 habit 因已含「顿号」不会重补）。
-// item17：verb×object 组合补全——此前只认「(不用|不加|省略|无|不要|省掉|不带|不需)标点」，漏掉「不用逗号」(object 缺逗号) 与「少用标点」(verb 缺少用/少加/减少)；
-//   两类都会让模型少用标点、产出 run-on 长串却不被剔除。改成 (verb)(object) 组合、object 含逗号（顿号不纳入：不用顿号多以逗号替代，不致 run-on，纳入反而误伤正当习惯）。
 const HABIT_DROP_RE = /(不用|不加|省略|省掉|不带|不需|不要|无|少用|少加|减少)(标点|逗号)/
-// DROP 的**否定式豁免**（L33 项3）：上面那条只认字面、不分极性，于是「…不连成无标点字串」这种**要求用标点**
 // 的 habit 被整条剔除。历史实测曾有两条真实损失（玄幻路径 preset:perfect 与默认路径 preset:prometheus 各一条含「不连成无标点字串」的 habits）。
-//   ⚠ 订正(M-K4)：那两条 habits 已随档3「每本 habits 精简到 3 条」被改写、prometheus 整份档案亦已删除 ⟹ 原举的「perfect habits[2] 四字短语排比」「到达模型 8→7 条」等具体字面/条数均已过时；
-//   此处只保留**豁免机制本身**的 why：DROP 只剔「肯定式省标点」，否定式（实为要求用标点）必须豁免。
 // 豁免口径刻意窄：必须是「否定词 + 写成/连成 + ≤4 字 + 无标点/无分隔」这个形状，
 // ⟹「不用标点」「省略标点」这类**肯定式**指令不含「写成/连成」，一条都不会被豁免，DROP 原有威力一字不减。
 const HABIT_DROP_NEG_RE = /(不|严禁|不得|不要)(写成|连成|写成一片|连成一片)[^。；]{0,4}(无标点|无分隔|无逗号)/
 const HABIT_PATCH_RE = /(排比|罗列|列举|一气呵成|连成一片|五个以上|四个以上|三个以上)/
 const HABIT_PATCH_TAIL = '（项与项之间用顿号或逗号分隔，不得连成无分隔的字串）'
-// ④（审计 R18-B2 的残留缺口）直角引号口径的 habit **就地改写**成中文双引号：
-// 病因 —— 原 utils.QUOTE_PAIRS_DOUBLE（已随 utils M12 删除）只认弯双引号与直双引号（窄口径是刻意的：直角引号在详纲与正文里大量用于
-//   专名、术语、系统面板、书名，纳入判据等于让专名引用也能把整章判失败），而规划侧提示词要求对白一律用
-//   中文双引号 ⟹ 只要 habit 让模型用直角引号写台词，那句台词就落在原 scriptedDialogueMissing（hard blocker，已随暗箱流水线删除）
-//   的视野之外，「详纲写好的台词有没有兑现」静默假阴。
-// 为什么拦在这里：预置 5 本档案的该字面量已在 presetStyles.js 就地改过（B2 那一路），但用户自己蒸馏的档案
-//   仍会把「直角引号」写进 habits，并随 style.js blendHabits 的配额进注入清单（实测 resolveStyleRec('',[该档案])
-//   → 注入 7 条里含 1 条）。净化只在注入端这个 choke point 做一次，存量档案与新蒸馏档案一并生效。
 // 触发口径刻意窄（只认「把直角引号当对白口径写」的 habit）：① 出现「直角引号」这个词；② 空引号对；
 //   ③ 开引号紧贴对白类关键词（中间不跨逗号/句号/分号/顿号/括号，至多 4 字）。
 //   ⟹ 预置档案里「提示语从简（「道」「笑道」或直接省略）」这种**引用词语**的直角引号不在射程内
@@ -114,6 +103,7 @@ const HABIT_QUOTE_PAIR_RE = /「([^「」]*)」/g
 // 低于原著区间 28.6~65.8）。同样在注入端（choke point）纠偏，存量档案也一并生效；幂等（已含「纠偏」的不重补）。
 const HABIT_SHORTEN_RE = /(切碎为短句|切成短句|拆成短句|一律改用短句|全部改用短句|都用短句|改成一片短句)/
 const HABIT_SHORTEN_TAIL = '（纠偏：此处「短句节奏」指长句内部用小句切开、逗号密集，不是把全书写成一片短句；铺陈背景与心理仍保留原著本来的长句节奏）'
+// 把写作习惯列表净化为最多三条可执行的白话（去否定句、去重复），供注入成文提示词前调用。
 export function sanitizeHabits(habits) {
   const list = Array.isArray(habits) ? habits.filter((h) => typeof h === 'string' && h.trim()) : []
   const out = []
@@ -122,7 +112,6 @@ export function sanitizeHabits(habits) {
   let shortened = 0
   let requoted = 0
   for (const raw of list) {
-    // L33 项3：否定式提及（「…不连成无标点字串」）不是「要求省标点」，豁免剔除，继续走下面三条既有判定。
     if (HABIT_DROP_RE.test(raw) && !HABIT_DROP_NEG_RE.test(raw)) {
       removed++
       continue
@@ -141,7 +130,6 @@ export function sanitizeHabits(habits) {
       shortened++
       continue
     }
-    // M9：幂等判据同时认「顿号」与「逗号」——habit 已自带"以逗号分隔"时不再重补同义尾注（原只认顿号，会误伤 infinite 档案 habits[4]）
     if (HABIT_PATCH_RE.test(h) && !h.includes('顿号') && !h.includes('逗号')) {
       out.push(h + HABIT_PATCH_TAIL)
       patched++
@@ -159,8 +147,6 @@ export function sanitizeHabits(habits) {
 //   不写第二份字面量（COMMON §4.8：两份手写副本必然漂移）。styleBlockOf 的渲染结果曾与改造前逐字节相同：
 //   块的顺序、条件、措辞、换行一律未动（本段代码由 scripts/p4d_shared/patch_styleblock.mjs 从旧实现程序化
 //   取出后重排，字面量没有手抄）。原钉在 src/lib/__tests__/p4dSharedCut.test.js（已随暗箱流水线删除）；styleBlockOf 本体亦删，现仅 styleSkinBlockOf 一处内插、只被 versionMessages 消费。
-// M12：VERBATIM_LEAK_MIN_LEN（原「连续 N 字与范例雷同即视为抄袭」的门限）已删除——检测器 verbatimLeakScan 早随暗箱流水线删除，
-//   styleProfileBlock 的【防原文】句在方案 E 改轻量版后也不再引用它 ⟹ 零消费方的死符号。（samples 现为合成范例，防照抄真书的门已无意义。）
 const styleProfileBlock = (style) => (style ? `\n\n【作者文风档案 — 这是本次写作的笔触标杆，必须逐条落实到字里行间】\n${style}\n落笔要求：主动模仿上述句式长短、对话密度与提示语用法、段落节奏、描写取舍与用词修辞，让成文的“笔触感”与档案一致；但内容、人物、情节必须完全原创，只学“怎么写”，不抄“写什么”。【度约束】模仿笔触不等于牺牲叙事节奏与张力：长短句必须错落，动作戏用短句，严禁为形似而堆砌长句、生僻字或文白夹杂导致节奏拖沓；宁可形似七分而节奏流畅，不要形似十分而神散。【标点纪律·硬要求】原著的长句之所以能读，靠的是逗号/顿号/分号把小句切开，而不是不用标点：【长句照写】句长节奏一律以本书文风档案蒸馏出的语言指纹为准，不要为了“安全”而把全书改写成一片短句；档案里写明长句占比高的，铺陈背景与心理处就照它本来的节奏写长句，动作与对话处用短句，两者必须交错；但长句内部必须逗号密集，任何相邻标点之间不得超过 40 字；若本书文风确有排比或罗列同类项的笔法，项与项之间必须用顿号或逗号分隔，严禁写成无分隔的字串（本书风格不含排比时不必强造）；内心独白/心声同样适用本纪律，不得因为不用引号就连标点一并省掉。【对白引号·硬要求】凡角色开口说出的话（有声对白）必须用中文双引号“”完整包裹，严禁把说出口的话不加引号直接混进叙述；但角色没说出口的内心独白/心声沿用原著笔法，可以不用引号，按其原有的引出方式或直接融入叙事段落——区分标准只有一个：说给别人听的必须加引号，只在心里想的可不加。本条只规范引号有无，绝不改变句长、逗号密度或任何其他文风特征（防止重蹈旧版把引号与长句纪律捆绑后的过度矫正）。【防原文】文风范例仅供内化笔触，严禁在正文照抄其原句、人物、专名或情节。` : '')
   // 无条件场景级落笔底线（不依赖是否绑定文风书）：未绑文风书时上面【作者文风档案】整块不输出，
   // 模型堆感官形容的默认倾向就毫无对抗力（《慈航市》第一幕 ch2/ch3 实测：对话往返被连续多段环境/感官描写冲散）。
@@ -233,6 +219,7 @@ const REVIEW_SYSTEM = `你是一位资深小说编辑，负责点评用户提交
 1. 如果原文已经写得很好，need_revision 置为 false。
 2. 无论是否需要修改，都必须给出具体的 review 点评，避免空话套话。`
 
+// 改写润色四版本的提示词。
 export function reviewMessages({ text }) {
   return [
     { role: 'system', content: REVIEW_SYSTEM },
@@ -252,6 +239,7 @@ function versionSystem(angle) {
 3. suggestions 至少给出 2 条。`
 }
 
+// 单版本定向改写的提示词。
 export function versionMessages({ style, habits, forbidden, samples, text, index }) {
   const angle = VERSION_ANGLES[index] || VERSION_ANGLES[0]
   return [
@@ -277,7 +265,6 @@ export function sampleNovel(content, segments = 7, perLength = 2500) {
     cur += (cur ? '\n' : '') + p
   }
   if (cur) chunks.push(cur)
-  // item18：段数下限钳到 2——segments<=1 时 step=(n-1)/(segments-1) 除零得 Infinity，i*step 出 NaN，
   //   idx 混入 NaN → 返回数组含 undefined（下游拼成「【片段N】undefined」）。钳到 2 至少给首+尾两块，与「强制含首尾」语义一致。
   const seg = Math.max(2, segments)
   if (chunks.length <= seg) return chunks
@@ -313,16 +300,40 @@ const ANALYZE_SYSTEM = `你是一位严谨的小说内容分析师。任务是�
   "characters": [
     {"name": "人物姓名", "identity": "身份/职业（原文有依据才写）", "personality": "性格特征（原文有依据才写）", "description": "原文中关于该人物的其他关键信息"}
   ],
-  "outline": "原文已经写到的故事大纲/情节脉络（没有则为空字符串）",
-  "timeline": [
-    {"stage": "阶段名称（用开篇/发展/转折/高潮/当前等描述性阶段，不要用真实时间）", "summary": "该阶段原文已经发生的关键情节"}
-  ]
+  "outline": "原文已经写到的故事大纲/情节脉络（没有则为空字符串）"
 }`
 
+// 原文分析（世界观/人物/大纲/故事线）的提示词。
 export function analyzeMessages({ text }) {
   return [
     { role: 'system', content: ANALYZE_SYSTEM },
     { role: 'user', content: `请分析以下小说原文，严格只提取原文中明确出现的信息，未提及的留空：\n\n${text}` },
+  ]
+}
+
+// 时间事件账本（分段）的提示词：把一段原文里所有的时间点与事件逐条记下来。
+// 时间只记原文明写的（「第三年春」「两日后」这类字面表述），原文没写就留空串，禁止推断；
+// 事件不遗漏：情节转折、场景切换、时间跳转、人物行动节点都各成一条；单独的时间点、单独的事件也可以各成一条。
+const CHRONICLE_SYSTEM = `你是小说时间线编辑。读下面这一段小说原文，把这一段里出现的所有时间与事件逐条记录成账本。
+
+【记录规则】
+1. 每条记录三个字段：chapter、time 与 event。chapter 填该事件所在章节的章号（只认原文里明写的章节标题，如「第12章」「第十二章」，填纯数字 12；本段没有章节标题就填空字符串）。time 只填原文**明写**的时间表述（如「第三年春」「两日后」「腊月十五」「开战当天」），逐字提取、不改写；原文这一条没写时间就填空字符串，**绝对不要推断或编造时间**。
+2. event 用一句话讲清该时间点上、或该处发生了什么（谁做了什么 / 场景切换到哪 / 什么转折 / 什么结果）。
+3. 不遗漏：这一段里的每个情节转折、场景切换、时间跳转、人物行动节点都要有一条记录；但同一场景内的琐碎连续动作要合并成一条（如「他起身、披衣、推门」记一条「他起身推门出门」），不要一句一动地刷条数。一段原文的输出控制在 8 至 25 条。只有时间没有重大事件、或只有事件没有明写时间的，也各成一条。
+4. 按原文出现顺序排列。
+5. 只记这一段原文里实际写到的内容，不预测后续、不补未发生的事、不引入段外信息。
+
+【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容、解释或代码块标记：
+{
+  "entries": [
+    {"chapter": "所在章号纯数字，没有则空字符串", "time": "原文明写的时间表述，没有则空字符串", "event": "该时间/该处发生的事件一句话"}
+  ]
+}`
+
+export function chronicleMessages({ text }) {
+  return [
+    { role: 'system', content: CHRONICLE_SYSTEM },
+    { role: 'user', content: `请记录以下小说片段的时间与事件账本：\n\n${text}` },
   ]
 }
 
@@ -338,10 +349,6 @@ export const ASSET_TYPE_WORDS = ['人物', '群像', '势力', '地点', '道具
 // 契约签名（A/C 接线依赖）：analyzeAssetsMessages({ roster, source, chapterNo, unit?, chapterLine? }) → messages[]
 //   roster：已建档资产名册，可传渲染好的字符串，或传 [{name,type,detail}] 数组（本函数内部渲染成名册文本）。
 //   source：本章/本段原文；chapterNo：当前章号（用于「生效章/章号」列的参照）。
-//   item35（统筹裁定·参数化，不硬改「本段」）：unit（默认 '章'）+ chapterLine（默认「【当前章号】第 N 章」）两个**可选**入参，
-//     让同一提示词对两种调用都成立——长篇页「结算本章状态」分析真·本章，用默认值（unit='章'，叙述措辞与位置行逐字不变）；
-//     续写页「分析原文→资产」分析的是整本/粘贴原文的切片（非按章），传 unit='段'（叙述措辞变「本段原文」）+ chapterLine 说明分段范围，
-//     不再对续写页谎称「本章 / 第 0 章」。⚠ 只参数化**叙述性**「本章」；输出列名「透出章/生效章/章号」是 parseAnalyze 的解析锚，保持不变。
 // ⚠ ASSET_ANALYZE_SYSTEM 定义在函数体内（不是模块级 const）：它内插 LANG_RULE，而 LANG_RULE 声明在本文件末尾，
 //   模块级提前求值会触发 TDZ；放函数体内则调用时 LANG_RULE 早已初始化。
 export function analyzeAssetsMessages({ roster, source, chapterNo, unit = '章', chapterLine }) {
@@ -379,8 +386,6 @@ export const CONTINUE_ANGLES = [
   { title: '版本四', temp: 0.9, desc: '更大胆地发挥，探索剧情可能的不同处理方式，确保与其他三个版本在叙述和走向上有明显区别。' },
 ]
 
-// item19：续写目标字数单一出处——continueSystem / followupSystem 的规则6此前各手抄一份「约 1500 字」，
-//   改一处漏一处会让「自定义续写」与「探索后续」两条路径的长度要求分叉。
 const CONTINUE_TARGET_WORDS = 1500
 
 function continueSystem(angle) {
@@ -408,6 +413,7 @@ const SUMMARIZE_SYSTEM = `你是一位小说编辑。请为以下小说前文写
 【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容：
 {"summary": "摘要正文"}`
 
+// 长原文前文压缩摘要的提示词。
 export function summarizeMessages({ text }) {
   return [
     { role: 'system', content: SUMMARIZE_SYSTEM },
@@ -418,24 +424,23 @@ export function summarizeMessages({ text }) {
 // 续写页文风策略（方案 E · 续写删文风块）：续写起点就是用户提供的原文，原文结尾本身即最好的文风范例，
 //   故续写不再注入蒸馏文风档案块（styleSkinBlockOf 的 profile/habits），改为一句「参照原文风格续写」。
 //   style/habits/samples 三个入参保留为**可选且忽略**（向后兼容：ContinuePage 现仍会传，C 删其文风 UI 后即不传）；
-//   forbidden（用户自定义禁用词）仍**消费**（item11）——forbiddenBlockOf 数据驱动、空即 0 字，不违方案 E 删文风块初衷。
-//   探索后续(followupMessages)/纳入改写(incorporateReviseMessages) 同此策略（均已删 styleSkinBlockOf、保留 forbiddenBlockOf）；仅改写(versionMessages)仍注入文风档案块。
 const CONTINUE_STYLE_HINT = '\n\n【文风】参照上方原文（尤其结尾段落）的行文风格、句式节奏、用词习惯与叙事笔触续写，保持笔触前后一致；原文本身就是最好的文风范例，不另附文风档案。'
-export function continueMessages({ text, summary, world, characters, outline, timeline, style, habits, forbidden, samples, instruction, index }) {
+// 续写四个方向的提示词。
+export function continueMessages({ text, summary, world, characters, outline, chronicle, style, habits, forbidden, samples, instruction, index }) {
   const angle = CONTINUE_ANGLES[index] || CONTINUE_ANGLES[0]
   // 背景资料一律放在原文【之前】：原文结尾是唯一的续写起点，必须留在 user 消息的最后（紧邻任务行）。
   // 旧版把 ctx 拼在原文之后，且故事线标着「原文已写到的情节，续写紧接其后」——它成了模型就近取的锚点，
   // 而那份梳理停在「分析原文」的时刻：用户点「纳入原文」后再续写，模型仍从旧进展接着写，于是吐出跟上一次几乎相同的内容，
-  // 非得重跑一次「分析原文」刷新 timeline/outline 才正常。
+  // 非得重跑一次「分析原文」刷新账本/大纲才正常。
   let ctx = ''
   if (instruction) ctx += `\n\n【用户续写指令（最高优先级，必须遵循）】\n${instruction}`
   if (summary) ctx += `\n\n【前文摘要（原文较长，仅提供摘要作为上下文）】\n${summary}`
   if (world) ctx += `\n\n【世界观设定（用户提供，可作为续写依据）】\n${world}`
   if (characters) ctx += `\n\n【人物卡（用户提供，可作为续写依据）】\n${characters}`
   if (outline) ctx += `\n\n【故事大纲（用户提供，仅作参考；可能滞后于下方原文）】\n${outline}`
-  if (timeline && timeline.length) {
-    ctx += `\n\n【已有故事线（分析时点的情节梳理，仅作参考；可能滞后于下方原文，情节进展以原文结尾为准）】\n`
-    ctx += timeline.map((t, i) => `${i + 1}. ${t.stage}：${t.summary}`).join('\n')
+  if (chronicle && chronicle.length) {
+    ctx += `\n\n【已有时间事件账本（按原文顺序的时间与事件记录，仅作参考；可能滞后于下方原文，情节进展以原文结尾为准）】\n`
+    ctx += chronicle.map((t, i) => `${i + 1}. ${t.chapter ? `第${t.chapter}章` : ''}${t.time ? `【${t.time}】` : ''}${t.event}`).join('\n')
   }
   const bg = ctx.trim()
   return [
@@ -469,17 +474,17 @@ function followupSystem(angle) {
 
 // 续写页「探索不同方向」文风策略（方案 E · 同 continueMessages）：原文结尾即最好的文风范例，删文风块、改注入 CONTINUE_STYLE_HINT。
 //   style/habits/forbidden/samples 保留为**可选且忽略**（向后兼容 ContinuePage 现有调用；C 下一波删续写页文风 UI 后即不传）。
-export function followupMessages({ text, summary, world, characters, outline, timeline, style, habits, forbidden, samples, index }) {
+export function followupMessages({ text, summary, world, characters, outline, chronicle, style, habits, forbidden, samples, index }) {
   const angle = FOLLOWUP_ANGLES[index] || FOLLOWUP_ANGLES[0]
-  // 同 continueMessages：背景资料前置，原文收尾，避免滞后的故事线抢走续写起点
+  // 同 continueMessages：背景资料前置，原文收尾，避免滞后的账本抢走续写起点
   let ctx = ''
   if (summary) ctx += `\n\n【前文摘要（原文较长，仅提供摘要作为上下文）】\n${summary}`
   if (world) ctx += `\n\n【世界观设定（仅作参考；可能滞后于下方原文）】\n${world}`
   if (characters) ctx += `\n\n【人物卡（仅作参考）】\n${characters}`
   if (outline) ctx += `\n\n【故事大纲（仅作参考；可能滞后于下方原文）】\n${outline}`
-  if (timeline && timeline.length) {
-    ctx += `\n\n【已有故事线（分析时点的情节梳理，仅作参考；可能滞后于下方原文，情节进展以原文结尾为准）】\n`
-    ctx += timeline.map((t, i) => `${i + 1}. ${t.stage}：${t.summary}`).join('\n')
+  if (chronicle && chronicle.length) {
+    ctx += `\n\n【已有时间事件账本（按原文顺序的时间与事件记录，仅作参考；可能滞后于下方原文，情节进展以原文结尾为准）】\n`
+    ctx += chronicle.map((t, i) => `${i + 1}. ${t.chapter ? `第${t.chapter}章` : ''}${t.time ? `【${t.time}】` : ''}${t.event}`).join('\n')
   }
   const bg = ctx.trim()
   return [
@@ -544,6 +549,7 @@ const DIAGNOSE_SYSTEM = `你是一位资深小说编辑，负责对给定的小�
 【输出协议】严格按以下 JSON 格式输出，不要输出任何其他内容：
 {"storylines": [{"name": "故事线名称", "progress": "当前进展与未决问题"}], "pace_issues": ["问题描述"], "foreshadows": [{"content": "伏笔内容", "suggestion": "建议回收时机与方式"}], "suggestions": ["建议1"]}`
 
+// 故事线与节奏诊断的提示词。
 export function diagnoseMessages({ text, context }) {
   return [
     { role: 'system', content: DIAGNOSE_SYSTEM },
@@ -581,7 +587,6 @@ export function rankInsightMessages({ platformName, listName, books }) {
   ]
 }
 
-// ==================== P1-P5「Thread-driven 流程」三个提示词已删除（t-deadswitch-cleanup ①）====================
 // 这里原本是本文件的最后一节：rollingHorizonMessages（滚动 horizon 规划）、chapterBriefMessages（逐章戏剧简报
 // replanner）、chapterWriteMessages（精简 writer）。删除依据与顺序：
 //   · 它们唯一的生产调用点是 LongFormPage 的 planChapterThreads / generateThreadChapter，而那两个函数只被
@@ -603,8 +608,6 @@ export function rankInsightMessages({ platformName, listName, books }) {
 //   「迎霞锻体天际刚泛鱼肚白…」—— 首 4 字逐字等于该章标题且与正文无标点相连（2/4 章命中）；而
 //   原 outputHygiene.stripGluedTitle（已随暗箱流水线删除）的第⑥（4 字内断句）⑦（残句以人名开头）两道闸门对这一形态**故意只留痕不剥**
 //   （残句首字是实词、首个标点落在第 6~7 字）⟹ 输出端兜不住，只能生成端预防。
-//   （审计 L10 的「第15章【转】渡口封了」不能作为本条依据：那是标题字段带定位标签，已由 stripChapterHeadLabel
-//   确定性治理，与「正文首句粘连标题」是两回事。）
 
 // 全项目统一的语言规则（单一出处）：不硬编题材语域，世界机制与比喻一律取自本书世界观内部说法；
 // 「把现代词换成世界观说法」是正向祈使（主动转换），不用「用现代科技词汇时换成…」那种条件句（反向、反而暗示可以用现代词）。

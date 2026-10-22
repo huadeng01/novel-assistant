@@ -11,7 +11,6 @@ export default function ClarifyModal({ open, questions = [], title = '补全逻�
       setIdx(0)
       setAnswers(questions.map(() => ({ option: -1, free: '' })))
     }
-    // M26：依赖 questions.length 而非 questions 身份，避免父组件传入新数组身份(派生表达式/重渲染)时把用户已答的题静默清空、跳回第1题
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, questions.length])
 
@@ -24,7 +23,6 @@ export default function ClarifyModal({ open, questions = [], title = '补全逻�
   const answeredCount = answers.filter((a) => a.option >= 0 || (a.free || '').trim()).length
 
   return (
-    // L28：已答过题(answeredCount>0)时遮罩不响应点击，避免误点弹窗外丢弃全部答案(重答需重新生成问题=一次 AI 调用)；× 与「取消」按钮仍可关闭
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" onClick={answeredCount > 0 ? undefined : onClose} role="dialog" aria-modal="true" aria-label="补全问题">
       <div
         className="flex max-h-[88vh] w-[min(640px,94vw)] flex-col overflow-hidden rounded-2xl bg-paper shadow-2xl"

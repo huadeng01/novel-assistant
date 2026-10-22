@@ -16,23 +16,14 @@ import { resolveStyleRec } from '../lib/longform.js'
 
 // 5.3：题材来源——useLibrary 暴露 genre（localStorage 持久化；绑定的书会用其文风档案里存的 genre）。
 // 下面 resolveStyleRec 第三参传 lib.genre，genreSkinOf 据此映射主导嗓音；选「不限」时回落默认嗓音（行为同改造前）。
-// M20：续写页(ContinuePage)已删除文风块（不再解析/注入文风、不消费 genre，改由 continueMessages 的 CONTINUE_STYLE_HINT 直接参照原文风格），
-//   故 genre 现仅本页（改写润色）消费；原「两页喂同一份池、嗓音一致」的对照说明已随续写页文风块(effectiveStyle/stylePool)移除而失效，删去。
 
-// H10：改写页草稿的 localStorage 键（原文 + 点评/4版本结果），刷新/切 tab 不丢
 const REVISE_DRAFT_KEY = 'na_revise_draft'
 
-// P1-14：原文指纹（长度 + 首尾各 16 字）——把「点评/4 版本」结果与产出它的那份原文绑定。
-//   用户改了原文后，旧结果不再对应当前原文；指纹不匹配就灰显 + 提示，避免把针对旧原文的改写当成当前原文的结果。
 const textFp = (s) => {
   const t = String(s == null ? '' : s)
   return `${t.length}:${t.slice(0, 16)}:${t.slice(-16)}`
 }
 
-// item2（第十轮）：result「毒丸草稿」防护——chatJSON→extractJSON 不做类型归一，模型把 revised_text/title/review/suggestions
-//   返成数组/对象时，直接渲染会抛「Objects are not valid as a React child」→ 整页落 PageErrorBoundary；而 result 已写进 localStorage(:96)，
-//   刷新/切回持续崩、错误边界「回到改写页」再崩，用户只能「清空小说与档案」逃生。载入(草稿)与生成(运行时)两处 setResult 前统一 String() 归一各字段。
-//   与 item10 的结构校验合并到此：非对象→null；needRevision→布尔；versions 非数组→[]；元素字段一律 String() 归一（对象会成「[object Object]」，丑但不崩、可重生成）。
 const sanitizeResult = (r) => {
   if (!r || typeof r !== 'object') return null
   const str = (v) => (v == null ? '' : String(v))
@@ -55,9 +46,9 @@ const sanitizeResult = (r) => {
   return { ...r, needRevision: !!r.needRevision, review: str(r.review), versions }
 }
 
+// 改写润色页：粘贴片段生成四个修改版本，可纳入原文或导出。
 export default function RevisePage({ apiKey, onNeedKey }) {
   const lib = useLibrary()
-  // H10：原文 + 结果(点评/4版本)从 localStorage 恢复——原先零持久化，App 条件渲染切走即卸载、刷新丢失已烧 token 的 4 版本
   // L：草稿只 JSON.parse 一次（原来 text/result/resultFp 三个 useState 各解析同一个 key 三次）
   const [draftSnapshot] = useState(() => {
     try {
@@ -67,11 +58,9 @@ export default function RevisePage({ apiKey, onNeedKey }) {
     }
   })
   const [text, setText] = useState(() => (draftSnapshot && typeof draftSnapshot.text === 'string' ? draftSnapshot.text : ''))
-  // item10+item2：草稿里的 result 可能是旧结构/损坏（缺 versions 数组）或「毒丸」（revised_text/title/review 是数组/对象）——载入时统一过 sanitizeResult
   //   （结构校验 + 各字段 String() 归一），避免 :296/:335 直接 result.versions.length 抛 TypeError、或渲染非字符串抛「Objects are not valid as a React child」
   //   → 整页落 PageErrorBoundary 且随 localStorage(:96) 刷新/切回持续崩。needRevision 为真但 versions 空时正好走"没产出有效版本，请重试"提示而非崩溃。
   const [result, setResult] = useState(() => sanitizeResult(draftSnapshot && draftSnapshot.result)) // {needRevision, review, versions}
-  // P1-14：产出当前 result 时的原文指纹（与 result 成对持久化/恢复）
   const [resultFp, setResultFp] = useState(() => (draftSnapshot && typeof draftSnapshot.resultFp === 'string' ? draftSnapshot.resultFp : ''))
   const [loading, setLoading] = useState(false)
   const [elapsed, setElapsed] = useState(0)
@@ -111,7 +100,6 @@ export default function RevisePage({ apiKey, onNeedKey }) {
 
   useEffect(() => () => clearInterval(timerRef.current), [])
 
-  // H10：text/result 变化后防抖落 localStorage（改写片段 + 4 版本通常远小于 5MB 配额；超配额/隐私模式静默跳过，不影响本次使用）
   useEffect(() => {
     const t = setTimeout(() => {
       try {
@@ -122,7 +110,6 @@ export default function RevisePage({ apiKey, onNeedKey }) {
     }, 500)
     return () => clearTimeout(t)
   }, [text, result, resultFp])
-  // H10 flush 兜底：防抖有 500ms 窗口，切 tab 卸载 / pagehide 时若正好落在窗口内会丢最后一段编辑 → 用 ref 存最新草稿，unmount 与 pagehide 各立即落盘一次
   const reviseDraftRef = useRef({ text, result, resultFp })
   useEffect(() => {
     reviseDraftRef.current = { text, result, resultFp }
@@ -183,7 +170,6 @@ export default function RevisePage({ apiKey, onNeedKey }) {
   const runGenerate = async (groups) => {
     setPromptConfirm(null)
     setLoading(true)
-    // L7：生成中不再 setResult(null)——保留上次 result 直到新结果到达；否则"生成中切 tab"会被 H10 的 unmount flush 把 null 落盘、永久覆盖掉上次的 4 版本(与 M18 意图相悖)
     setVersionProgress(0)
     setElapsed(0)
     // M-A：本次生成的中断句柄——卸载时 abort，点评 + 4 版本(并发)不再后台空跑烧额度
@@ -217,7 +203,6 @@ export default function RevisePage({ apiKey, onNeedKey }) {
         versions = results.filter((r) => !r.error && r.revised_text)
         const failed = results.filter((r) => r.error)
         if (!mountedRef.current) return // M-A：已卸载，丢弃结果不上屏
-        // M18：全 4 版都失败时不要再报"已展示成功版本"(实际 0 版、版本区不渲染会误导)，单独给明确文案
         if (results.length > 0 && failed.length === results.length) {
           setErr(`${VERSION_ANGLES.length} 个版本全部生成失败：${failed.map((f) => f.title).join('、')}。请检查 API Key / 余额 / 网络后重试。`)
         } else if (failed.length) {
@@ -226,13 +211,12 @@ export default function RevisePage({ apiKey, onNeedKey }) {
       }
 
       if (!mountedRef.current) return // M-A：已卸载，丢弃结果不上屏
-      setResult(sanitizeResult({ needRevision, review, versions })) // item2：运行时也归一——AI 把 revised_text/title/review 返成数组/对象时不崩、且写进 localStorage 的不是毒丸
-      setResultFp(textFp(text)) // P1-14：记下这份结果对应的原文指纹（text 为发提示词时的原文，确认弹窗期间原文不可改）
+      setResult(sanitizeResult({ needRevision, review, versions }))
+      setResultFp(textFp(text))
     } catch (e) {
       if (!mountedRef.current) return
       if (e?.name === 'AbortError') return // M-A：卸载中断，不报错、不上屏
       setErr(e?.message || String(e)) // 第11轮[10]：非 Error 抛出时 e.message 为 undefined，界面会完全不提示——兜底成字符串
-      // L7/M18：生成中已保留旧 result(未 setResult(null))，失败不动它 → 旧点评/版本自然还在，既不会丢新结果也不会被 null 覆盖旧结果
     } finally {
       genCtrlRef.current = null
       clearInterval(timerRef.current)
@@ -256,7 +240,6 @@ export default function RevisePage({ apiKey, onNeedKey }) {
     }
   }
 
-  // P1-14：当前原文与「产出这份结果的原文」指纹不一致 = 结果对应修改前的原文（用户改了原文但没重新生成）
   const resultStale = !!result && resultFp !== textFp(text)
 
   return (
@@ -270,11 +253,6 @@ export default function RevisePage({ apiKey, onNeedKey }) {
           <section className="glass-card rounded-2xl bg-paper p-5 shadow-sm">
             <div className="flex items-center justify-between">
               <h2 className="text-base font-bold"><Ic n="pencil" /> 粘贴要修改的片段</h2>
-              {/* P1-15：徽标加 stylePool.length>0——getAll('styles') 失败时 stylePool=[]、resolveStyleRec 返回 null（四格全空、实际没贴合任何文风），
-                  原条件只看 selectedBook&&style 会照样显「已贴合文风」，是假承诺 */}
-              {/* item8：再加 profile 非空门控——空 profile 的书其档案被 stylePool 过滤掉(:78 只收 s.profile 非空)、resolveStyleRec 回落预置聚合(style.js:126)，
-                  此时生效的是预置基调而非本书文风；原条件只看 lib.style 真值会假报「已贴合《书名》文风」（P1-15 只补了 stylePool=[] 一路，漏了空 profile 这一路）。
-                  profile 为空时改显中性「预置基调」提示，不冒领本书专属文风（贴合本项目「提示词透明」范式：给真实信号而非隐藏）。 */}
               {lib.selectedBook && stylePool.length > 0 && !!String(lib.style?.profile || '').trim() && (
                 <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs text-emerald-700">已贴合《{lib.selectedBook.title || lib.selectedBook.name}》文风</span>
               )}
@@ -309,11 +287,8 @@ export default function RevisePage({ apiKey, onNeedKey }) {
           </section>
 
           {/* 诊断看板：梳理片段的故事线与节奏问题（含伏笔是否收太早） */}
-          {/* item20：cacheKey 复用 textFp（长度+首尾各16字）——原 `${text.length}_${text.slice(0,16)}` 只含长度+头部，
-              等长同头改尾的两份原文会命中同一缓存、拿到旧诊断。纳入尾部指纹后尾部改动即换键。前缀仍是 na_diag_rev_（DiagnosePanel 的同类清理按前3段判定，不受影响）。 */}
           {text && <DiagnosePanel apiKey={apiKey} text={text} disabled={loading} cacheKey={`na_diag_rev_${textFp(text)}`} />}
 
-          {/* P1-14：原文已改、结果还是旧原文的——明确提示并灰显，避免把针对修改前原文的点评/版本当成当前原文的结果 */}
           {resultStale && (
             <section className="rounded-2xl border border-amber-300 bg-amber-50 p-4">
               <p className="text-sm font-semibold text-amber-800"><Ic n="notepad" /> 下面的点评与版本对应「修改前」的原文</p>
@@ -367,8 +342,7 @@ export default function RevisePage({ apiKey, onNeedKey }) {
             </section>
           )}
 
-          {/* 尾批[2]：判定需修改、但 4 个版本都没产出有效正文（revised_text 全空、又没报错）——原来这块什么都不渲染，
-              用户只看到「需要修改」却没有任何版本、也没有解释。补一条明确提示，引导重试。 */}
+          {/* AI 判定需要修改、但四个版本都没产出有效正文时，给一条明确提示引导重试，而不是留一块空白 */}
           {result && result.needRevision && result.versions.length === 0 && (
             <section className={`rounded-2xl border border-amber-200 bg-amber-50 p-5 ${resultStale ? 'opacity-50' : ''}`}>
               <p className="text-sm font-semibold text-amber-800">AI 判定需要修改，但这次没产出有效的改写版本</p>
@@ -390,7 +364,6 @@ export default function RevisePage({ apiKey, onNeedKey }) {
       {promptConfirm && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
-          // P1-16：已编辑过提示词则遮罩不响应——避免误点遮罩一下就把改过的 5 组提示词全丢（与 PromptEditorModal C1 / DiagnosePanel / RanksPage 统一口径）。✕ 与「取消」仍可关（是明确操作）。
           onClick={() => { if (!promptConfirm.edited) setPromptConfirm(null) }}
           role="dialog"
           aria-modal="true"

@@ -1,24 +1,20 @@
-// 通用小工具
-// M12：原 quote/speech/dedup/clause/sentence 等 34 个导出（QUOTE_PAIRS / QUOTE_PAIRS_DOUBLE / QUOTE_CHAR_RE /
-//   quotedSpans / quotedLinesOf / speechQuoteSpans / attributeSpeechQuotes / speechVerbReOf / normalizeForDedup /
-//   stripFixedPunct / FIXED_PUNCT_RE / clauseFragments / sentenceSpans / isSpeechQuote / isDigitOnlyQuote /
-//   DISPLAY_* / SPEECH_* / CLAUSE_* / SENTENCE_* / ELLIPSIS_SRC / READOUT_TAIL_RE / MIN_FRAG_LEN 等）
-//   只被已物理删除的暗箱流水线（continuity / threads / voice / knowledge / foreshadowLeak）消费；暗箱删除后全为零消费方，
-//   已连同其内部 helper 与实测取证注释一并移除（用户拍板确认删除）。下面 6 个是仍被页面/hooks 使用的零依赖小工具（uid / countWords / downloadBlob / downloadText / copyText / mapLimit）。
+// 全站共用的小工具集合：id 生成、字数统计、localStorage 容错读写、浏览器下载、复制、并发受限的 map。
+// 这些函数都不依赖业务数据，任何页面和 lib 都可以直接 import。
 
+// 生成一个短随机 id。
 export function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
 }
 
-// C40：语义 = 去掉所有空白后的**字符数**（非「词数」）。中文按字计数，与全站 UI 的「N 字」显示、各阈值（如导入「少于100字」、续写「至少几十字」）口径一致，用户无感。
-//   函数名 countWords 是历史遗留（英文习惯叫法），本轮**不改名**：改名要动 8 处跨文件引用、收益低风险高；以本注释钉住真实语义即可。
+// 统计去掉所有空白后的字符数。中文按字计数，与全站界面上「N 字」的显示和各处字数阈值口径一致。
+// 函数名叫 countWords 是历史遗留（英文习惯叫法），实际语义是字符数。
 export function countWords(text) {
   return (text || '').replace(/\s/g, '').length
 }
 
-// B27：localStorage 读写容错单一出处。隐私模式/禁用存储/配额满时 getItem/setItem 会**抛错**（不只是返回 null），
-//   渲染期裸读（如 useState 初始化、writerProvider()）抛错 = 整页白屏。读失败返回 null、写失败静默。
-//   原 App.jsx（多行版）与 llm.js（单行版）各留一份逐字等价的副本，现下沉到此、两处改 import。
+// localStorage 读写的容错包装，全站单一出处。隐私模式、禁用存储、配额满时读写会直接抛错而不是返回 null，
+// 渲染期裸读（如 useState 初始化）抛错会导致整页白屏，所以这里统一吞掉异常。
+// 读失败返回 null；写返回布尔值表示是否真的写进去了，调用方可据此避免「看起来成功实际没存」；删除失败静默（清除本就是无操作）。
 export function safeGetItem(key) {
   try {
     return localStorage.getItem(key)
@@ -26,15 +22,25 @@ export function safeGetItem(key) {
     return null
   }
 }
+// 写一条 localStorage 记录，返回布尔值表示是否真的写进去。
 export function safeSetItem(key, val) {
   try {
     localStorage.setItem(key, val)
+    return true
   } catch {
-    /* 隐私模式/配额满：忽略 */
+    return false
+  }
+}
+// 删一条 localStorage 记录，存储不可用时静默（清除本就是无操作）。
+export function safeRemoveItem(key) {
+  try {
+    localStorage.removeItem(key)
+  } catch {
+    /* 存储不可用时清除本就是无操作 */
   }
 }
 
-// 触发浏览器下载一个 Blob —— 下载逻辑单一出处（L尾批：此前 utils.downloadText 与 docio.triggerDownload 各写一份逐字相同的 createObjectURL+a.click+revoke）
+// 触发浏览器下载一个 Blob。下载逻辑的单一出处，避免各处各写一份创建链接、点击、回收的代码。
 export function downloadBlob(filename, blob) {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -46,21 +52,19 @@ export function downloadBlob(filename, blob) {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-// 下载为文件（平板上会走系统的"存储到文件"流程）
+// 把一段文本下载为文件。平板上会走系统的「存储到文件」流程。
 export function downloadText(filename, text, type = 'text/plain') {
   downloadBlob(filename, new Blob([text], { type: `${type};charset=utf-8` }))
 }
 
+// 复制文本到剪贴板，返回是否成功。优先用现代 clipboard 接口；
+// 部分浏览器（如 iOS Safari 某些场景）不可用时降级为临时 textarea 选中复制。
+// 任何失败都返回 false 而不抛错，由调用方据此提示「复制失败」。
 export async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text)
     return true
   } catch {
-    // iOS Safari 部分场景下 clipboard 不可用，降级为选中复制。
-    // item12：整段 fallback 包 try/catch + execCommand 存在性守卫——execCommand 在部分浏览器已移除，
-    //   裸调会在 catch 内再抛 TypeError → copyText 的 promise reject，调用方(RevisePage/ContinuePage 复制按钮无 try/catch)
-    //   卡在"复制"态并产生未处理 rejection。改为永不抛：成功返 true、任何失败返 false，由调用方据 false 提示"复制失败"。
-    //   finally 兜住 ta.remove()，避免 execCommand 抛错时 textarea 残留在 body。
     let ta = null
     try {
       ta = document.createElement('textarea')
@@ -78,11 +82,12 @@ export async function copyText(text) {
   }
 }
 
-// 并发受限的 map：最多同时跑 limit 个，返回与 items 同序的结果数组
+// 并发受限的 map：最多同时跑 limit 个任务，返回与输入同序的结果数组。
+// 任一任务失败即停止领取新任务并抛出该错误（已跑完的结果丢弃），避免白费额度或产生多余副作用。
 export async function mapLimit(items, limit, fn) {
   const results = new Array(items.length)
   let next = 0
-  let failed = false // L(尾批)：单点失败即置位，其余 worker 停止取新 item（此前 Promise.all reject 后其他 worker 仍把剩余 items 跑完，白费额度/可能产生副作用）
+  let failed = false
   const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
     while (next < items.length && !failed) {
       const i = next++

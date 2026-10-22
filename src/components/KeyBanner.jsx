@@ -1,6 +1,7 @@
 // 未配置 API Key 时显示的引导横幅（文案跟随当前选中的写作引擎：DeepSeek / 通义千问）
 import { writerProviderLabel } from '../lib/llm.js'
 
+// 缺 API Key 的提示条：引导用户去「我的」页配置 Key。
 export default function KeyBanner({ onNeedKey }) {
   return (
     <div className="mb-6 flex flex-col items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 sm:flex-row sm:items-center sm:justify-between">

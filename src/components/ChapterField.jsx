@@ -7,10 +7,7 @@ const inputBase = 'rounded border border-stone-300 bg-stone-50 px-1.5 py-0.5 tex
 // 存在的理由：AssetModal / EditAssetModal / AssetGraphModal 曾各有一套口径（value 绑原始值 vs 绑派生值 vs 显示 0），
 // 用户看到「卷换算:121」却输入框空白，读成「这个字段没有内容」。这里把三件事一次说清：
 //   ① 输入框 value = 原始精确章号（未指定就是空白，绝不显示 0）；
-//   ② 按卷估算值放在**小字**里（不是 placeholder —— placeholder 会被当成值），并明示这是「每卷等章数」的粗映射(H5)；
-//   ③ 无卷号无章号时写「未定（资产表未给透出卷）」，不写「—」（「—」会被读成字段坏了）。
 // 保存语义：空 → 0（含义=回落到按卷估算）；有值 → 精确章号优先。
-// 提交时机：onBlur / Enter 才回调（不用 onChange 每键写库，缓解 M29 按键级写风暴）。
 export default function ChapterField({ kind = 'reveal', asset = null, value, onChange, perVol = 40, label, inline = false, width = 'w-16', disabled = false, id }) {
   const field = chapterFieldOf(asset, perVol, kind)
   // 受控优先：调用方显式给了 value 就用它（表单草稿场景），否则从资产算（卡片直改场景）
@@ -56,7 +53,6 @@ export default function ChapterField({ kind = 'reveal', asset = null, value, onC
       inputMode="numeric"
       disabled={disabled}
       value={text}
-      // P2：placeholder 不再塞按卷估算值——本组件的存在理由（见文件头 ②③）就是「估算值放小字、不放 placeholder，
       //   否则空输入框里显示的数字会被读成已填的值」。估算值已由上面的 hint 小字给出，这里留空。
       placeholder=""
       onChange={(e) => setText(e.target.value)}

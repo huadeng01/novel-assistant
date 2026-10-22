@@ -2,32 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import Ic from '../components/Ic.jsx'
 import { testKeyFor, QWEN_DEFAULT_MODEL, llmUsageText } from '../lib/llm.js'
 import { exportBackup, importBackup, wipeAll } from '../lib/backup.js'
+import { safeGetItem, safeSetItem, safeRemoveItem } from '../lib/utils.js'
 
-// M14：localStorage 读写统一包 try/catch——隐私模式/存储被禁用/配额满时，读抛错会让 useState 初始化失败→白屏，写抛错会让后续 setState/onKeyChange 不执行→"看起来成功实际没存"
-const safeGet = (k, d = '') => {
-  try {
-    const v = localStorage.getItem(k)
-    return v == null ? d : v
-  } catch {
-    return d
-  }
-}
-const safeSet = (k, v) => {
-  try {
-    localStorage.setItem(k, v)
-    return true
-  } catch {
-    return false
-  }
-}
-const safeRemove = (k) => {
-  try {
-    localStorage.removeItem(k)
-  } catch {
-    /* 忽略：存储不可用时清除本就是 no-op */
-  }
-}
-
+// 「我的」页：写作引擎与 Key 配置、使用引导、AI 用量、数据备份与清空。
 export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChange, onKeyChange }) {
   const [input, setInput] = useState(apiKey)
   const [visible, setVisible] = useState(false)
@@ -36,14 +13,13 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
   const [wiping, setWiping] = useState(false)
   // 通义千问（Qwen，第二写作引擎，可选）：Key 与模型 ID 分开管理，都存 localStorage，与 DeepSeek 二选一生效
   const [qwenInput, setQwenInput] = useState(qwenKey || '')
-  const [qwenModelInput, setQwenModelInput] = useState(() => safeGet('qwen_model') || QWEN_DEFAULT_MODEL)
-  // M-C：引擎卡 desc 要显示「已保存生效」的模型，不是输入框里可能还没保存的值——单独存一份已落盘的模型，只在 safeSet 成功后更新
-  const [savedQwenModel, setSavedQwenModel] = useState(() => safeGet('qwen_model') || QWEN_DEFAULT_MODEL)
+  const [qwenModelInput, setQwenModelInput] = useState(() => safeGetItem('qwen_model') || QWEN_DEFAULT_MODEL)
+  // M-C：引擎卡 desc 要显示「已保存生效」的模型，不是输入框里可能还没保存的值——单独存一份已落盘的模型，只在 safeSetItem 成功后更新
+  const [savedQwenModel, setSavedQwenModel] = useState(() => safeGetItem('qwen_model') || QWEN_DEFAULT_MODEL)
   const [qwenVisible, setQwenVisible] = useState(false)
   const [qwenTesting, setQwenTesting] = useState(false)
   const [qwenMsg, setQwenMsg] = useState(null)
   const importRef = useRef(null)
-  // P2：apiKey / qwenKey prop 变化时（别处清除、onKeyChange 刷新、切引擎）同步到本地输入框——
   //   原来 input 只在挂载时取一次 prop，之后 prop 变了输入框仍停在旧值（如已在别处清空，这里还显示着旧 Key）。
   useEffect(() => {
     setInput(apiKey)
@@ -57,8 +33,7 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
   const save = () => {
     const key = input.trim()
     if (!key) return
-    // PP11：safeSet 在存储被禁 / 配额满时返回 false——不消费它就会在没存进去的情况下仍弹「Key 已保存」假成功
-    if (!safeSet('ds_api_key', key)) {
+    if (!safeSetItem('ds_api_key', key)) {
       setMsg({ type: 'err', text: '保存失败：浏览器存储不可用或已满（可能处于隐私模式 / 配额用尽），Key 未保存，请检查后重试。' })
       return
     }
@@ -67,7 +42,7 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
   }
 
   const clear = () => {
-    safeRemove('ds_api_key')
+    safeRemoveItem('ds_api_key')
     setInput('')
     onKeyChange()
     setMsg({ type: 'ok', text: 'Key 已清除。' })
@@ -95,14 +70,13 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
   const saveQwen = () => {
     const key = qwenInput.trim()
     const model = qwenModelInput.trim() || QWEN_DEFAULT_MODEL
-    // M-C：模型 ID 也消费 safeSet 返回值——只有真落盘才更新「已保存模型」显示，存储被禁时不谎报
-    if (safeSet('qwen_model', model)) setSavedQwenModel(model)
+    // M-C：模型 ID 也消费 safeSetItem 返回值——只有真落盘才更新「已保存模型」显示，存储被禁时不谎报
+    if (safeSetItem('qwen_model', model)) setSavedQwenModel(model)
     if (!key) {
       setQwenMsg({ type: 'err', text: '请先填写通义千问 API Key。' })
       return
     }
-    // PP11：同 save——存储不可用时不弹假成功
-    if (!safeSet('qwen_api_key', key)) {
+    if (!safeSetItem('qwen_api_key', key)) {
       setQwenMsg({ type: 'err', text: '保存失败：浏览器存储不可用或已满（可能处于隐私模式 / 配额用尽），Key 未保存，请检查后重试。' })
       return
     }
@@ -111,7 +85,7 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
   }
 
   const clearQwen = () => {
-    safeRemove('qwen_api_key')
+    safeRemoveItem('qwen_api_key')
     setQwenInput('')
     onKeyChange()
     setQwenMsg({ type: 'ok', text: '通义千问 Key 已清除。' })
@@ -125,7 +99,7 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
     }
     // 测试前先落盘模型 ID，确保测试用的就是用户配置的模型（M-C：消费返回值，成功才更新「已保存模型」显示）
     const testModel = qwenModelInput.trim() || QWEN_DEFAULT_MODEL
-    if (safeSet('qwen_model', testModel)) setSavedQwenModel(testModel)
+    if (safeSetItem('qwen_model', testModel)) setSavedQwenModel(testModel)
     setQwenTesting(true)
     setQwenMsg(null)
     try {
@@ -138,7 +112,6 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
     }
   }
 
-  // M-8：导出是唯一的数据逃生口，失败必须明确告知(exportBackup 内部 Promise.all 任一 reject 即整体失败)，不能静默
   const onExport = async () => {
     try {
       await exportBackup()
@@ -152,7 +125,6 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
     const file = e.target.files?.[0]
     e.target.value = ''
     if (!file) return
-    // H4：导入会用备份内容覆盖本机现有的书/文风档案/草稿——backup.js:81-85 直接覆写 na_revise_draft 与向导草稿、无确认，
     //   用户改写页当前未导出的原文 + 已烧 token 的 4 个版本会被替掉。导入前二次确认、明示覆盖范围（B 侧不改，以本侧 confirm 为准）。
     if (
       !window.confirm(
@@ -167,7 +139,6 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
       if (failed > 0) {
         setMsg({ type: 'err', text: `备份导入完成，但有 ${failed} 条记录因缺关键字段或写入失败被跳过（其余已成功）。请切到书库页核对。` })
       } else {
-        // L-14：本页不持有书库列表(useBooks 在改写/续写页)，导入后无法就地刷新；提示切到书库页查看(切页会重新挂载并 refresh)
         setMsg({ type: 'ok', text: '备份导入成功，小说与文风档案已恢复。请切换到「改写润色」或「续写」页，在左侧书库查看导入的书。' })
       }
     } catch (err) {
@@ -179,9 +150,8 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
     setWiping(true)
     try {
       await wipeAll()
-      setMsg({ type: 'ok', text: '已清空本地小说、文风档案、草稿与诊断缓存（API Key、AI 用量账本、题材选择未清）。' }) // M15：文案对齐 wipeAll 实际范围，不再笼统说"全部清空"
+      setMsg({ type: 'ok', text: '已清空本地小说、文风档案、草稿与诊断缓存（API Key、AI 用量账本、题材选择未清）。' })
     } catch (err) {
-      // M-7：wipeAll 失败(IndexedDB 被 blocked / 事务中止)也要退出 loading，否则按钮永久卡在"清空中…"
       setMsg({ type: 'err', text: '清空失败：' + (err && err.message ? err.message : String(err)) })
     } finally {
       setWiping(false)
@@ -239,7 +209,6 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
         <p className="mt-2 text-sm text-stone-500">全站写作类请求走当前选中的引擎，两个 Key 各自独立、可随时切换。</p>
         <div className="mt-3 flex gap-3">
           {[
-            // L5：默认引擎是通义千问（决策3）→ 排在第一，与「默认引擎 qwen」的文案/回落一致，不再让 DeepSeek 打头造成矛盾
             { id: 'qwen', label: '通义千问（默认）', desc: qwenKey ? `已配置 Key · ${savedQwenModel || QWEN_DEFAULT_MODEL}` : '未配置 Key' },
             { id: 'deepseek', label: 'DeepSeek', desc: apiKey ? '已配置 Key' : '未配置 Key' },
           ].map((p) => (
@@ -377,8 +346,6 @@ export default function ProfilePage({ apiKey, qwenKey, provider, onProviderChang
             {wiping ? '清空中…' : '清空小说与档案'}
           </button>
         </div>
-        {/* 必修8（第十一轮）：备份操作（导出/导入/清空）的反馈原来只写 msg、而 msg 仅在顶部 DeepSeek Key 卡(:287)渲染 ⟹ 在底部备份区点了像没反应（消息在离屏的顶部）。
-            这里也渲染同一 msg，让反馈出现在用户操作处附近。msg 文案自描述（「备份已导出」/「Key 已保存」），两区相距远、冗余几乎不同时可见。 */}
         {msg && (
           <p className={`mt-3 rounded-lg px-3 py-2 text-sm ${msg.type === 'ok' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
             {msg.text}
